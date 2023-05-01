@@ -1,0 +1,291 @@
+<html>
+<head>
+<title>kde.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+.s5 { color: #629755; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+kde.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2022 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s2">from </span><span class="s1">dataclasses </span><span class="s2">import </span><span class="s1">dataclass</span>
+<span class="s2">from </span><span class="s1">functools </span><span class="s2">import </span><span class="s1">partial</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Any</span>
+
+<span class="s2">import </span><span class="s1">numpy </span><span class="s2">as </span><span class="s1">np</span>
+<span class="s2">import </span><span class="s1">scipy.stats </span><span class="s2">as </span><span class="s1">osp_stats</span>
+
+<span class="s2">import </span><span class="s1">jax.numpy </span><span class="s2">as </span><span class="s1">jnp</span>
+<span class="s2">from </span><span class="s1">jax </span><span class="s2">import </span><span class="s1">jit</span><span class="s2">, </span><span class="s1">lax</span><span class="s2">, </span><span class="s1">random</span><span class="s2">, </span><span class="s1">vmap</span>
+<span class="s2">from </span><span class="s1">jax._src.numpy.util </span><span class="s2">import </span><span class="s1">check_arraylike</span><span class="s2">, </span><span class="s1">promote_dtypes_inexact</span><span class="s2">, </span><span class="s1">_wraps</span>
+<span class="s2">from </span><span class="s1">jax._src.tree_util </span><span class="s2">import </span><span class="s1">register_pytree_node_class</span>
+<span class="s2">from </span><span class="s1">jax.scipy </span><span class="s2">import </span><span class="s1">linalg</span><span class="s2">, </span><span class="s1">special</span>
+
+
+<span class="s1">@_wraps(osp_stats.gaussian_kde</span><span class="s2">, </span><span class="s1">update_doc=</span><span class="s2">False</span><span class="s1">)</span>
+<span class="s1">@register_pytree_node_class</span>
+<span class="s1">@dataclass(frozen=</span><span class="s2">True, </span><span class="s1">init=</span><span class="s2">False</span><span class="s1">)</span>
+<span class="s2">class </span><span class="s1">gaussian_kde:</span>
+  <span class="s1">neff: Any</span>
+  <span class="s1">dataset: Any</span>
+  <span class="s1">weights: Any</span>
+  <span class="s1">covariance: Any</span>
+  <span class="s1">inv_cov: Any</span>
+
+  <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">dataset</span><span class="s2">, </span><span class="s1">bw_method=</span><span class="s2">None, </span><span class="s1">weights=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s1">check_arraylike(</span><span class="s3">&quot;gaussian_kde&quot;</span><span class="s2">, </span><span class="s1">dataset)</span>
+    <span class="s1">dataset = jnp.atleast_2d(dataset)</span>
+    <span class="s2">if </span><span class="s1">jnp.issubdtype(lax.dtype(dataset)</span><span class="s2">, </span><span class="s1">jnp.complexfloating):</span>
+      <span class="s2">raise </span><span class="s1">NotImplementedError(</span><span class="s3">&quot;gaussian_kde does not support complex data&quot;</span><span class="s1">)</span>
+    <span class="s2">if not </span><span class="s1">dataset.size &gt; </span><span class="s4">1</span><span class="s1">:</span>
+      <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;`dataset` input should have multiple elements.&quot;</span><span class="s1">)</span>
+
+    <span class="s1">d</span><span class="s2">, </span><span class="s1">n = dataset.shape</span>
+    <span class="s2">if </span><span class="s1">weights </span><span class="s2">is not None</span><span class="s1">:</span>
+      <span class="s1">check_arraylike(</span><span class="s3">&quot;gaussian_kde&quot;</span><span class="s2">, </span><span class="s1">weights)</span>
+      <span class="s1">dataset</span><span class="s2">, </span><span class="s1">weights = promote_dtypes_inexact(dataset</span><span class="s2">, </span><span class="s1">weights)</span>
+      <span class="s1">weights = jnp.atleast_1d(weights)</span>
+      <span class="s1">weights /= jnp.sum(weights)</span>
+      <span class="s2">if </span><span class="s1">weights.ndim != </span><span class="s4">1</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;`weights` input should be one-dimensional.&quot;</span><span class="s1">)</span>
+      <span class="s2">if </span><span class="s1">len(weights) != n:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;`weights` input should be of length n&quot;</span><span class="s1">)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+      <span class="s1">dataset</span><span class="s2">, </span><span class="s1">= promote_dtypes_inexact(dataset)</span>
+      <span class="s1">weights = jnp.full(n</span><span class="s2">, </span><span class="s4">1.0 </span><span class="s1">/ n</span><span class="s2">, </span><span class="s1">dtype=dataset.dtype)</span>
+
+    <span class="s1">self._setattr(</span><span class="s3">&quot;dataset&quot;</span><span class="s2">, </span><span class="s1">dataset)</span>
+    <span class="s1">self._setattr(</span><span class="s3">&quot;weights&quot;</span><span class="s2">, </span><span class="s1">weights)</span>
+    <span class="s1">neff = self._setattr(</span><span class="s3">&quot;neff&quot;</span><span class="s2">, </span><span class="s4">1 </span><span class="s1">/ jnp.sum(weights**</span><span class="s4">2</span><span class="s1">))</span>
+
+    <span class="s1">bw_method = </span><span class="s3">&quot;scott&quot; </span><span class="s2">if </span><span class="s1">bw_method </span><span class="s2">is None else </span><span class="s1">bw_method</span>
+    <span class="s2">if </span><span class="s1">bw_method == </span><span class="s3">&quot;scott&quot;</span><span class="s1">:</span>
+      <span class="s1">factor = jnp.power(neff</span><span class="s2">, </span><span class="s1">-</span><span class="s4">1. </span><span class="s1">/ (d + </span><span class="s4">4</span><span class="s1">))</span>
+    <span class="s2">elif </span><span class="s1">bw_method == </span><span class="s3">&quot;silverman&quot;</span><span class="s1">:</span>
+      <span class="s1">factor = jnp.power(neff * (d + </span><span class="s4">2</span><span class="s1">) / </span><span class="s4">4.0</span><span class="s2">, </span><span class="s1">-</span><span class="s4">1. </span><span class="s1">/ (d + </span><span class="s4">4</span><span class="s1">))</span>
+    <span class="s2">elif </span><span class="s1">jnp.isscalar(bw_method) </span><span class="s2">and not </span><span class="s1">isinstance(bw_method</span><span class="s2">, </span><span class="s1">str):</span>
+      <span class="s1">factor = bw_method</span>
+    <span class="s2">elif </span><span class="s1">callable(bw_method):</span>
+      <span class="s1">factor = bw_method(self)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+      <span class="s2">raise </span><span class="s1">ValueError(</span>
+          <span class="s3">&quot;`bw_method` should be 'scott', 'silverman', a scalar, or a callable.&quot;</span>
+      <span class="s1">)</span>
+
+    <span class="s1">data_covariance = jnp.atleast_2d(</span>
+        <span class="s1">jnp.cov(dataset</span><span class="s2">, </span><span class="s1">rowvar=</span><span class="s4">1</span><span class="s2">, </span><span class="s1">bias=</span><span class="s2">False, </span><span class="s1">aweights=weights))</span>
+    <span class="s1">data_inv_cov = jnp.linalg.inv(data_covariance)</span>
+    <span class="s1">covariance = data_covariance * factor**</span><span class="s4">2</span>
+    <span class="s1">inv_cov = data_inv_cov / factor**</span><span class="s4">2</span>
+    <span class="s1">self._setattr(</span><span class="s3">&quot;covariance&quot;</span><span class="s2">, </span><span class="s1">covariance)</span>
+    <span class="s1">self._setattr(</span><span class="s3">&quot;inv_cov&quot;</span><span class="s2">, </span><span class="s1">inv_cov)</span>
+
+  <span class="s2">def </span><span class="s1">_setattr(self</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">value):</span>
+    <span class="s0"># Frozen dataclasses don't support setting attributes so we have to</span>
+    <span class="s0"># overload that operation here as they do in the dataclass implementation</span>
+    <span class="s1">object.__setattr__(self</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">value)</span>
+    <span class="s2">return </span><span class="s1">value</span>
+
+  <span class="s2">def </span><span class="s1">tree_flatten(self):</span>
+    <span class="s2">return </span><span class="s1">((self.neff</span><span class="s2">, </span><span class="s1">self.dataset</span><span class="s2">, </span><span class="s1">self.weights</span><span class="s2">, </span><span class="s1">self.covariance</span><span class="s2">,</span>
+             <span class="s1">self.inv_cov)</span><span class="s2">, None</span><span class="s1">)</span>
+
+  <span class="s1">@classmethod</span>
+  <span class="s2">def </span><span class="s1">tree_unflatten(cls</span><span class="s2">, </span><span class="s1">aux_data</span><span class="s2">, </span><span class="s1">children):</span>
+    <span class="s2">del </span><span class="s1">aux_data</span>
+    <span class="s1">kde = cls.__new__(cls)</span>
+    <span class="s1">kde._setattr(</span><span class="s3">&quot;neff&quot;</span><span class="s2">, </span><span class="s1">children[</span><span class="s4">0</span><span class="s1">])</span>
+    <span class="s1">kde._setattr(</span><span class="s3">&quot;dataset&quot;</span><span class="s2">, </span><span class="s1">children[</span><span class="s4">1</span><span class="s1">])</span>
+    <span class="s1">kde._setattr(</span><span class="s3">&quot;weights&quot;</span><span class="s2">, </span><span class="s1">children[</span><span class="s4">2</span><span class="s1">])</span>
+    <span class="s1">kde._setattr(</span><span class="s3">&quot;covariance&quot;</span><span class="s2">, </span><span class="s1">children[</span><span class="s4">3</span><span class="s1">])</span>
+    <span class="s1">kde._setattr(</span><span class="s3">&quot;inv_cov&quot;</span><span class="s2">, </span><span class="s1">children[</span><span class="s4">4</span><span class="s1">])</span>
+    <span class="s2">return </span><span class="s1">kde</span>
+
+  <span class="s1">@property</span>
+  <span class="s2">def </span><span class="s1">d(self):</span>
+    <span class="s2">return </span><span class="s1">self.dataset.shape[</span><span class="s4">0</span><span class="s1">]</span>
+
+  <span class="s1">@property</span>
+  <span class="s2">def </span><span class="s1">n(self):</span>
+    <span class="s2">return </span><span class="s1">self.dataset.shape[</span><span class="s4">1</span><span class="s1">]</span>
+
+  <span class="s1">@_wraps(osp_stats.gaussian_kde.evaluate</span><span class="s2">, </span><span class="s1">update_doc=</span><span class="s2">False</span><span class="s1">)</span>
+  <span class="s2">def </span><span class="s1">evaluate(self</span><span class="s2">, </span><span class="s1">points):</span>
+    <span class="s1">check_arraylike(</span><span class="s3">&quot;evaluate&quot;</span><span class="s2">, </span><span class="s1">points)</span>
+    <span class="s1">points = self._reshape_points(points)</span>
+    <span class="s1">result = _gaussian_kernel_eval(</span><span class="s2">False, </span><span class="s1">self.dataset.T</span><span class="s2">, </span><span class="s1">self.weights[:</span><span class="s2">, None</span><span class="s1">]</span><span class="s2">,</span>
+                                   <span class="s1">points.T</span><span class="s2">, </span><span class="s1">self.inv_cov)</span>
+    <span class="s2">return </span><span class="s1">result[:</span><span class="s2">, </span><span class="s4">0</span><span class="s1">]</span>
+
+  <span class="s1">@_wraps(osp_stats.gaussian_kde.__call__</span><span class="s2">, </span><span class="s1">update_doc=</span><span class="s2">False</span><span class="s1">)</span>
+  <span class="s2">def </span><span class="s1">__call__(self</span><span class="s2">, </span><span class="s1">points):</span>
+    <span class="s2">return </span><span class="s1">self.evaluate(points)</span>
+
+  <span class="s1">@_wraps(osp_stats.gaussian_kde.integrate_gaussian</span><span class="s2">, </span><span class="s1">update_doc=</span><span class="s2">False</span><span class="s1">)</span>
+  <span class="s2">def </span><span class="s1">integrate_gaussian(self</span><span class="s2">, </span><span class="s1">mean</span><span class="s2">, </span><span class="s1">cov):</span>
+    <span class="s1">mean = jnp.atleast_1d(jnp.squeeze(mean))</span>
+    <span class="s1">cov = jnp.atleast_2d(cov)</span>
+
+    <span class="s2">if </span><span class="s1">mean.shape != (self.d</span><span class="s2">,</span><span class="s1">):</span>
+      <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;mean does not have dimension {}&quot;</span><span class="s1">.format(self.d))</span>
+    <span class="s2">if </span><span class="s1">cov.shape != (self.d</span><span class="s2">, </span><span class="s1">self.d):</span>
+      <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;covariance does not have dimension {}&quot;</span><span class="s1">.format(self.d))</span>
+
+    <span class="s1">chol = linalg.cho_factor(self.covariance + cov)</span>
+    <span class="s1">norm = jnp.sqrt(</span><span class="s4">2 </span><span class="s1">* np.pi)**self.d * jnp.prod(jnp.diag(chol[</span><span class="s4">0</span><span class="s1">]))</span>
+    <span class="s1">norm = </span><span class="s4">1.0 </span><span class="s1">/ norm</span>
+    <span class="s2">return </span><span class="s1">_gaussian_kernel_convolve(chol</span><span class="s2">, </span><span class="s1">norm</span><span class="s2">, </span><span class="s1">self.dataset</span><span class="s2">, </span><span class="s1">self.weights</span><span class="s2">,</span>
+                                     <span class="s1">mean)</span>
+
+  <span class="s1">@_wraps(osp_stats.gaussian_kde.integrate_box_1d</span><span class="s2">, </span><span class="s1">update_doc=</span><span class="s2">False</span><span class="s1">)</span>
+  <span class="s2">def </span><span class="s1">integrate_box_1d(self</span><span class="s2">, </span><span class="s1">low</span><span class="s2">, </span><span class="s1">high):</span>
+    <span class="s2">if </span><span class="s1">self.d != </span><span class="s4">1</span><span class="s1">:</span>
+      <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;integrate_box_1d() only handles 1D pdfs&quot;</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">jnp.ndim(low) != </span><span class="s4">0 </span><span class="s2">or </span><span class="s1">jnp.ndim(high) != </span><span class="s4">0</span><span class="s1">:</span>
+      <span class="s2">raise </span><span class="s1">ValueError(</span>
+          <span class="s3">&quot;the limits of integration in integrate_box_1d must be scalars&quot;</span><span class="s1">)</span>
+    <span class="s1">sigma = jnp.squeeze(jnp.sqrt(self.covariance))</span>
+    <span class="s1">low = jnp.squeeze((low - self.dataset) / sigma)</span>
+    <span class="s1">high = jnp.squeeze((high - self.dataset) / sigma)</span>
+    <span class="s2">return </span><span class="s1">jnp.sum(self.weights * (special.ndtr(high) - special.ndtr(low)))</span>
+
+  <span class="s1">@_wraps(osp_stats.gaussian_kde.integrate_kde</span><span class="s2">, </span><span class="s1">update_doc=</span><span class="s2">False</span><span class="s1">)</span>
+  <span class="s2">def </span><span class="s1">integrate_kde(self</span><span class="s2">, </span><span class="s1">other):</span>
+    <span class="s2">if </span><span class="s1">other.d != self.d:</span>
+      <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;KDEs are not the same dimensionality&quot;</span><span class="s1">)</span>
+
+    <span class="s1">chol = linalg.cho_factor(self.covariance + other.covariance)</span>
+    <span class="s1">norm = jnp.sqrt(</span><span class="s4">2 </span><span class="s1">* np.pi)**self.d * jnp.prod(jnp.diag(chol[</span><span class="s4">0</span><span class="s1">]))</span>
+    <span class="s1">norm = </span><span class="s4">1.0 </span><span class="s1">/ norm</span>
+
+    <span class="s1">sm</span><span class="s2">, </span><span class="s1">lg = (self</span><span class="s2">, </span><span class="s1">other) </span><span class="s2">if </span><span class="s1">self.n &lt; other.n </span><span class="s2">else </span><span class="s1">(other</span><span class="s2">, </span><span class="s1">self)</span>
+    <span class="s1">result = vmap(partial(_gaussian_kernel_convolve</span><span class="s2">, </span><span class="s1">chol</span><span class="s2">, </span><span class="s1">norm</span><span class="s2">, </span><span class="s1">lg.dataset</span><span class="s2">,</span>
+                          <span class="s1">lg.weights)</span><span class="s2">,</span>
+                  <span class="s1">in_axes=</span><span class="s4">1</span><span class="s1">)(sm.dataset)</span>
+    <span class="s2">return </span><span class="s1">jnp.sum(result * sm.weights)</span>
+
+  <span class="s2">def </span><span class="s1">resample(self</span><span class="s2">, </span><span class="s1">key</span><span class="s2">, </span><span class="s1">shape=()):</span>
+    <span class="s5">r&quot;&quot;&quot;Randomly sample a dataset from the estimated pdf 
+ 
+    Args: 
+      key: a PRNG key used as the random key. 
+      shape: optional, a tuple of nonnegative integers specifying the result 
+        batch shape; that is, the prefix of the result shape excluding the last 
+        axis. 
+ 
+    Returns: 
+      The resampled dataset as an array with shape `(d,) + shape`. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">ind_key</span><span class="s2">, </span><span class="s1">eps_key = random.split(key)</span>
+    <span class="s1">ind = random.choice(ind_key</span><span class="s2">, </span><span class="s1">self.n</span><span class="s2">, </span><span class="s1">shape=shape</span><span class="s2">, </span><span class="s1">p=self.weights)</span>
+    <span class="s1">eps = random.multivariate_normal(eps_key</span><span class="s2">,</span>
+                                     <span class="s1">jnp.zeros(self.d</span><span class="s2">, </span><span class="s1">self.covariance.dtype)</span><span class="s2">,</span>
+                                     <span class="s1">self.covariance</span><span class="s2">,</span>
+                                     <span class="s1">shape=shape</span><span class="s2">,</span>
+                                     <span class="s1">dtype=self.dataset.dtype).T</span>
+    <span class="s2">return </span><span class="s1">self.dataset[:</span><span class="s2">, </span><span class="s1">ind] + eps</span>
+
+  <span class="s1">@_wraps(osp_stats.gaussian_kde.pdf</span><span class="s2">, </span><span class="s1">update_doc=</span><span class="s2">False</span><span class="s1">)</span>
+  <span class="s2">def </span><span class="s1">pdf(self</span><span class="s2">, </span><span class="s1">x):</span>
+    <span class="s2">return </span><span class="s1">self.evaluate(x)</span>
+
+  <span class="s1">@_wraps(osp_stats.gaussian_kde.logpdf</span><span class="s2">, </span><span class="s1">update_doc=</span><span class="s2">False</span><span class="s1">)</span>
+  <span class="s2">def </span><span class="s1">logpdf(self</span><span class="s2">, </span><span class="s1">x):</span>
+    <span class="s1">check_arraylike(</span><span class="s3">&quot;logpdf&quot;</span><span class="s2">, </span><span class="s1">x)</span>
+    <span class="s1">x = self._reshape_points(x)</span>
+    <span class="s1">result = _gaussian_kernel_eval(</span><span class="s2">True, </span><span class="s1">self.dataset.T</span><span class="s2">, </span><span class="s1">self.weights[:</span><span class="s2">, None</span><span class="s1">]</span><span class="s2">,</span>
+                                   <span class="s1">x.T</span><span class="s2">, </span><span class="s1">self.inv_cov)</span>
+    <span class="s2">return </span><span class="s1">result[:</span><span class="s2">, </span><span class="s4">0</span><span class="s1">]</span>
+
+  <span class="s2">def </span><span class="s1">integrate_box(self</span><span class="s2">, </span><span class="s1">low_bounds</span><span class="s2">, </span><span class="s1">high_bounds</span><span class="s2">, </span><span class="s1">maxpts=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s5">&quot;&quot;&quot;This method is not implemented in the JAX interface.&quot;&quot;&quot;</span>
+    <span class="s2">del </span><span class="s1">low_bounds</span><span class="s2">, </span><span class="s1">high_bounds</span><span class="s2">, </span><span class="s1">maxpts</span>
+    <span class="s2">raise </span><span class="s1">NotImplementedError(</span>
+        <span class="s3">&quot;only 1D box integrations are supported; use `integrate_box_1d`&quot;</span><span class="s1">)</span>
+
+  <span class="s2">def </span><span class="s1">set_bandwidth(self</span><span class="s2">, </span><span class="s1">bw_method=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s5">&quot;&quot;&quot;This method is not implemented in the JAX interface.&quot;&quot;&quot;</span>
+    <span class="s2">del </span><span class="s1">bw_method</span>
+    <span class="s2">raise </span><span class="s1">NotImplementedError(</span>
+        <span class="s3">&quot;dynamically changing the bandwidth method is not supported&quot;</span><span class="s1">)</span>
+
+  <span class="s2">def </span><span class="s1">_reshape_points(self</span><span class="s2">, </span><span class="s1">points):</span>
+    <span class="s2">if </span><span class="s1">jnp.issubdtype(lax.dtype(points)</span><span class="s2">, </span><span class="s1">jnp.complexfloating):</span>
+      <span class="s2">raise </span><span class="s1">NotImplementedError(</span>
+          <span class="s3">&quot;gaussian_kde does not support complex coordinates&quot;</span><span class="s1">)</span>
+    <span class="s1">points = jnp.atleast_2d(points)</span>
+    <span class="s1">d</span><span class="s2">, </span><span class="s1">m = points.shape</span>
+    <span class="s2">if </span><span class="s1">d != self.d:</span>
+      <span class="s2">if </span><span class="s1">d == </span><span class="s4">1 </span><span class="s2">and </span><span class="s1">m == self.d:</span>
+        <span class="s1">points = jnp.reshape(points</span><span class="s2">, </span><span class="s1">(self.d</span><span class="s2">, </span><span class="s4">1</span><span class="s1">))</span>
+      <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span>
+            <span class="s3">&quot;points have dimension {}, dataset has dimension {}&quot;</span><span class="s1">.format(</span>
+                <span class="s1">d</span><span class="s2">, </span><span class="s1">self.d))</span>
+    <span class="s2">return </span><span class="s1">points</span>
+
+
+<span class="s2">def </span><span class="s1">_gaussian_kernel_convolve(chol</span><span class="s2">, </span><span class="s1">norm</span><span class="s2">, </span><span class="s1">target</span><span class="s2">, </span><span class="s1">weights</span><span class="s2">, </span><span class="s1">mean):</span>
+  <span class="s1">diff = target - mean[:</span><span class="s2">, None</span><span class="s1">]</span>
+  <span class="s1">alpha = linalg.cho_solve(chol</span><span class="s2">, </span><span class="s1">diff)</span>
+  <span class="s1">arg = </span><span class="s4">0.5 </span><span class="s1">* jnp.sum(diff * alpha</span><span class="s2">, </span><span class="s1">axis=</span><span class="s4">0</span><span class="s1">)</span>
+  <span class="s2">return </span><span class="s1">norm * jnp.sum(jnp.exp(-arg) * weights)</span>
+
+
+<span class="s1">@partial(jit</span><span class="s2">, </span><span class="s1">static_argnums=</span><span class="s4">0</span><span class="s1">)</span>
+<span class="s2">def </span><span class="s1">_gaussian_kernel_eval(in_log</span><span class="s2">, </span><span class="s1">points</span><span class="s2">, </span><span class="s1">values</span><span class="s2">, </span><span class="s1">xi</span><span class="s2">, </span><span class="s1">precision):</span>
+  <span class="s1">points</span><span class="s2">, </span><span class="s1">values</span><span class="s2">, </span><span class="s1">xi</span><span class="s2">, </span><span class="s1">precision = promote_dtypes_inexact(</span>
+      <span class="s1">points</span><span class="s2">, </span><span class="s1">values</span><span class="s2">, </span><span class="s1">xi</span><span class="s2">, </span><span class="s1">precision)</span>
+  <span class="s1">d = points.shape[</span><span class="s4">1</span><span class="s1">]</span>
+
+  <span class="s2">if </span><span class="s1">xi.shape[</span><span class="s4">1</span><span class="s1">] != d:</span>
+    <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;points and xi must have same trailing dim&quot;</span><span class="s1">)</span>
+  <span class="s2">if </span><span class="s1">precision.shape != (d</span><span class="s2">, </span><span class="s1">d):</span>
+    <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;precision matrix must match data dims&quot;</span><span class="s1">)</span>
+
+  <span class="s1">whitening = linalg.cholesky(precision</span><span class="s2">, </span><span class="s1">lower=</span><span class="s2">True</span><span class="s1">)</span>
+  <span class="s1">points = jnp.dot(points</span><span class="s2">, </span><span class="s1">whitening)</span>
+  <span class="s1">xi = jnp.dot(xi</span><span class="s2">, </span><span class="s1">whitening)</span>
+  <span class="s1">log_norm = jnp.sum(jnp.log(</span>
+      <span class="s1">jnp.diag(whitening))) - </span><span class="s4">0.5 </span><span class="s1">* d * jnp.log(</span><span class="s4">2 </span><span class="s1">* np.pi)</span>
+
+  <span class="s2">def </span><span class="s1">kernel(x_test</span><span class="s2">, </span><span class="s1">x_train</span><span class="s2">, </span><span class="s1">y_train):</span>
+    <span class="s1">arg = log_norm - </span><span class="s4">0.5 </span><span class="s1">* jnp.sum(jnp.square(x_train - x_test))</span>
+    <span class="s2">if </span><span class="s1">in_log:</span>
+      <span class="s2">return </span><span class="s1">jnp.log(y_train) + arg</span>
+    <span class="s2">else</span><span class="s1">:</span>
+      <span class="s2">return </span><span class="s1">y_train * jnp.exp(arg)</span>
+
+  <span class="s1">reduce = special.logsumexp </span><span class="s2">if </span><span class="s1">in_log </span><span class="s2">else </span><span class="s1">jnp.sum</span>
+  <span class="s1">reduced_kernel = </span><span class="s2">lambda </span><span class="s1">x: reduce(vmap(kernel</span><span class="s2">, </span><span class="s1">in_axes=(</span><span class="s2">None, </span><span class="s4">0</span><span class="s2">, </span><span class="s4">0</span><span class="s1">))</span>
+                                    <span class="s1">(x</span><span class="s2">, </span><span class="s1">points</span><span class="s2">, </span><span class="s1">values)</span><span class="s2">,</span>
+                                    <span class="s1">axis=</span><span class="s4">0</span><span class="s1">)</span>
+  <span class="s1">mapped_kernel = vmap(reduced_kernel)</span>
+
+  <span class="s2">return </span><span class="s1">mapped_kernel(xi)</span>
+</pre>
+</body>
+</html>

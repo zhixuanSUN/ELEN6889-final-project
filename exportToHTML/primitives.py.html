@@ -1,0 +1,516 @@
+<html>
+<head>
+<title>primitives.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+primitives.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2022 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+<span class="s2">&quot;&quot;&quot;Module for state primitives.&quot;&quot;&quot;</span>
+<span class="s3">from </span><span class="s1">functools </span><span class="s3">import </span><span class="s1">partial</span>
+
+<span class="s3">from </span><span class="s1">typing </span><span class="s3">import </span><span class="s1">Any</span><span class="s3">, </span><span class="s1">List</span><span class="s3">, </span><span class="s1">Tuple</span><span class="s3">, </span><span class="s1">Union</span>
+
+<span class="s3">import </span><span class="s1">numpy </span><span class="s3">as </span><span class="s1">np</span>
+
+<span class="s3">from </span><span class="s1">jax </span><span class="s3">import </span><span class="s1">lax</span>
+
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">ad_util</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">core</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">pretty_printer </span><span class="s3">as </span><span class="s1">pp</span>
+<span class="s3">from </span><span class="s1">jax._src.interpreters </span><span class="s3">import </span><span class="s1">ad</span>
+<span class="s3">from </span><span class="s1">jax._src.interpreters </span><span class="s3">import </span><span class="s1">batching</span>
+<span class="s3">from </span><span class="s1">jax._src.interpreters </span><span class="s3">import </span><span class="s1">partial_eval </span><span class="s3">as </span><span class="s1">pe</span>
+<span class="s3">from </span><span class="s1">jax._src.typing </span><span class="s3">import </span><span class="s1">Array</span>
+<span class="s3">from </span><span class="s1">jax._src.state.types </span><span class="s3">import </span><span class="s1">(AbstractRef</span><span class="s3">, </span><span class="s1">ReadEffect</span><span class="s3">, </span><span class="s1">WriteEffect</span><span class="s3">,</span>
+                                  <span class="s1">AccumEffect)</span>
+<span class="s3">from </span><span class="s1">jax._src.util </span><span class="s3">import </span><span class="s1">safe_map</span><span class="s3">, </span><span class="s1">safe_zip</span><span class="s3">, </span><span class="s1">partition_list</span><span class="s3">, </span><span class="s1">tuple_insert</span>
+
+
+<span class="s0">## General utilities</span>
+
+<span class="s0">## JAX utilities</span>
+
+<span class="s1">map</span><span class="s3">, </span><span class="s1">unsafe_map = safe_map</span><span class="s3">, </span><span class="s1">map</span>
+<span class="s1">zip</span><span class="s3">, </span><span class="s1">unsafe_zip = safe_zip</span><span class="s3">, </span><span class="s1">zip</span>
+
+<span class="s0">## get/swap/addupdate implementations</span>
+
+<span class="s0"># `get` reads a value from a `Ref` type, a.k.a.:</span>
+<span class="s0"># a = get_p.bind(x)</span>
+<span class="s0"># or we can read using indices:</span>
+<span class="s0"># a = get_p.bind(x, 0, 1)</span>
+<span class="s0"># Staging out `a = get_p.bind(x)` where the aval of `x` is</span>
+<span class="s0"># `Ref((3,), np.dtype('float32'))` leads to a jaxpr eqn printed like</span>
+<span class="s0">#   a:f32[3] &lt;- x[]</span>
+<span class="s1">get_p = core.Primitive(</span><span class="s4">&quot;get&quot;</span><span class="s1">)</span>
+
+<span class="s3">def </span><span class="s1">_get_impl(ref: AbstractRef</span><span class="s3">, </span><span class="s1">*idx: int</span><span class="s3">, </span><span class="s1">**_):</span>
+  <span class="s3">del </span><span class="s1">ref</span><span class="s3">, </span><span class="s1">idx</span>
+  <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Cannot run stateful primitive.&quot;</span><span class="s1">)</span>
+<span class="s1">get_p.def_impl(_get_impl)</span>
+
+<span class="s1">Indexer = Tuple[Union[int</span><span class="s3">, </span><span class="s1">slice</span><span class="s3">, </span><span class="s1">Array]</span><span class="s3">, </span><span class="s1">...]</span>
+<span class="s0"># or Ellipsis, but that can't be annotated until Python 3.10? (types.EllipsisType)</span>
+
+<span class="s3">def </span><span class="s1">_is_trivial_indexer(idx: Indexer) -&gt; bool:</span>
+  <span class="s3">if </span><span class="s1">idx </span><span class="s3">is </span><span class="s1">...:</span>
+    <span class="s3">return True</span>
+  <span class="s3">if </span><span class="s1">type(idx) </span><span class="s3">is </span><span class="s1">tuple:</span>
+    <span class="s3">if </span><span class="s1">len(idx) == </span><span class="s5">0</span><span class="s1">:</span>
+      <span class="s3">return True</span>
+    <span class="s3">return </span><span class="s1">len(idx) == </span><span class="s5">1 </span><span class="s3">and </span><span class="s1">idx[</span><span class="s5">0</span><span class="s1">] </span><span class="s3">is </span><span class="s1">...</span>
+  <span class="s3">return False</span>
+
+<span class="s3">def </span><span class="s1">_unpack_idx(idx: Indexer</span><span class="s3">, </span><span class="s1">ndim: int</span>
+               <span class="s1">) -&gt; Tuple[Tuple[Array</span><span class="s3">, </span><span class="s1">...]</span><span class="s3">, </span><span class="s1">Tuple[bool</span><span class="s3">, </span><span class="s1">...]]:</span>
+  <span class="s3">if </span><span class="s1">_is_trivial_indexer(idx):</span>
+    <span class="s1">idx = tuple(slice(</span><span class="s3">None</span><span class="s1">) </span><span class="s3">for </span><span class="s1">_ </span><span class="s3">in </span><span class="s1">range(ndim))</span>
+  <span class="s1">indexed_dims_ = [type(i) != slice </span><span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">idx]</span>
+  <span class="s1">_</span><span class="s3">, </span><span class="s1">non_slice_idx = partition_list(indexed_dims_</span><span class="s3">, </span><span class="s1">idx)</span>
+  <span class="s1">indexed_dims = indexed_dims_ + [</span><span class="s3">False</span><span class="s1">] * (ndim - len(indexed_dims_))</span>
+  <span class="s3">import </span><span class="s1">jax.numpy </span><span class="s3">as </span><span class="s1">jnp</span>
+  <span class="s3">return </span><span class="s1">(tuple(map(jnp.int32</span><span class="s3">, </span><span class="s1">non_slice_idx))</span><span class="s3">, </span><span class="s1">tuple(indexed_dims))</span>
+
+<span class="s3">def </span><span class="s1">_get_slice_output_shape(in_shape: Tuple[int</span><span class="s3">, </span><span class="s1">...]</span><span class="s3">,</span>
+                            <span class="s1">idx_shapes: Tuple[Tuple[int</span><span class="s3">, </span><span class="s1">...]</span><span class="s3">, </span><span class="s1">...]</span><span class="s3">,</span>
+                            <span class="s1">indexed_dims: Tuple[bool</span><span class="s3">, </span><span class="s1">...]) -&gt; Tuple[int</span><span class="s3">, </span><span class="s1">...]:</span>
+  <span class="s1">shape_suffix = [d </span><span class="s3">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">d </span><span class="s3">in </span><span class="s1">zip(indexed_dims</span><span class="s3">, </span><span class="s1">in_shape) </span><span class="s3">if not </span><span class="s1">i]</span>
+  <span class="s1">shape_prefix</span><span class="s3">, </span><span class="s1">= set(idx_shapes) </span><span class="s3">or </span><span class="s1">[()]  </span><span class="s0"># tie fighter</span>
+  <span class="s0"># Move shape prefix dimensions to the front</span>
+  <span class="s1">shape = (*shape_prefix</span><span class="s3">, </span><span class="s1">*shape_suffix)</span>
+  <span class="s3">return </span><span class="s1">shape</span>
+
+<span class="s3">def </span><span class="s1">_get_indexer(ref: AbstractRef</span><span class="s3">, </span><span class="s1">idx: Indexer</span>
+                <span class="s1">) -&gt; Tuple[Indexer</span><span class="s3">, </span><span class="s1">Tuple[bool</span><span class="s3">, </span><span class="s1">...]]:</span>
+  <span class="s3">if </span><span class="s1">isinstance(ref.inner_aval</span><span class="s3">, </span><span class="s1">core.ShapedArray):</span>
+    <span class="s1">non_slice_idx</span><span class="s3">, </span><span class="s1">indexed_dims = _unpack_idx(idx</span><span class="s3">, </span><span class="s1">ref.ndim)</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s3">if not </span><span class="s1">_is_trivial_indexer(idx):</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span>
+          <span class="s4">f&quot;Cannot use nontrivial slice on non-shaped `Ref`: </span><span class="s3">{</span><span class="s1">idx</span><span class="s3">}</span><span class="s4">.&quot;</span><span class="s1">)</span>
+    <span class="s1">non_slice_idx</span><span class="s3">, </span><span class="s1">indexed_dims = ()</span><span class="s3">, </span><span class="s1">()</span>
+  <span class="s3">return </span><span class="s1">non_slice_idx</span><span class="s3">, </span><span class="s1">indexed_dims</span>
+
+<span class="s3">def </span><span class="s1">ref_get(ref: Any</span><span class="s3">, </span><span class="s1">idx: Indexer) -&gt; Array:</span>
+  <span class="s2">&quot;&quot;&quot;Reads a value from a `Ref`, a.k.a. value &lt;- ref[idx].&quot;&quot;&quot;</span>
+  <span class="s1">ref_aval = core.get_aval(ref)</span>
+  <span class="s3">if not </span><span class="s1">isinstance(ref_aval</span><span class="s3">, </span><span class="s1">AbstractRef):</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">f&quot;Can only call `get` on a `Ref`: </span><span class="s3">{</span><span class="s1">ref</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+  <span class="s1">non_slice_idx</span><span class="s3">, </span><span class="s1">indexed_dims = _get_indexer(ref</span><span class="s3">, </span><span class="s1">idx)</span>
+  <span class="s3">return </span><span class="s1">get_p.bind(ref</span><span class="s3">, </span><span class="s1">*non_slice_idx</span><span class="s3">, </span><span class="s1">indexed_dims=indexed_dims)</span>
+
+<span class="s0"># `swap` mutates a `Ref`, setting its value and returns its previous value.</span>
+<span class="s0"># b = swap_p.bind(x, a)</span>
+<span class="s0"># It generalizes the setting operation for a `Ref` as we can ignore the return</span>
+<span class="s0"># value:</span>
+<span class="s0"># _ = swap_p.bind(x, a)</span>
+<span class="s0"># `swap_p` also takes in index arguments following the value, i.e.:</span>
+<span class="s0"># _ = swap_p.bind(x, a, 0, 1)</span>
+<span class="s0"># Staging out `b = swap_p.bind(x, a)` where the aval of `x` is</span>
+<span class="s0"># `Ref((3,), np.dtype('float32'))` and the aval of `a` is</span>
+<span class="s0"># `ShapedArray((3,), np.dtype('float32'))` leads to a jaxpr eqn printed like</span>
+<span class="s0">#   b:f32[3], x:Ref{f32[3]} &lt;- x, a</span>
+<span class="s0"># Staging out `_ = swap_p.bind(x, a, i, j)` where the aval of `x` is</span>
+<span class="s0"># `Ref((3,), np.dtype('float32'))` , the aval of `a` is</span>
+<span class="s0"># `ShapedArray((3,), np.dtype('float32'))`, and the avals of both `i` and `j`</span>
+<span class="s0"># are `ShapedArray((), np.dtype('int32'))` leads to a jaxpr eqn printed like</span>
+<span class="s0">#   x:Ref{f32[3]}[i, j] &lt;- a</span>
+<span class="s1">swap_p = core.Primitive(</span><span class="s4">&quot;swap&quot;</span><span class="s1">)</span>
+
+<span class="s3">def </span><span class="s1">_swap_impl(ref: AbstractRef</span><span class="s3">, </span><span class="s1">value: Array</span><span class="s3">, </span><span class="s1">*idx: int</span><span class="s3">, </span><span class="s1">**_):</span>
+  <span class="s3">del </span><span class="s1">ref</span><span class="s3">, </span><span class="s1">value</span><span class="s3">, </span><span class="s1">idx</span>
+  <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Cannot run stateful primitive.&quot;</span><span class="s1">)</span>
+<span class="s1">swap_p.def_impl(_swap_impl)</span>
+
+<span class="s3">def </span><span class="s1">ref_swap(ref: AbstractRef</span><span class="s3">, </span><span class="s1">idx: Indexer</span><span class="s3">, </span><span class="s1">value: Array) -&gt; Array:</span>
+  <span class="s2">&quot;&quot;&quot;Sets a `Ref`'s value and returns the original value.&quot;&quot;&quot;</span>
+  <span class="s1">ref_aval = core.get_aval(ref)</span>
+  <span class="s3">if not </span><span class="s1">isinstance(ref_aval</span><span class="s3">, </span><span class="s1">AbstractRef):</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">f&quot;Can only call `swap` on a `Ref`: </span><span class="s3">{</span><span class="s1">ref</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+  <span class="s1">non_slice_idx</span><span class="s3">, </span><span class="s1">indexed_dims = _get_indexer(ref</span><span class="s3">, </span><span class="s1">idx)</span>
+  <span class="s3">return </span><span class="s1">swap_p.bind(ref</span><span class="s3">, </span><span class="s1">value</span><span class="s3">, </span><span class="s1">*non_slice_idx</span><span class="s3">, </span><span class="s1">indexed_dims=indexed_dims)</span>
+
+<span class="s3">def </span><span class="s1">ref_set(ref: AbstractRef</span><span class="s3">, </span><span class="s1">idx: Indexer</span><span class="s3">, </span><span class="s1">value: Array) -&gt; </span><span class="s3">None</span><span class="s1">:</span>
+  <span class="s2">&quot;&quot;&quot;Sets a `Ref`'s value, a.k.a. ref[idx] &lt;- value.&quot;&quot;&quot;</span>
+  <span class="s1">ref_swap(ref</span><span class="s3">, </span><span class="s1">idx</span><span class="s3">, </span><span class="s1">value)</span>
+
+<span class="s0"># `addupdate_p` mutates a `Ref`, adding a value to its existing value.</span>
+<span class="s0"># Semantically,</span>
+<span class="s0"># ```</span>
+<span class="s0"># addupdate ref a *idx</span>
+<span class="s0"># ```</span>
+<span class="s0"># is equivalent to</span>
+<span class="s0"># ```</span>
+<span class="s0"># b = get ref *idx</span>
+<span class="s0"># c = add b x</span>
+<span class="s0"># _ = swap ref c *idx</span>
+<span class="s0"># ```</span>
+<span class="s1">addupdate_p = core.Primitive(</span><span class="s4">'addupdate'</span><span class="s1">)</span>
+<span class="s1">addupdate_p.multiple_results = </span><span class="s3">True</span>
+
+<span class="s3">def </span><span class="s1">_addupdate_impl(ref: AbstractRef</span><span class="s3">, </span><span class="s1">value: Array</span><span class="s3">, </span><span class="s1">*idx: int):</span>
+  <span class="s3">del </span><span class="s1">ref</span><span class="s3">, </span><span class="s1">idx</span><span class="s3">, </span><span class="s1">value</span>
+  <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Can't evaluate `addupdate` outside a stateful context.&quot;</span><span class="s1">)</span>
+<span class="s1">addupdate_p.def_impl(_addupdate_impl)</span>
+
+<span class="s3">def </span><span class="s1">ref_addupdate(ref: AbstractRef</span><span class="s3">, </span><span class="s1">idx: Indexer</span><span class="s3">, </span><span class="s1">x: Array) -&gt; </span><span class="s3">None</span><span class="s1">:</span>
+  <span class="s2">&quot;&quot;&quot;Mutates a ref with an additive update i.e. `ref[idx] += x`.&quot;&quot;&quot;</span>
+  <span class="s1">ref_aval = core.get_aval(ref)</span>
+  <span class="s3">if not </span><span class="s1">isinstance(ref_aval</span><span class="s3">, </span><span class="s1">AbstractRef):</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">f&quot;Can only call `addupdate` on a `Ref`: </span><span class="s3">{</span><span class="s1">ref</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+  <span class="s1">non_slice_idx</span><span class="s3">, </span><span class="s1">indexed_dims = _get_indexer(ref</span><span class="s3">, </span><span class="s1">idx)</span>
+  <span class="s3">return </span><span class="s1">addupdate_p.bind(ref</span><span class="s3">, </span><span class="s1">x</span><span class="s3">, </span><span class="s1">*non_slice_idx</span><span class="s3">, </span><span class="s1">indexed_dims=indexed_dims)</span>
+
+<span class="s0">## get/set/addupdate abstract evaluation rules</span>
+
+<span class="s3">def </span><span class="s1">_get_abstract_eval(ref_aval: AbstractRef</span><span class="s3">, </span><span class="s1">*idx</span><span class="s3">,</span>
+                       <span class="s1">indexed_dims):</span>
+  <span class="s3">if not </span><span class="s1">isinstance(ref_aval</span><span class="s3">, </span><span class="s1">AbstractRef):</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">f&quot;`get` must be called on `Ref` types: </span><span class="s3">{</span><span class="s1">ref_aval</span><span class="s3">}</span><span class="s4">.&quot;</span><span class="s1">)</span>
+  <span class="s3">if </span><span class="s1">isinstance(ref_aval.inner_aval</span><span class="s3">, </span><span class="s1">core.ShapedArray):</span>
+    <span class="s3">if not </span><span class="s1">isinstance(ref_aval.inner_aval</span><span class="s3">, </span><span class="s1">core.ShapedArray):</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;`get` with nontrivial indexing must be called &quot;</span>
+                       <span class="s4">f&quot;on `ShapedArray` `Ref`: </span><span class="s3">{</span><span class="s1">ref_aval</span><span class="s3">}</span><span class="s4">.&quot;</span><span class="s1">)</span>
+    <span class="s3">if </span><span class="s1">len(indexed_dims) != len(ref_aval.shape):</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;`indexed_dims` must be the same length as `Ref` shape.&quot;</span><span class="s1">)</span>
+    <span class="s3">if </span><span class="s1">sum(indexed_dims) != len(idx):</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">f&quot;Invalid `idx` and `indexed_dims`: </span><span class="s3">{</span><span class="s1">idx</span><span class="s3">}</span><span class="s4">, </span><span class="s3">{</span><span class="s1">indexed_dims</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+    <span class="s1">idx_shapes = tuple(i.shape </span><span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">idx)</span>
+    <span class="s1">shape = _get_slice_output_shape(ref_aval.shape</span><span class="s3">, </span><span class="s1">idx_shapes</span><span class="s3">, </span><span class="s1">indexed_dims)</span>
+    <span class="s1">out_aval = ref_aval.inner_aval.update(shape=shape)</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s3">if </span><span class="s1">idx:</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Cannot index non-shaped array with nontrivial indices.&quot;</span><span class="s1">)</span>
+    <span class="s1">out_aval = ref_aval.inner_aval</span>
+  <span class="s3">return </span><span class="s1">(out_aval</span><span class="s3">, </span><span class="s1">{ReadEffect(</span><span class="s5">0</span><span class="s1">)})</span>
+<span class="s1">get_p.def_effectful_abstract_eval(_get_abstract_eval)</span>
+
+<span class="s3">def </span><span class="s1">_swap_abstract_eval(ref_aval: AbstractRef</span><span class="s3">,</span>
+                        <span class="s1">val_aval: core.AbstractValue</span><span class="s3">,</span>
+                        <span class="s1">*idx: core.ShapedArray</span><span class="s3">, </span><span class="s1">indexed_dims: Tuple[bool]):</span>
+  <span class="s1">out_aval: core.AbstractValue</span>
+  <span class="s3">if not </span><span class="s1">isinstance(ref_aval</span><span class="s3">, </span><span class="s1">AbstractRef):</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">f&quot;`swap` must be called on `Ref` types: </span><span class="s3">{</span><span class="s1">ref_aval</span><span class="s3">}</span><span class="s4">.&quot;</span><span class="s1">)</span>
+  <span class="s3">if </span><span class="s1">isinstance(ref_aval.inner_aval</span><span class="s3">, </span><span class="s1">core.ShapedArray):</span>
+    <span class="s3">if </span><span class="s1">len(indexed_dims) != len(ref_aval.shape):</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;`indexed_dims` must be the same length as `Ref` shape.&quot;</span><span class="s1">)</span>
+    <span class="s3">if </span><span class="s1">sum(indexed_dims) != len(idx):</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">f&quot;Invalid `idx` and `indexed_dims`: </span><span class="s3">{</span><span class="s1">idx</span><span class="s3">}</span><span class="s4">, </span><span class="s3">{</span><span class="s1">indexed_dims</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+    <span class="s1">val_aval = core.raise_to_shaped(val_aval)</span>
+    <span class="s3">assert </span><span class="s1">isinstance(val_aval</span><span class="s3">, </span><span class="s1">core.ShapedArray)</span>
+    <span class="s1">idx_shapes = tuple(i.shape </span><span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">idx)</span>
+    <span class="s1">expected_output_shape = _get_slice_output_shape(</span>
+        <span class="s1">ref_aval.shape</span><span class="s3">, </span><span class="s1">idx_shapes</span><span class="s3">, </span><span class="s1">indexed_dims)</span>
+    <span class="s3">if </span><span class="s1">expected_output_shape != val_aval.shape:</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Invalid shape for `swap`. &quot;</span>
+                       <span class="s4">f&quot;Ref shape: </span><span class="s3">{</span><span class="s1">ref_aval.shape</span><span class="s3">}</span><span class="s4">. &quot;</span>
+                       <span class="s4">f&quot;Value shape: </span><span class="s3">{</span><span class="s1">val_aval.shape</span><span class="s3">}</span><span class="s4">. &quot;</span>
+                       <span class="s4">f&quot;Indices: </span><span class="s3">{</span><span class="s1">idx</span><span class="s3">}</span><span class="s4">. &quot;</span><span class="s1">)</span>
+    <span class="s3">if </span><span class="s1">ref_aval.dtype != val_aval.dtype:</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Invalid dtype for `swap`. &quot;</span>
+                       <span class="s4">f&quot;Ref dtype: </span><span class="s3">{</span><span class="s1">ref_aval.dtype</span><span class="s3">}</span><span class="s4">. &quot;</span>
+                       <span class="s4">f&quot;Value shape: </span><span class="s3">{</span><span class="s1">val_aval.dtype</span><span class="s3">}</span><span class="s4">. &quot;</span><span class="s1">)</span>
+    <span class="s1">out_aval = core.ShapedArray(expected_output_shape</span><span class="s3">, </span><span class="s1">ref_aval.dtype)</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s3">if </span><span class="s1">idx:</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;`swap` with nontrivial indexing must be called &quot;</span>
+                       <span class="s4">f&quot;on `ShapedArray` `Ref`: </span><span class="s3">{</span><span class="s1">ref_aval</span><span class="s3">}</span><span class="s4">.&quot;</span><span class="s1">)</span>
+    <span class="s1">out_aval = ref_aval.inner_aval</span>
+  <span class="s3">return </span><span class="s1">(out_aval</span><span class="s3">, </span><span class="s1">{WriteEffect(</span><span class="s5">0</span><span class="s1">)})</span>
+<span class="s1">swap_p.def_effectful_abstract_eval(_swap_abstract_eval)</span>
+
+
+<span class="s3">def </span><span class="s1">_addupdate_abstract_eval(ref_aval: AbstractRef</span><span class="s3">,</span>
+                             <span class="s1">val_aval: core.AbstractValue</span><span class="s3">,</span>
+                             <span class="s1">*idx: core.ShapedArray</span><span class="s3">, </span><span class="s1">indexed_dims: Tuple[bool]):</span>
+  <span class="s3">if not </span><span class="s1">isinstance(ref_aval</span><span class="s3">, </span><span class="s1">AbstractRef):</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">f&quot;`addupdate` must be called on `Ref` types: </span><span class="s3">{</span><span class="s1">ref_aval</span><span class="s3">}</span><span class="s4">.&quot;</span><span class="s1">)</span>
+  <span class="s3">if </span><span class="s1">idx </span><span class="s3">and not </span><span class="s1">isinstance(ref_aval.inner_aval</span><span class="s3">, </span><span class="s1">core.ShapedArray):</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;`addupdate` with nontrivial indexing must be called &quot;</span>
+                     <span class="s4">f&quot;on `ShapedArray` `Ref`: </span><span class="s3">{</span><span class="s1">ref_aval</span><span class="s3">}</span><span class="s4">.&quot;</span><span class="s1">)</span>
+  <span class="s3">if </span><span class="s1">isinstance(ref_aval.inner_aval</span><span class="s3">, </span><span class="s1">core.ShapedArray):</span>
+    <span class="s3">if </span><span class="s1">len(indexed_dims) != len(ref_aval.shape):</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;`indexed_dims` must be the same length as `Ref` shape.&quot;</span><span class="s1">)</span>
+    <span class="s3">if </span><span class="s1">sum(indexed_dims) != len(idx):</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">f&quot;Invalid `idx` and `indexed_dims`: </span><span class="s3">{</span><span class="s1">idx</span><span class="s3">}</span><span class="s4">, </span><span class="s3">{</span><span class="s1">indexed_dims</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+    <span class="s1">val_aval = core.raise_to_shaped(val_aval)</span>
+    <span class="s3">assert </span><span class="s1">isinstance(val_aval</span><span class="s3">, </span><span class="s1">core.ShapedArray)</span>
+    <span class="s1">idx_shapes = tuple(i.shape </span><span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">idx)</span>
+    <span class="s1">slice_shape = _get_slice_output_shape(</span>
+        <span class="s1">ref_aval.shape</span><span class="s3">, </span><span class="s1">idx_shapes</span><span class="s3">, </span><span class="s1">indexed_dims)</span>
+    <span class="s3">if </span><span class="s1">slice_shape != val_aval.shape:</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Invalid shape for `addupdate`. &quot;</span>
+                       <span class="s4">f&quot;Ref shape: </span><span class="s3">{</span><span class="s1">ref_aval.shape</span><span class="s3">}</span><span class="s4">. &quot;</span>
+                       <span class="s4">f&quot;Value shape: </span><span class="s3">{</span><span class="s1">val_aval.shape</span><span class="s3">}</span><span class="s4">. &quot;</span>
+                       <span class="s4">f&quot;Indices: </span><span class="s3">{</span><span class="s1">idx</span><span class="s3">}</span><span class="s4">. &quot;</span><span class="s1">)</span>
+    <span class="s3">if </span><span class="s1">ref_aval.dtype != val_aval.dtype:</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Invalid dtype for `addupdate`. &quot;</span>
+                       <span class="s4">f&quot;Ref dtype: </span><span class="s3">{</span><span class="s1">ref_aval.dtype</span><span class="s3">}</span><span class="s4">. &quot;</span>
+                       <span class="s4">f&quot;Value shape: </span><span class="s3">{</span><span class="s1">val_aval.dtype</span><span class="s3">}</span><span class="s4">. &quot;</span><span class="s1">)</span>
+  <span class="s3">elif </span><span class="s1">idx:</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;`addupdate` with nontrivial indexing must be called &quot;</span>
+                     <span class="s4">f&quot;on `ShapedArray` `Ref`: </span><span class="s3">{</span><span class="s1">ref_aval</span><span class="s3">}</span><span class="s4">.&quot;</span><span class="s1">)</span>
+  <span class="s3">return </span><span class="s1">[]</span><span class="s3">, </span><span class="s1">{AccumEffect(</span><span class="s5">0</span><span class="s1">)}</span>
+<span class="s1">addupdate_p.def_effectful_abstract_eval(_addupdate_abstract_eval)</span>
+
+<span class="s0">## Pretty printing for `get` and `swap` in jaxprs</span>
+
+<span class="s1">pp_ref = partial(pp.color</span><span class="s3">, </span><span class="s1">intensity=pp.Intensity.NORMAL</span><span class="s3">,</span>
+                 <span class="s1">foreground=pp.Color.GREEN)</span>
+
+<span class="s3">def </span><span class="s1">_pp_idx(context</span><span class="s3">, </span><span class="s1">non_slice_idx</span><span class="s3">, </span><span class="s1">indexed_dims):</span>
+  <span class="s1">idx_iter = iter(non_slice_idx)</span>
+  <span class="s1">idx = </span><span class="s4">','</span><span class="s1">.join(core.pp_var(next(idx_iter)</span><span class="s3">, </span><span class="s1">context) </span><span class="s3">if </span><span class="s1">indexed </span><span class="s3">else </span><span class="s4">':'</span>
+                 <span class="s3">for </span><span class="s1">indexed </span><span class="s3">in </span><span class="s1">indexed_dims)</span>
+  <span class="s3">assert </span><span class="s1">next(idx_iter</span><span class="s3">, None</span><span class="s1">) </span><span class="s3">is None</span>
+  <span class="s3">return </span><span class="s1">pp.text(idx)</span>
+
+<span class="s3">def </span><span class="s1">_get_pp_rule(eqn</span><span class="s3">, </span><span class="s1">context</span><span class="s3">, </span><span class="s1">settings) -&gt; pp.Doc:</span>
+  <span class="s0"># Pretty prints `a = get x i` as `x[i] &lt;- a`</span>
+  <span class="s1">y</span><span class="s3">, </span><span class="s1">= eqn.outvars</span>
+  <span class="s1">x</span><span class="s3">, </span><span class="s1">*idx = eqn.invars</span>
+  <span class="s1">idx = _pp_idx(context</span><span class="s3">, </span><span class="s1">idx</span><span class="s3">, </span><span class="s1">eqn.params[</span><span class="s4">&quot;indexed_dims&quot;</span><span class="s1">])</span>
+  <span class="s1">lhs = core.pp_vars([y]</span><span class="s3">, </span><span class="s1">context</span><span class="s3">, </span><span class="s1">print_shapes=settings.print_shapes)</span>
+  <span class="s0"># TODO more general get</span>
+  <span class="s3">return </span><span class="s1">pp.concat([lhs</span><span class="s3">, </span><span class="s1">pp.text(</span><span class="s4">' &lt;- '</span><span class="s1">)</span><span class="s3">, </span><span class="s1">pp_ref(pp.concat([</span>
+      <span class="s1">pp.text(core.pp_var(x</span><span class="s3">, </span><span class="s1">context))</span><span class="s3">, </span><span class="s1">pp.text(</span><span class="s4">'['</span><span class="s1">)</span><span class="s3">, </span><span class="s1">idx</span><span class="s3">, </span><span class="s1">pp.text(</span><span class="s4">']'</span><span class="s1">)]))])</span>
+<span class="s1">core.pp_eqn_rules[get_p] = _get_pp_rule</span>
+
+<span class="s3">def </span><span class="s1">_swap_pp_rule(eqn</span><span class="s3">, </span><span class="s1">context</span><span class="s3">, </span><span class="s1">settings) -&gt; pp.Doc:</span>
+  <span class="s1">y</span><span class="s3">, </span><span class="s1">= eqn.outvars</span>
+  <span class="s1">x</span><span class="s3">, </span><span class="s1">v</span><span class="s3">, </span><span class="s1">*idx = eqn.invars</span>
+  <span class="s1">idx = _pp_idx(context</span><span class="s3">, </span><span class="s1">idx</span><span class="s3">, </span><span class="s1">eqn.params[</span><span class="s4">&quot;indexed_dims&quot;</span><span class="s1">])</span>
+  <span class="s3">if </span><span class="s1">type(y) </span><span class="s3">is </span><span class="s1">core.DropVar:</span>
+    <span class="s0"># In the case of a set (ignored return value),</span>
+    <span class="s0"># pretty print `_ = swap x v i` as `x[i] &lt;- v`</span>
+    <span class="s3">del </span><span class="s1">y</span>
+    <span class="s3">return </span><span class="s1">pp.concat([</span>
+        <span class="s1">pp_ref(pp.concat([</span>
+            <span class="s1">pp.text(core.pp_var(x</span><span class="s3">, </span><span class="s1">context))</span><span class="s3">,</span>
+            <span class="s1">pp.text(</span><span class="s4">'['</span><span class="s1">)</span><span class="s3">, </span><span class="s1">idx</span><span class="s3">, </span><span class="s1">pp.text(</span><span class="s4">']'</span><span class="s1">)</span>
+        <span class="s1">]))</span><span class="s3">, </span><span class="s1">pp.text(</span><span class="s4">' &lt;- '</span><span class="s1">)</span><span class="s3">, </span><span class="s1">pp.text(core.pp_var(v</span><span class="s3">, </span><span class="s1">context))])</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s0"># pretty-print `y:T = swap x v i` as `y:T, x[i] &lt;- x[i], v`</span>
+    <span class="s1">x_i = pp.concat([pp.text(core.pp_var(x</span><span class="s3">, </span><span class="s1">context))</span><span class="s3">,</span>
+                     <span class="s1">pp.text(</span><span class="s4">'['</span><span class="s1">)</span><span class="s3">, </span><span class="s1">idx</span><span class="s3">, </span><span class="s1">pp.text(</span><span class="s4">']'</span><span class="s1">)])</span>
+    <span class="s1">y = core.pp_vars([y]</span><span class="s3">, </span><span class="s1">context</span><span class="s3">, </span><span class="s1">print_shapes=settings.print_shapes)</span>
+    <span class="s3">return </span><span class="s1">pp.concat([y</span><span class="s3">, </span><span class="s1">pp.text(</span><span class="s4">', '</span><span class="s1">)</span><span class="s3">, </span><span class="s1">pp_ref(x_i)</span><span class="s3">, </span><span class="s1">pp.text(</span><span class="s4">' &lt;- '</span><span class="s1">)</span><span class="s3">,</span>
+                      <span class="s1">pp_ref(x_i)</span><span class="s3">, </span><span class="s1">pp.text(</span><span class="s4">', '</span><span class="s1">)</span><span class="s3">,</span>
+                      <span class="s1">pp.text(core.pp_var(v</span><span class="s3">, </span><span class="s1">context))])</span>
+<span class="s1">core.pp_eqn_rules[swap_p] = _swap_pp_rule</span>
+
+<span class="s3">def </span><span class="s1">_addupdate_pp_rule(eqn</span><span class="s3">, </span><span class="s1">context</span><span class="s3">, </span><span class="s1">settings) -&gt; pp.Doc:</span>
+  <span class="s0"># pretty-print ` = addupdate x i v` as `x[i] += v`</span>
+  <span class="s1">() = eqn.outvars</span>
+  <span class="s1">x</span><span class="s3">, </span><span class="s1">v</span><span class="s3">, </span><span class="s1">*idx = eqn.invars</span>
+  <span class="s1">idx = _pp_idx(context</span><span class="s3">, </span><span class="s1">idx</span><span class="s3">, </span><span class="s1">eqn.params[</span><span class="s4">&quot;indexed_dims&quot;</span><span class="s1">])</span>
+  <span class="s3">return </span><span class="s1">pp.concat([</span>
+    <span class="s1">pp_ref(pp.concat([</span>
+        <span class="s1">pp.text(core.pp_var(x</span><span class="s3">, </span><span class="s1">context))</span><span class="s3">,</span>
+        <span class="s1">pp.text(</span><span class="s4">'['</span><span class="s1">)</span><span class="s3">, </span><span class="s1">idx</span><span class="s3">, </span><span class="s1">pp.text(</span><span class="s4">']'</span><span class="s1">)</span>
+    <span class="s1">]))</span><span class="s3">, </span><span class="s1">pp.text(</span><span class="s4">' += '</span><span class="s1">)</span><span class="s3">, </span><span class="s1">pp.text(core.pp_var(v</span><span class="s3">, </span><span class="s1">context))])</span>
+<span class="s1">core.pp_eqn_rules[addupdate_p] = _addupdate_pp_rule</span>
+
+<span class="s0">## get/swap/addupdate JVP rules</span>
+
+<span class="s3">def </span><span class="s1">_get_jvp(primals: List[Any]</span><span class="s3">, </span><span class="s1">tangents: List[Any]</span><span class="s3">, </span><span class="s1">**params: Any):</span>
+  <span class="s1">ref_primal</span><span class="s3">, </span><span class="s1">*idx = primals</span>
+  <span class="s3">assert </span><span class="s1">isinstance(ref_primal.aval</span><span class="s3">, </span><span class="s1">AbstractRef)</span>
+  <span class="s1">ref_tangent</span><span class="s3">, </span><span class="s1">*_ = tangents</span>
+  <span class="s3">assert </span><span class="s1">isinstance(ref_tangent.aval</span><span class="s3">, </span><span class="s1">AbstractRef)</span>
+  <span class="s3">return </span><span class="s1">(get_p.bind(ref_primal</span><span class="s3">, </span><span class="s1">*idx</span><span class="s3">, </span><span class="s1">**params)</span><span class="s3">,</span>
+          <span class="s1">get_p.bind(ref_tangent</span><span class="s3">, </span><span class="s1">*idx</span><span class="s3">, </span><span class="s1">**params))  </span><span class="s0"># type: ignore[arg-type]</span>
+<span class="s1">ad.primitive_jvps[get_p] = _get_jvp</span>
+
+<span class="s3">def </span><span class="s1">_swap_jvp(primals: List[Any]</span><span class="s3">, </span><span class="s1">tangents: List[Any]</span><span class="s3">, </span><span class="s1">**params: Any):</span>
+  <span class="s1">ref_primal</span><span class="s3">, </span><span class="s1">x_primal</span><span class="s3">, </span><span class="s1">*idx = primals</span>
+  <span class="s3">assert </span><span class="s1">isinstance(ref_primal.aval</span><span class="s3">, </span><span class="s1">AbstractRef)</span>
+  <span class="s1">ref_tangent</span><span class="s3">, </span><span class="s1">x_tangent</span><span class="s3">, </span><span class="s1">*_ = tangents</span>
+  <span class="s3">assert </span><span class="s1">isinstance(ref_tangent.aval</span><span class="s3">, </span><span class="s1">AbstractRef)</span>
+  <span class="s1">x_tangent = ad_util.instantiate(x_tangent)</span>
+  <span class="s3">return </span><span class="s1">(swap_p.bind(ref_primal</span><span class="s3">, </span><span class="s1">x_primal</span><span class="s3">, </span><span class="s1">*idx</span><span class="s3">, </span><span class="s1">**params)</span><span class="s3">,  </span><span class="s0"># type: ignore[arg-type]</span>
+          <span class="s1">swap_p.bind(ref_tangent</span><span class="s3">, </span><span class="s1">x_tangent</span><span class="s3">, </span><span class="s1">*idx</span><span class="s3">, </span><span class="s1">**params))  </span><span class="s0"># type: ignore[arg-type]</span>
+<span class="s1">ad.primitive_jvps[swap_p] = _swap_jvp</span>
+
+<span class="s3">def </span><span class="s1">addupdate_jvp_rule(primals: List[Any]</span><span class="s3">, </span><span class="s1">tangents: List[Any]</span><span class="s3">, </span><span class="s1">**params: Any):</span>
+  <span class="s1">ref_primal</span><span class="s3">, </span><span class="s1">x_primal</span><span class="s3">, </span><span class="s1">*idx = primals</span>
+  <span class="s1">ref_tangent</span><span class="s3">, </span><span class="s1">x_tangent</span><span class="s3">, </span><span class="s1">*_ = tangents</span>
+  <span class="s1">x_tangent = ad_util.instantiate(x_tangent)</span>
+  <span class="s1">addupdate_p.bind(ref_primal</span><span class="s3">, </span><span class="s1">x_primal</span><span class="s3">, </span><span class="s1">*idx</span><span class="s3">, </span><span class="s1">**params)</span>
+  <span class="s1">addupdate_p.bind(ref_tangent</span><span class="s3">, </span><span class="s1">x_tangent</span><span class="s3">, </span><span class="s1">*idx</span><span class="s3">, </span><span class="s1">**params)</span>
+  <span class="s3">return </span><span class="s1">[]</span><span class="s3">, </span><span class="s1">[]</span>
+<span class="s1">ad.primitive_jvps[addupdate_p] = addupdate_jvp_rule</span>
+
+<span class="s0">##  get/swap/addupdate transpose rules</span>
+
+<span class="s3">def </span><span class="s1">_get_transpose(g</span><span class="s3">, </span><span class="s1">ref</span><span class="s3">, </span><span class="s1">*idx</span><span class="s3">, </span><span class="s1">**params):</span>
+  <span class="s0"># get transpose is addupdate</span>
+  <span class="s3">if </span><span class="s1">type(g) </span><span class="s3">is not </span><span class="s1">ad_util.Zero:</span>
+    <span class="s1">addupdate_p.bind(ref</span><span class="s3">, </span><span class="s1">g</span><span class="s3">, </span><span class="s1">*idx</span><span class="s3">, </span><span class="s1">**params)</span>
+  <span class="s3">return </span><span class="s1">[</span><span class="s3">None</span><span class="s1">] + [</span><span class="s3">None</span><span class="s1">] * len(idx)</span>
+<span class="s1">ad.primitive_transposes[get_p] = _get_transpose</span>
+
+<span class="s3">def </span><span class="s1">_swap_transpose(g</span><span class="s3">, </span><span class="s1">ref</span><span class="s3">, </span><span class="s1">x</span><span class="s3">, </span><span class="s1">*idx</span><span class="s3">, </span><span class="s1">**params):</span>
+  <span class="s0"># swap transpose is swap</span>
+  <span class="s1">x_bar = swap_p.bind(ref</span><span class="s3">, </span><span class="s1">ad_util.instantiate(g)</span><span class="s3">, </span><span class="s1">*idx</span><span class="s3">, </span><span class="s1">**params)</span>
+  <span class="s3">return </span><span class="s1">[</span><span class="s3">None, </span><span class="s1">x_bar] + [</span><span class="s3">None</span><span class="s1">] * len(idx)</span>
+<span class="s1">ad.primitive_transposes[swap_p] = _swap_transpose</span>
+
+<span class="s3">def </span><span class="s1">addupdate_transpose(cts_in</span><span class="s3">, </span><span class="s1">ref</span><span class="s3">, </span><span class="s1">x</span><span class="s3">, </span><span class="s1">*idx</span><span class="s3">, </span><span class="s1">**params):</span>
+  <span class="s0"># addupdate transpose is get</span>
+  <span class="s3">del </span><span class="s1">cts_in</span><span class="s3">, </span><span class="s1">x</span>
+  <span class="s1">g = get_p.bind(ref</span><span class="s3">, </span><span class="s1">*idx</span><span class="s3">, </span><span class="s1">**params)</span>
+  <span class="s3">return </span><span class="s1">[</span><span class="s3">None, </span><span class="s1">g] + [</span><span class="s3">None</span><span class="s1">] * len(idx)</span>
+<span class="s1">ad.primitive_transposes[addupdate_p] = addupdate_transpose</span>
+
+<span class="s0">## get/swap/addupdate partial_eval_custom rules</span>
+
+<span class="s3">def </span><span class="s1">_state_partial_eval_custom(prim</span><span class="s3">, </span><span class="s1">saveable</span><span class="s3">, </span><span class="s1">unks_in</span><span class="s3">, </span><span class="s1">inst_in</span><span class="s3">, </span><span class="s1">eqn):</span>
+  <span class="s3">if </span><span class="s1">any(unks_in):</span>
+    <span class="s1">res = [v </span><span class="s3">for </span><span class="s1">v</span><span class="s3">, </span><span class="s1">inst </span><span class="s3">in </span><span class="s1">zip(eqn.invars</span><span class="s3">, </span><span class="s1">inst_in) </span><span class="s3">if not </span><span class="s1">inst]</span>
+    <span class="s3">return None, </span><span class="s1">eqn</span><span class="s3">, </span><span class="s1">[</span><span class="s3">True</span><span class="s1">] * len(eqn.outvars)</span><span class="s3">, </span><span class="s1">[</span><span class="s3">True</span><span class="s1">] * len(eqn.outvars)</span><span class="s3">, </span><span class="s1">res</span>
+  <span class="s3">elif </span><span class="s1">saveable(prim</span><span class="s3">, </span><span class="s1">*[var.aval </span><span class="s3">for </span><span class="s1">var </span><span class="s3">in </span><span class="s1">eqn.invars]</span><span class="s3">, </span><span class="s1">**eqn.params):</span>
+    <span class="s3">return </span><span class="s1">eqn</span><span class="s3">, None, </span><span class="s1">[</span><span class="s3">False</span><span class="s1">] * len(eqn.outvars)</span><span class="s3">, </span><span class="s1">[</span><span class="s3">False</span><span class="s1">] * len(eqn.outvars)</span><span class="s3">, </span><span class="s1">[]</span>
+  <span class="s1">res = [v </span><span class="s3">for </span><span class="s1">v</span><span class="s3">, </span><span class="s1">inst </span><span class="s3">in </span><span class="s1">zip(eqn.invars</span><span class="s3">, </span><span class="s1">inst_in) </span><span class="s3">if not </span><span class="s1">inst]</span>
+  <span class="s3">return </span><span class="s1">eqn</span><span class="s3">, </span><span class="s1">eqn</span><span class="s3">, </span><span class="s1">[</span><span class="s3">False</span><span class="s1">] * len(eqn.outvars)</span><span class="s3">, </span><span class="s1">[</span><span class="s3">True</span><span class="s1">] * len(eqn.outvars)</span><span class="s3">, </span><span class="s1">res</span>
+
+<span class="s1">pe.partial_eval_jaxpr_custom_rules[get_p] = partial(_state_partial_eval_custom</span><span class="s3">,</span>
+                                                    <span class="s1">get_p)</span>
+<span class="s1">pe.partial_eval_jaxpr_custom_rules[swap_p] = partial(_state_partial_eval_custom</span><span class="s3">,</span>
+                                                     <span class="s1">swap_p)</span>
+<span class="s1">pe.partial_eval_jaxpr_custom_rules[addupdate_p] = partial(</span>
+    <span class="s1">_state_partial_eval_custom</span><span class="s3">, </span><span class="s1">addupdate_p)</span>
+
+<span class="s0">##  get/swap/addupdate batching rules</span>
+
+<span class="s3">def </span><span class="s1">_output_bdim(indexed_dims: Tuple[bool</span><span class="s3">, </span><span class="s1">...]</span><span class="s3">, </span><span class="s1">ref_dim: int</span><span class="s3">,</span>
+                 <span class="s1">idxs_shape: Tuple[int</span><span class="s3">, </span><span class="s1">...]):</span>
+  <span class="s1">num_idxs_to_left = sum(indexed_dims[:ref_dim])</span>
+  <span class="s3">return </span><span class="s1">ref_dim - num_idxs_to_left + len(idxs_shape)</span>
+
+<span class="s3">def </span><span class="s1">_get_vmap(batched_args</span><span class="s3">, </span><span class="s1">batched_dims</span><span class="s3">, </span><span class="s1">*</span><span class="s3">, </span><span class="s1">indexed_dims):</span>
+  <span class="s1">axis_size</span><span class="s3">, </span><span class="s1">= {x.shape[d] </span><span class="s3">for </span><span class="s1">x</span><span class="s3">, </span><span class="s1">d </span><span class="s3">in </span><span class="s1">zip(batched_args</span><span class="s3">, </span><span class="s1">batched_dims)</span>
+                <span class="s3">if </span><span class="s1">d </span><span class="s3">is not </span><span class="s1">batching.not_mapped}</span>
+  <span class="s1">ref</span><span class="s3">, </span><span class="s1">*idxs = batched_args</span>
+  <span class="s1">ref_dim</span><span class="s3">, </span><span class="s1">*idx_dims = batched_dims</span>
+
+  <span class="s1">ref_is_batched = ref_dim </span><span class="s3">is not </span><span class="s1">batching.not_mapped</span>
+  <span class="s1">idx_is_batched = any(i_dim </span><span class="s3">is not </span><span class="s1">batching.not_mapped </span><span class="s3">for </span><span class="s1">i_dim </span><span class="s3">in </span><span class="s1">idx_dims)</span>
+  <span class="s1">bdim_out = </span><span class="s5">0</span>
+
+  <span class="s3">if </span><span class="s1">idx_is_batched:</span>
+    <span class="s0"># If at least one of the idx is batched, we broadcast them all and move the</span>
+    <span class="s0"># batch dim to the front.</span>
+    <span class="s1">idxs = tuple(batching.bdim_at_front(i</span><span class="s3">, </span><span class="s1">d</span><span class="s3">, </span><span class="s1">axis_size) </span><span class="s3">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">d</span>
+                 <span class="s3">in </span><span class="s1">zip(idxs</span><span class="s3">, </span><span class="s1">idx_dims))</span>
+  <span class="s1">idxs_shape</span><span class="s3">, </span><span class="s1">= {i.shape </span><span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">idxs} </span><span class="s3">or </span><span class="s1">[()]</span>
+  <span class="s3">if </span><span class="s1">ref_is_batched:</span>
+    <span class="s0"># If ref is batched, we are doing a `get` with an additional axis. If `idxs`</span>
+    <span class="s0"># are also batched, then we are indexing into the batch axis with an `iota`.</span>
+    <span class="s1">indexed_dims = tuple_insert(indexed_dims</span><span class="s3">, </span><span class="s1">ref_dim</span><span class="s3">, </span><span class="s1">idx_is_batched)</span>
+    <span class="s3">if </span><span class="s1">idx_is_batched:</span>
+      <span class="s0"># If we have batched idx, we need to insert the new iota index. The place</span>
+      <span class="s0"># where we add in the new `iota` index is `ref_dim` so we need to compute</span>
+      <span class="s0"># what `ref_dim` *would be* if we inserted it into `idxs` instead, because</span>
+      <span class="s0"># `idxs` doesn't include the non indexed dims.</span>
+      <span class="s1">idx_place = [i </span><span class="s3">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">i_dim </span><span class="s3">in </span><span class="s1">enumerate(indexed_dims)</span>
+                   <span class="s3">if </span><span class="s1">i_dim].index(ref_dim)</span>
+      <span class="s1">iota = lax.broadcasted_iota(np.dtype(</span><span class="s4">'int32'</span><span class="s1">)</span><span class="s3">, </span><span class="s1">idxs_shape</span><span class="s3">, </span><span class="s5">0</span><span class="s1">)</span>
+      <span class="s1">idxs = tuple_insert(idxs</span><span class="s3">, </span><span class="s1">idx_place</span><span class="s3">, </span><span class="s1">iota)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s1">bdim_out = _output_bdim(indexed_dims</span><span class="s3">, </span><span class="s1">ref_dim</span><span class="s3">, </span><span class="s1">idxs_shape)</span>
+  <span class="s3">return </span><span class="s1">get_p.bind(ref</span><span class="s3">, </span><span class="s1">*idxs</span><span class="s3">, </span><span class="s1">indexed_dims=indexed_dims)</span><span class="s3">, </span><span class="s1">bdim_out</span>
+<span class="s1">batching.primitive_batchers[get_p] = _get_vmap</span>
+
+<span class="s3">def </span><span class="s1">_swap_vmap(batched_args</span><span class="s3">, </span><span class="s1">batched_dims</span><span class="s3">, </span><span class="s1">*</span><span class="s3">, </span><span class="s1">indexed_dims):</span>
+  <span class="s1">axis_size</span><span class="s3">, </span><span class="s1">= {x.shape[d] </span><span class="s3">for </span><span class="s1">x</span><span class="s3">, </span><span class="s1">d </span><span class="s3">in </span><span class="s1">zip(batched_args</span><span class="s3">, </span><span class="s1">batched_dims)</span>
+                <span class="s3">if </span><span class="s1">d </span><span class="s3">is not </span><span class="s1">batching.not_mapped}</span>
+  <span class="s1">ref</span><span class="s3">, </span><span class="s1">val</span><span class="s3">, </span><span class="s1">*idxs = batched_args</span>
+  <span class="s1">ref_dim</span><span class="s3">, </span><span class="s1">val_dim</span><span class="s3">, </span><span class="s1">*idx_dims = batched_dims</span>
+  <span class="s1">ref_is_batched = ref_dim </span><span class="s3">is not </span><span class="s1">batching.not_mapped</span>
+  <span class="s1">val_is_batched = val_dim </span><span class="s3">is not </span><span class="s1">batching.not_mapped</span>
+  <span class="s1">idx_is_batched = any(i_dim </span><span class="s3">is not </span><span class="s1">batching.not_mapped </span><span class="s3">for </span><span class="s1">i_dim </span><span class="s3">in </span><span class="s1">idx_dims)</span>
+  <span class="s3">if </span><span class="s1">idx_is_batched:</span>
+    <span class="s0"># If at least one of the idx is batched, we broadcast them all and move the</span>
+    <span class="s0"># batch dim to the front.</span>
+    <span class="s1">idxs = tuple(batching.bdim_at_front(i</span><span class="s3">, </span><span class="s1">d</span><span class="s3">, </span><span class="s1">axis_size) </span><span class="s3">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">d</span>
+                 <span class="s3">in </span><span class="s1">zip(idxs</span><span class="s3">, </span><span class="s1">idx_dims))</span>
+  <span class="s1">idxs_shape</span><span class="s3">, </span><span class="s1">= {i.shape </span><span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">idxs} </span><span class="s3">or </span><span class="s1">[()]</span>
+  <span class="s3">if </span><span class="s1">ref_is_batched </span><span class="s3">and not </span><span class="s1">idx_is_batched:</span>
+    <span class="s1">indexed_dims = tuple_insert(indexed_dims</span><span class="s3">, </span><span class="s1">ref_dim</span><span class="s3">, False</span><span class="s1">)</span>
+    <span class="s1">bdim_out = _output_bdim(indexed_dims</span><span class="s3">, </span><span class="s1">ref_dim</span><span class="s3">, </span><span class="s1">idxs_shape)</span>
+    <span class="s3">if not </span><span class="s1">val_is_batched:</span>
+      <span class="s1">val = batching.broadcast(val</span><span class="s3">, </span><span class="s1">axis_size</span><span class="s3">, </span><span class="s5">0</span><span class="s1">)</span>
+      <span class="s1">val_dim = </span><span class="s5">0</span>
+    <span class="s1">val = batching.moveaxis(val</span><span class="s3">, </span><span class="s1">val_dim</span><span class="s3">, </span><span class="s1">bdim_out)</span>
+  <span class="s3">elif </span><span class="s1">idx_is_batched:</span>
+    <span class="s3">assert </span><span class="s1">ref_is_batched </span><span class="s3">and </span><span class="s1">val_is_batched</span>
+    <span class="s1">indexed_dims = tuple_insert(indexed_dims</span><span class="s3">, </span><span class="s1">ref_dim</span><span class="s3">, True</span><span class="s1">)</span>
+    <span class="s1">idx_place = [i </span><span class="s3">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">i_dim </span><span class="s3">in </span><span class="s1">enumerate(indexed_dims)</span>
+                 <span class="s3">if </span><span class="s1">i_dim].index(ref_dim)</span>
+    <span class="s1">iota = lax.broadcasted_iota(np.dtype(</span><span class="s4">'int32'</span><span class="s1">)</span><span class="s3">, </span><span class="s1">idxs_shape</span><span class="s3">, </span><span class="s5">0</span><span class="s1">)</span>
+    <span class="s1">idxs = tuple_insert(idxs</span><span class="s3">, </span><span class="s1">idx_place</span><span class="s3">, </span><span class="s1">iota)</span>
+    <span class="s1">val = batching.moveaxis(val</span><span class="s3">, </span><span class="s1">val_dim</span><span class="s3">, </span><span class="s5">0</span><span class="s1">)</span>
+    <span class="s1">bdim_out = </span><span class="s5">0</span>
+  <span class="s3">return </span><span class="s1">swap_p.bind(ref</span><span class="s3">, </span><span class="s1">val</span><span class="s3">, </span><span class="s1">*idxs</span><span class="s3">, </span><span class="s1">indexed_dims=indexed_dims)</span><span class="s3">, </span><span class="s1">bdim_out</span>
+<span class="s1">batching.primitive_batchers[swap_p] = _swap_vmap</span>
+
+<span class="s3">def </span><span class="s1">_addupdate_vmap(batched_args</span><span class="s3">, </span><span class="s1">batched_dims</span><span class="s3">, </span><span class="s1">*</span><span class="s3">, </span><span class="s1">indexed_dims):</span>
+  <span class="s1">axis_size</span><span class="s3">, </span><span class="s1">= {x.shape[d] </span><span class="s3">for </span><span class="s1">x</span><span class="s3">, </span><span class="s1">d </span><span class="s3">in </span><span class="s1">zip(batched_args</span><span class="s3">, </span><span class="s1">batched_dims)</span>
+                <span class="s3">if </span><span class="s1">d </span><span class="s3">is not </span><span class="s1">batching.not_mapped}</span>
+  <span class="s1">ref</span><span class="s3">, </span><span class="s1">val</span><span class="s3">, </span><span class="s1">*idxs = batched_args</span>
+  <span class="s1">ref_dim</span><span class="s3">, </span><span class="s1">val_dim</span><span class="s3">, </span><span class="s1">*idx_dims = batched_dims</span>
+  <span class="s1">ref_is_batched = ref_dim </span><span class="s3">is not </span><span class="s1">batching.not_mapped</span>
+  <span class="s1">val_is_batched = val_dim </span><span class="s3">is not </span><span class="s1">batching.not_mapped</span>
+  <span class="s1">idx_is_batched = any(i_dim </span><span class="s3">is not </span><span class="s1">batching.not_mapped </span><span class="s3">for </span><span class="s1">i_dim </span><span class="s3">in </span><span class="s1">idx_dims)</span>
+  <span class="s3">if </span><span class="s1">idx_is_batched:</span>
+    <span class="s0"># If at least one of the idx is batched, we ensure all have bdims at front.</span>
+    <span class="s1">idxs = tuple(batching.bdim_at_front(i</span><span class="s3">, </span><span class="s1">d</span><span class="s3">, </span><span class="s1">axis_size)</span>
+                 <span class="s3">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">d </span><span class="s3">in </span><span class="s1">zip(idxs</span><span class="s3">, </span><span class="s1">idx_dims))</span>
+  <span class="s1">idxs_shape</span><span class="s3">, </span><span class="s1">= {i.shape </span><span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">idxs} </span><span class="s3">or </span><span class="s1">[()]</span>
+  <span class="s3">if </span><span class="s1">ref_is_batched </span><span class="s3">and not </span><span class="s1">idx_is_batched:</span>
+    <span class="s1">indexed_dims = tuple_insert(indexed_dims</span><span class="s3">, </span><span class="s1">ref_dim</span><span class="s3">, False</span><span class="s1">)</span>
+    <span class="s1">bdim_out = _output_bdim(indexed_dims</span><span class="s3">, </span><span class="s1">ref_dim</span><span class="s3">, </span><span class="s1">idxs_shape)</span>
+    <span class="s3">if not </span><span class="s1">val_is_batched:</span>
+      <span class="s1">val = batching.broadcast(val</span><span class="s3">, </span><span class="s1">axis_size</span><span class="s3">, </span><span class="s5">0</span><span class="s1">)</span>
+      <span class="s1">val_dim = </span><span class="s5">0</span>
+    <span class="s1">val = batching.moveaxis(val</span><span class="s3">, </span><span class="s1">val_dim</span><span class="s3">, </span><span class="s1">bdim_out)</span>
+  <span class="s3">elif </span><span class="s1">idx_is_batched:</span>
+    <span class="s3">assert </span><span class="s1">ref_is_batched </span><span class="s3">and </span><span class="s1">val_is_batched</span>
+    <span class="s1">indexed_dims = tuple_insert(indexed_dims</span><span class="s3">, </span><span class="s1">ref_dim</span><span class="s3">, True</span><span class="s1">)</span>
+    <span class="s1">idx_place = [i </span><span class="s3">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">i_dim </span><span class="s3">in </span><span class="s1">enumerate(indexed_dims)</span>
+                 <span class="s3">if </span><span class="s1">i_dim].index(ref_dim)</span>
+    <span class="s1">idxs_shape</span><span class="s3">, </span><span class="s1">= {i.shape </span><span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">idxs} </span><span class="s3">or </span><span class="s1">[()]</span>
+    <span class="s1">iota = lax.broadcasted_iota(np.dtype(</span><span class="s4">'int32'</span><span class="s1">)</span><span class="s3">, </span><span class="s1">idxs_shape</span><span class="s3">, </span><span class="s5">0</span><span class="s1">)</span>
+    <span class="s1">idxs = tuple_insert(idxs</span><span class="s3">, </span><span class="s1">idx_place</span><span class="s3">, </span><span class="s1">iota)</span>
+    <span class="s1">val = batching.moveaxis(val</span><span class="s3">, </span><span class="s1">val_dim</span><span class="s3">, </span><span class="s5">0</span><span class="s1">)</span>
+  <span class="s3">return </span><span class="s1">addupdate_p.bind(ref</span><span class="s3">, </span><span class="s1">val</span><span class="s3">, </span><span class="s1">*idxs</span><span class="s3">, </span><span class="s1">indexed_dims=indexed_dims)</span><span class="s3">, </span><span class="s1">[]</span>
+<span class="s1">batching.primitive_batchers[addupdate_p] = _addupdate_vmap</span>
+</pre>
+</body>
+</html>

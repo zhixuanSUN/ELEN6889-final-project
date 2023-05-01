@@ -1,0 +1,766 @@
+<html>
+<head>
+<title>jet.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+jet.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2020 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s2">r&quot;&quot;&quot;Jet is an experimental module for higher-order automatic differentiation 
+  that does not rely on repeated first-order automatic differentiation. 
+ 
+  How? Through the propagation of truncated Taylor polynomials. 
+  Consider a function :math:`f = g \circ h`, some point :math:`x` 
+  and some offset :math:`v`. 
+  First-order automatic differentiation (such as :func:`jax.jvp`) 
+  computes the pair :math:`(f(x), \partial f(x)[v])` from the pair 
+  :math:`(h(x), \partial h(x)[v])`. 
+ 
+  :func:`jet` implements the higher-order analogue: 
+  Given the tuple 
+ 
+  .. math:: 
+    (h_0, ... h_K) := 
+    (h(x), \partial h(x)[v], \partial^2 h(x)[v, v], ..., \partial^K h(x)[v,...,v]), 
+ 
+  which represents a :math:`K`-th order Taylor approximation 
+  of :math:`h` at :math:`x`, :func:`jet` returns a :math:`K`-th order 
+  Taylor approximation of :math:`f` at :math:`x`, 
+ 
+  .. math:: 
+    (f_0, ..., f_K) := 
+    (f(x), \partial f(x)[v], \partial^2 f(x)[v, v], ..., \partial^K f(x)[v,...,v]). 
+ 
+  More specifically, :func:`jet` computes 
+ 
+  .. math:: 
+    f_0, (f_1, . . . , f_K) = \texttt{jet} (f, h_0, (h_1, . . . , h_K)) 
+ 
+  and can thus be used for high-order 
+  automatic differentiation of :math:`f`. 
+  Details are explained in 
+  `these notes &lt;https://github.com/google/jax/files/6717197/jet.pdf&gt;`__. 
+ 
+  Note: 
+    Help improve :func:`jet` by contributing 
+    `outstanding primitive rules &lt;https://github.com/google/jax/issues/2431&gt;`__. 
+&quot;&quot;&quot;</span>
+
+<span class="s3">from </span><span class="s1">typing </span><span class="s3">import </span><span class="s1">Any</span><span class="s3">, </span><span class="s1">Callable</span><span class="s3">, </span><span class="s1">Dict</span><span class="s3">, </span><span class="s1">Tuple</span>
+
+<span class="s3">from </span><span class="s1">functools </span><span class="s3">import </span><span class="s1">partial</span>
+
+<span class="s3">import </span><span class="s1">numpy </span><span class="s3">as </span><span class="s1">np</span>
+
+<span class="s3">from </span><span class="s1">jax </span><span class="s3">import </span><span class="s1">lax</span>
+<span class="s3">import </span><span class="s1">jax.numpy </span><span class="s3">as </span><span class="s1">jnp</span>
+<span class="s3">from </span><span class="s1">jax.experimental </span><span class="s3">import </span><span class="s1">pjit</span>
+<span class="s3">from </span><span class="s1">jax.tree_util </span><span class="s3">import </span><span class="s1">(register_pytree_node</span><span class="s3">, </span><span class="s1">tree_structure</span><span class="s3">,</span>
+                           <span class="s1">treedef_is_leaf</span><span class="s3">, </span><span class="s1">tree_flatten</span><span class="s3">, </span><span class="s1">tree_unflatten</span><span class="s3">,</span><span class="s1">)</span>
+
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">ad_util</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">core</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">dispatch</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">linear_util </span><span class="s3">as </span><span class="s1">lu</span>
+<span class="s3">from </span><span class="s1">jax._src.api_util </span><span class="s3">import </span><span class="s1">shaped_abstractify</span>
+<span class="s3">from </span><span class="s1">jax._src.interpreters </span><span class="s3">import </span><span class="s1">partial_eval </span><span class="s3">as </span><span class="s1">pe</span>
+<span class="s3">from </span><span class="s1">jax._src.lax </span><span class="s3">import </span><span class="s1">lax </span><span class="s3">as </span><span class="s1">lax_internal</span>
+<span class="s3">from </span><span class="s1">jax._src.util </span><span class="s3">import </span><span class="s1">unzip2</span><span class="s3">, </span><span class="s1">weakref_lru_cache</span>
+
+
+<span class="s3">def </span><span class="s1">jet(fun</span><span class="s3">, </span><span class="s1">primals</span><span class="s3">, </span><span class="s1">series):</span>
+  <span class="s2">r&quot;&quot;&quot;Taylor-mode higher-order automatic differentiation. 
+ 
+  Args: 
+    fun: Function to be differentiated. Its arguments should be arrays, scalars, 
+      or standard Python containers of arrays or scalars. It should return an 
+      array, scalar, or standard Python container of arrays or scalars. 
+    primals: The primal values at which the Taylor approximation of ``fun`` should be 
+      evaluated. Should be either a tuple or a list of arguments, 
+      and its length should be equal to the number of positional parameters of 
+      ``fun``. 
+    series: Higher order Taylor-series-coefficients. 
+      Together, `primals` and `series` make up a truncated Taylor polynomial. 
+      Should be either a tuple or a list of tuples or lists, 
+      and its length dictates the degree of the truncated Taylor polynomial. 
+ 
+  Returns: 
+    A ``(primals_out, series_out)`` pair, where ``primals_out`` is ``fun(*primals)``, 
+    and together, ``primals_out`` and ``series_out`` are a 
+    truncated Taylor polynomial of :math:`f(h(\cdot))`. 
+    The ``primals_out`` value has the same Python tree structure as ``primals``, 
+    and the ``series_out`` value the same Python tree structure as ``series``. 
+ 
+  For example: 
+ 
+  &gt;&gt;&gt; import jax 
+  &gt;&gt;&gt; import jax.numpy as np 
+ 
+  Consider the function :math:`h(z) = z^3`, :math:`x = 0.5`, 
+  and the first few Taylor coefficients 
+  :math:`h_0=x^3`, :math:`h_1=3x^2`, and :math:`h_2=6x`. 
+  Let :math:`f(y) = \sin(y)`. 
+ 
+  &gt;&gt;&gt; h0, h1, h2 = 0.5**3., 3.*0.5**2., 6.*0.5 
+  &gt;&gt;&gt; f, df, ddf = np.sin, np.cos, lambda *args: -np.sin(*args) 
+ 
+  :func:`jet` returns the Taylor coefficients of :math:`f(h(z)) = \sin(z^3)` 
+  according to Faà di Bruno's formula: 
+ 
+  &gt;&gt;&gt; f0, (f1, f2) =  jet(f, (h0,), ((h1, h2),)) 
+  &gt;&gt;&gt; print(f0,  f(h0)) 
+  0.12467473 0.12467473 
+ 
+  &gt;&gt;&gt; print(f1, df(h0) * h1) 
+  0.7441479 0.74414825 
+ 
+  &gt;&gt;&gt; print(f2, ddf(h0) * h1 ** 2 + df(h0) * h2) 
+  2.9064622 2.9064634 
+  &quot;&quot;&quot;</span>
+  <span class="s3">try</span><span class="s1">:</span>
+    <span class="s1">order</span><span class="s3">, </span><span class="s1">= set(map(len</span><span class="s3">, </span><span class="s1">series))</span>
+  <span class="s3">except </span><span class="s1">ValueError:</span>
+    <span class="s1">msg = </span><span class="s4">&quot;jet terms have inconsistent lengths for different arguments&quot;</span>
+    <span class="s3">raise </span><span class="s1">ValueError(msg) </span><span class="s3">from None</span>
+
+  <span class="s0"># TODO(mattjj): consider supporting pytree inputs</span>
+  <span class="s3">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">(x</span><span class="s3">, </span><span class="s1">terms) </span><span class="s3">in </span><span class="s1">enumerate(zip(primals</span><span class="s3">, </span><span class="s1">series)):</span>
+    <span class="s1">treedef = tree_structure(x)</span>
+    <span class="s3">if not </span><span class="s1">treedef_is_leaf(treedef):</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">f&quot;primal value at position </span><span class="s3">{</span><span class="s1">i</span><span class="s3">} </span><span class="s4">is not an array&quot;</span><span class="s1">)</span>
+    <span class="s3">for </span><span class="s1">j</span><span class="s3">, </span><span class="s1">t </span><span class="s3">in </span><span class="s1">enumerate(terms):</span>
+      <span class="s1">treedef = tree_structure(t)</span>
+      <span class="s3">if not </span><span class="s1">treedef_is_leaf(treedef):</span>
+        <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">f&quot;term </span><span class="s3">{</span><span class="s1">j</span><span class="s3">} </span><span class="s4">for argument </span><span class="s3">{</span><span class="s1">i</span><span class="s3">} </span><span class="s4">is not an array&quot;</span><span class="s1">)</span>
+
+  <span class="s1">@lu.transformation_with_aux</span>
+  <span class="s3">def </span><span class="s1">flatten_fun_output(*args):</span>
+    <span class="s1">ans = </span><span class="s3">yield </span><span class="s1">args</span><span class="s3">, </span><span class="s1">{}</span>
+    <span class="s3">yield </span><span class="s1">tree_flatten(ans)</span>
+
+  <span class="s1">f</span><span class="s3">, </span><span class="s1">out_tree = flatten_fun_output(lu.wrap_init(fun))</span>
+  <span class="s1">out_primals</span><span class="s3">, </span><span class="s1">out_terms = jet_fun(jet_subtrace(f)</span><span class="s3">, </span><span class="s1">order).call_wrapped(primals</span><span class="s3">, </span><span class="s1">series)</span>
+  <span class="s3">return </span><span class="s1">tree_unflatten(out_tree()</span><span class="s3">, </span><span class="s1">out_primals)</span><span class="s3">, </span><span class="s1">tree_unflatten(out_tree()</span><span class="s3">, </span><span class="s1">out_terms)</span>
+
+<span class="s1">@lu.transformation</span>
+<span class="s3">def </span><span class="s1">jet_fun(order</span><span class="s3">, </span><span class="s1">primals</span><span class="s3">, </span><span class="s1">series):</span>
+  <span class="s3">with </span><span class="s1">core.new_main(JetTrace) </span><span class="s3">as </span><span class="s1">main:</span>
+    <span class="s1">main.order = order</span>
+    <span class="s1">out_primals</span><span class="s3">, </span><span class="s1">out_terms = </span><span class="s3">yield </span><span class="s1">(main</span><span class="s3">, </span><span class="s1">primals</span><span class="s3">, </span><span class="s1">series)</span><span class="s3">, </span><span class="s1">{}</span>
+    <span class="s3">del </span><span class="s1">main</span>
+  <span class="s1">out_terms = [[jnp.zeros_like(p)] * order </span><span class="s3">if </span><span class="s1">s </span><span class="s3">is </span><span class="s1">zero_series </span><span class="s3">else </span><span class="s1">s</span>
+               <span class="s3">for </span><span class="s1">p</span><span class="s3">, </span><span class="s1">s </span><span class="s3">in </span><span class="s1">zip(out_primals</span><span class="s3">, </span><span class="s1">out_terms)]</span>
+  <span class="s3">yield </span><span class="s1">out_primals</span><span class="s3">, </span><span class="s1">out_terms</span>
+
+<span class="s1">@lu.transformation</span>
+<span class="s3">def </span><span class="s1">jet_subtrace(main</span><span class="s3">, </span><span class="s1">primals</span><span class="s3">, </span><span class="s1">series):</span>
+  <span class="s1">trace = JetTrace(main</span><span class="s3">, </span><span class="s1">core.cur_sublevel())</span>
+  <span class="s1">in_tracers = map(partial(JetTracer</span><span class="s3">, </span><span class="s1">trace)</span><span class="s3">, </span><span class="s1">primals</span><span class="s3">, </span><span class="s1">series)</span>
+  <span class="s1">ans = </span><span class="s3">yield </span><span class="s1">in_tracers</span><span class="s3">, </span><span class="s1">{}</span>
+  <span class="s1">out_tracers = map(trace.full_raise</span><span class="s3">, </span><span class="s1">ans)</span>
+  <span class="s1">out_primals</span><span class="s3">, </span><span class="s1">out_terms = unzip2((t.primal</span><span class="s3">, </span><span class="s1">t.terms) </span><span class="s3">for </span><span class="s1">t </span><span class="s3">in </span><span class="s1">out_tracers)</span>
+  <span class="s3">yield </span><span class="s1">out_primals</span><span class="s3">, </span><span class="s1">out_terms</span>
+
+<span class="s1">@lu.transformation_with_aux</span>
+<span class="s3">def </span><span class="s1">traceable(in_tree_def</span><span class="s3">, </span><span class="s1">*primals_and_series):</span>
+  <span class="s1">primals_in</span><span class="s3">, </span><span class="s1">series_in = tree_unflatten(in_tree_def</span><span class="s3">, </span><span class="s1">primals_and_series)</span>
+  <span class="s1">primals_out</span><span class="s3">, </span><span class="s1">series_out = </span><span class="s3">yield </span><span class="s1">(primals_in</span><span class="s3">, </span><span class="s1">series_in)</span><span class="s3">, </span><span class="s1">{}</span>
+  <span class="s1">out_flat</span><span class="s3">, </span><span class="s1">out_tree_def = tree_flatten((primals_out</span><span class="s3">, </span><span class="s1">series_out))</span>
+  <span class="s3">yield </span><span class="s1">out_flat</span><span class="s3">, </span><span class="s1">out_tree_def</span>
+
+
+<span class="s3">class </span><span class="s1">JetTracer(core.Tracer):</span>
+  <span class="s1">__slots__ = [</span><span class="s4">&quot;primal&quot;</span><span class="s3">, </span><span class="s4">&quot;terms&quot;</span><span class="s1">]</span>
+
+  <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">trace</span><span class="s3">, </span><span class="s1">primal</span><span class="s3">, </span><span class="s1">terms):</span>
+    <span class="s3">assert </span><span class="s1">type(terms) </span><span class="s3">in </span><span class="s1">(ZeroSeries</span><span class="s3">, </span><span class="s1">list</span><span class="s3">, </span><span class="s1">tuple)</span>
+    <span class="s1">self._trace = trace</span>
+    <span class="s1">self.primal = primal</span>
+    <span class="s1">self.terms = terms</span>
+
+  <span class="s1">@property</span>
+  <span class="s3">def </span><span class="s1">aval(self):</span>
+    <span class="s3">return </span><span class="s1">core.get_aval(self.primal)</span>
+
+  <span class="s3">def </span><span class="s1">full_lower(self):</span>
+    <span class="s3">if </span><span class="s1">self.terms </span><span class="s3">is </span><span class="s1">zero_series </span><span class="s3">or </span><span class="s1">all(t </span><span class="s3">is </span><span class="s1">zero_term </span><span class="s3">for </span><span class="s1">t </span><span class="s3">in </span><span class="s1">self.terms):</span>
+      <span class="s3">return </span><span class="s1">core.full_lower(self.primal)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s3">return </span><span class="s1">self</span>
+
+<span class="s3">class </span><span class="s1">JetTrace(core.Trace):</span>
+
+  <span class="s3">def </span><span class="s1">pure(self</span><span class="s3">, </span><span class="s1">val):</span>
+    <span class="s3">return </span><span class="s1">JetTracer(self</span><span class="s3">, </span><span class="s1">val</span><span class="s3">, </span><span class="s1">zero_series)</span>
+
+  <span class="s3">def </span><span class="s1">lift(self</span><span class="s3">, </span><span class="s1">val):</span>
+    <span class="s3">return </span><span class="s1">JetTracer(self</span><span class="s3">, </span><span class="s1">val</span><span class="s3">, </span><span class="s1">zero_series)</span>
+
+  <span class="s3">def </span><span class="s1">sublift(self</span><span class="s3">, </span><span class="s1">val):</span>
+    <span class="s3">return </span><span class="s1">JetTracer(self</span><span class="s3">, </span><span class="s1">val.primal</span><span class="s3">, </span><span class="s1">val.terms)</span>
+
+  <span class="s3">def </span><span class="s1">process_primitive(self</span><span class="s3">, </span><span class="s1">primitive</span><span class="s3">, </span><span class="s1">tracers</span><span class="s3">, </span><span class="s1">params):</span>
+    <span class="s1">order = self.main.order              </span><span class="s0"># pytype: disable=attribute-error</span>
+    <span class="s1">primals_in</span><span class="s3">, </span><span class="s1">series_in = unzip2((t.primal</span><span class="s3">, </span><span class="s1">t.terms) </span><span class="s3">for </span><span class="s1">t </span><span class="s3">in </span><span class="s1">tracers)</span>
+    <span class="s1">series_in = [[zero_term] * order </span><span class="s3">if </span><span class="s1">s </span><span class="s3">is </span><span class="s1">zero_series </span><span class="s3">else </span><span class="s1">s</span>
+                 <span class="s3">for </span><span class="s1">s </span><span class="s3">in </span><span class="s1">series_in]</span>
+    <span class="s0"># TODO(mattjj): avoid always instantiating zeros</span>
+    <span class="s1">series_in = [[jnp.zeros(np.shape(x)</span><span class="s3">, </span><span class="s1">dtype=jnp.result_type(x))</span>
+                  <span class="s3">if </span><span class="s1">t </span><span class="s3">is </span><span class="s1">zero_term </span><span class="s3">else </span><span class="s1">t </span><span class="s3">for </span><span class="s1">t </span><span class="s3">in </span><span class="s1">series]</span>
+                 <span class="s3">for </span><span class="s1">x</span><span class="s3">, </span><span class="s1">series </span><span class="s3">in </span><span class="s1">zip(primals_in</span><span class="s3">, </span><span class="s1">series_in)]</span>
+    <span class="s1">rule = jet_rules[primitive]</span>
+    <span class="s1">primal_out</span><span class="s3">, </span><span class="s1">terms_out = rule(primals_in</span><span class="s3">, </span><span class="s1">series_in</span><span class="s3">, </span><span class="s1">**params)</span>
+    <span class="s3">if not </span><span class="s1">primitive.multiple_results:</span>
+      <span class="s3">return </span><span class="s1">JetTracer(self</span><span class="s3">, </span><span class="s1">primal_out</span><span class="s3">, </span><span class="s1">terms_out)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s3">return </span><span class="s1">[JetTracer(self</span><span class="s3">, </span><span class="s1">p</span><span class="s3">, </span><span class="s1">ts) </span><span class="s3">for </span><span class="s1">p</span><span class="s3">, </span><span class="s1">ts </span><span class="s3">in </span><span class="s1">zip(primal_out</span><span class="s3">, </span><span class="s1">terms_out)]</span>
+
+  <span class="s3">def </span><span class="s1">process_call(self</span><span class="s3">, </span><span class="s1">call_primitive</span><span class="s3">, </span><span class="s1">f</span><span class="s3">, </span><span class="s1">tracers</span><span class="s3">, </span><span class="s1">params):</span>
+    <span class="s1">primals_in</span><span class="s3">, </span><span class="s1">series_in = unzip2((t.primal</span><span class="s3">, </span><span class="s1">t.terms) </span><span class="s3">for </span><span class="s1">t </span><span class="s3">in </span><span class="s1">tracers)</span>
+    <span class="s1">primals_and_series</span><span class="s3">, </span><span class="s1">in_tree_def = tree_flatten((primals_in</span><span class="s3">, </span><span class="s1">series_in))</span>
+    <span class="s1">f_jet</span><span class="s3">, </span><span class="s1">out_tree_def = traceable(jet_subtrace(f</span><span class="s3">, </span><span class="s1">self.main)</span><span class="s3">, </span><span class="s1">in_tree_def)</span>
+    <span class="s1">update_params = call_param_updaters.get(call_primitive)</span>
+    <span class="s1">new_params = (update_params(params</span><span class="s3">, </span><span class="s1">len(primals_and_series))</span>
+                  <span class="s3">if </span><span class="s1">update_params </span><span class="s3">else </span><span class="s1">params)</span>
+    <span class="s1">result = call_primitive.bind(f_jet</span><span class="s3">, </span><span class="s1">*primals_and_series</span><span class="s3">, </span><span class="s1">**new_params)</span>
+    <span class="s1">primals_out</span><span class="s3">, </span><span class="s1">series_out = tree_unflatten(out_tree_def()</span><span class="s3">, </span><span class="s1">result)</span>
+    <span class="s3">return </span><span class="s1">[JetTracer(self</span><span class="s3">, </span><span class="s1">p</span><span class="s3">, </span><span class="s1">ts) </span><span class="s3">for </span><span class="s1">p</span><span class="s3">, </span><span class="s1">ts </span><span class="s3">in </span><span class="s1">zip(primals_out</span><span class="s3">, </span><span class="s1">series_out)]</span>
+
+  <span class="s3">def </span><span class="s1">post_process_call(self</span><span class="s3">, </span><span class="s1">call_primitive</span><span class="s3">, </span><span class="s1">out_tracers</span><span class="s3">, </span><span class="s1">params):</span>
+    <span class="s1">primals</span><span class="s3">, </span><span class="s1">series = unzip2((t.primal</span><span class="s3">, </span><span class="s1">t.terms) </span><span class="s3">for </span><span class="s1">t </span><span class="s3">in </span><span class="s1">out_tracers)</span>
+    <span class="s1">out</span><span class="s3">, </span><span class="s1">treedef = tree_flatten((primals</span><span class="s3">, </span><span class="s1">series))</span>
+    <span class="s3">del </span><span class="s1">primals</span><span class="s3">, </span><span class="s1">series</span>
+    <span class="s1">main = self.main</span>
+    <span class="s3">def </span><span class="s1">todo(x):</span>
+      <span class="s1">primals</span><span class="s3">, </span><span class="s1">series = tree_unflatten(treedef</span><span class="s3">, </span><span class="s1">x)</span>
+      <span class="s1">trace = JetTrace(main</span><span class="s3">, </span><span class="s1">core.cur_sublevel())</span>
+      <span class="s3">return </span><span class="s1">map(partial(JetTracer</span><span class="s3">, </span><span class="s1">trace)</span><span class="s3">, </span><span class="s1">primals</span><span class="s3">, </span><span class="s1">series)</span>
+    <span class="s3">return </span><span class="s1">out</span><span class="s3">, </span><span class="s1">todo</span>
+
+  <span class="s3">def </span><span class="s1">process_custom_jvp_call(self</span><span class="s3">, </span><span class="s1">primitive</span><span class="s3">, </span><span class="s1">fun</span><span class="s3">, </span><span class="s1">jvp</span><span class="s3">, </span><span class="s1">tracers</span><span class="s3">, </span><span class="s1">*</span><span class="s3">,</span>
+                              <span class="s1">symbolic_zeros):</span>
+    <span class="s0"># TODO(mattjj): don't just ignore custom jvp rules?</span>
+    <span class="s3">del </span><span class="s1">primitive</span><span class="s3">, </span><span class="s1">jvp  </span><span class="s0"># Unused.</span>
+    <span class="s3">return </span><span class="s1">fun.call_wrapped(*tracers)</span>
+
+  <span class="s3">def </span><span class="s1">process_custom_vjp_call(self</span><span class="s3">, </span><span class="s1">primitive</span><span class="s3">, </span><span class="s1">fun</span><span class="s3">, </span><span class="s1">fwd</span><span class="s3">, </span><span class="s1">bwd</span><span class="s3">, </span><span class="s1">tracers</span><span class="s3">, </span><span class="s1">out_trees):</span>
+    <span class="s3">del </span><span class="s1">primitive</span><span class="s3">, </span><span class="s1">fwd</span><span class="s3">, </span><span class="s1">bwd</span><span class="s3">, </span><span class="s1">out_trees  </span><span class="s0"># Unused.</span>
+    <span class="s3">return </span><span class="s1">fun.call_wrapped(*tracers)</span>
+
+
+<span class="s3">class </span><span class="s1">ZeroTerm: </span><span class="s3">pass</span>
+<span class="s1">zero_term = ZeroTerm()</span>
+<span class="s1">register_pytree_node(ZeroTerm</span><span class="s3">, lambda </span><span class="s1">z: (()</span><span class="s3">, None</span><span class="s1">)</span><span class="s3">, lambda </span><span class="s1">_</span><span class="s3">, </span><span class="s1">xs: zero_term)</span>
+
+<span class="s3">class </span><span class="s1">ZeroSeries: </span><span class="s3">pass</span>
+<span class="s1">zero_series = ZeroSeries()</span>
+<span class="s1">register_pytree_node(ZeroSeries</span><span class="s3">, lambda </span><span class="s1">z: (()</span><span class="s3">, None</span><span class="s1">)</span><span class="s3">, lambda </span><span class="s1">_</span><span class="s3">, </span><span class="s1">xs: zero_series)</span>
+
+
+<span class="s1">call_param_updaters: Dict[core.Primitive</span><span class="s3">, </span><span class="s1">Callable[...</span><span class="s3">, </span><span class="s1">Any]] = {}</span>
+
+
+<span class="s0">### rule definitions</span>
+
+<span class="s1">jet_rules = {}</span>
+
+<span class="s3">def </span><span class="s1">defzero(prim):</span>
+  <span class="s1">jet_rules[prim] = partial(zero_prop</span><span class="s3">, </span><span class="s1">prim)</span>
+
+<span class="s3">def </span><span class="s1">zero_prop(prim</span><span class="s3">, </span><span class="s1">primals_in</span><span class="s3">, </span><span class="s1">series_in</span><span class="s3">, </span><span class="s1">**params):</span>
+  <span class="s1">primal_out = prim.bind(*primals_in</span><span class="s3">, </span><span class="s1">**params)</span>
+  <span class="s3">return </span><span class="s1">primal_out</span><span class="s3">, </span><span class="s1">zero_series</span>
+
+<span class="s1">defzero(lax.le_p)</span>
+<span class="s1">defzero(lax.lt_p)</span>
+<span class="s1">defzero(lax.gt_p)</span>
+<span class="s1">defzero(lax.ge_p)</span>
+<span class="s1">defzero(lax.eq_p)</span>
+<span class="s1">defzero(lax.ne_p)</span>
+<span class="s1">defzero(lax.not_p)</span>
+<span class="s1">defzero(lax.and_p)</span>
+<span class="s1">defzero(lax.or_p)</span>
+<span class="s1">defzero(lax.xor_p)</span>
+<span class="s1">defzero(lax.floor_p)</span>
+<span class="s1">defzero(lax.ceil_p)</span>
+<span class="s1">defzero(lax.round_p)</span>
+<span class="s1">defzero(lax.sign_p)</span>
+<span class="s1">defzero(ad_util.stop_gradient_p)</span>
+<span class="s1">defzero(lax.is_finite_p)</span>
+<span class="s1">defzero(lax.shift_left_p)</span>
+<span class="s1">defzero(lax.shift_right_arithmetic_p)</span>
+<span class="s1">defzero(lax.shift_right_logical_p)</span>
+<span class="s1">defzero(lax.bitcast_convert_type_p)</span>
+
+
+<span class="s3">def </span><span class="s1">deflinear(prim):</span>
+  <span class="s1">jet_rules[prim] = partial(linear_prop</span><span class="s3">, </span><span class="s1">prim)</span>
+
+<span class="s3">def </span><span class="s1">linear_prop(prim</span><span class="s3">, </span><span class="s1">primals_in</span><span class="s3">, </span><span class="s1">series_in</span><span class="s3">, </span><span class="s1">**params):</span>
+  <span class="s1">primal_out = prim.bind(*primals_in</span><span class="s3">, </span><span class="s1">**params)</span>
+  <span class="s1">series_out = [prim.bind(*terms_in</span><span class="s3">, </span><span class="s1">**params) </span><span class="s3">for </span><span class="s1">terms_in </span><span class="s3">in </span><span class="s1">zip(*series_in)]</span>
+  <span class="s3">return </span><span class="s1">primal_out</span><span class="s3">, </span><span class="s1">series_out</span>
+
+<span class="s1">deflinear(lax.neg_p)</span>
+<span class="s1">deflinear(lax.real_p)</span>
+<span class="s1">deflinear(lax.complex_p)</span>
+<span class="s1">deflinear(lax.conj_p)</span>
+<span class="s1">deflinear(lax.imag_p)</span>
+<span class="s1">deflinear(lax.add_p)</span>
+<span class="s1">deflinear(ad_util.add_jaxvals_p)</span>
+<span class="s1">deflinear(lax.sub_p)</span>
+<span class="s1">deflinear(lax.convert_element_type_p)</span>
+<span class="s1">deflinear(lax.broadcast_in_dim_p)</span>
+<span class="s1">deflinear(lax.concatenate_p)</span>
+<span class="s1">deflinear(lax.pad_p)</span>
+<span class="s1">deflinear(lax.reshape_p)</span>
+<span class="s1">deflinear(lax.squeeze_p)</span>
+<span class="s1">deflinear(lax.rev_p)</span>
+<span class="s1">deflinear(lax.transpose_p)</span>
+<span class="s1">deflinear(lax.slice_p)</span>
+<span class="s1">deflinear(lax.reduce_sum_p)</span>
+<span class="s1">deflinear(lax.reduce_window_sum_p)</span>
+<span class="s1">deflinear(lax.fft_p)</span>
+<span class="s1">deflinear(dispatch.device_put_p)</span>
+
+<span class="s3">def </span><span class="s1">_dynamic_slice_jet_rule(primals_in</span><span class="s3">, </span><span class="s1">series_in</span><span class="s3">, </span><span class="s1">**params):</span>
+  <span class="s1">operand</span><span class="s3">, </span><span class="s1">*start_indices = primals_in</span>
+  <span class="s1">primal_out = lax.dynamic_slice_p.bind(operand</span><span class="s3">, </span><span class="s1">*start_indices</span><span class="s3">, </span><span class="s1">**params)</span>
+  <span class="s1">series_out = [lax.dynamic_slice_p.bind(terms_in[</span><span class="s5">0</span><span class="s1">]</span><span class="s3">, </span><span class="s1">*start_indices</span><span class="s3">, </span><span class="s1">**params)</span>
+                <span class="s3">for </span><span class="s1">terms_in </span><span class="s3">in </span><span class="s1">zip(*series_in)]</span>
+  <span class="s3">return </span><span class="s1">primal_out</span><span class="s3">, </span><span class="s1">series_out</span>
+
+<span class="s1">jet_rules[lax.dynamic_slice_p] = _dynamic_slice_jet_rule</span>
+
+<span class="s3">def </span><span class="s1">_dynamic_update_slice_jet_rule(primals_in</span><span class="s3">, </span><span class="s1">series_in</span><span class="s3">, </span><span class="s1">**params):</span>
+  <span class="s1">operand</span><span class="s3">, </span><span class="s1">update</span><span class="s3">, </span><span class="s1">*start_indices = primals_in</span>
+  <span class="s1">primal_out = lax.dynamic_update_slice_p.bind(operand</span><span class="s3">, </span><span class="s1">update</span><span class="s3">, </span><span class="s1">*start_indices)</span>
+  <span class="s1">series_out = [lax.dynamic_update_slice_p.bind(*terms_in[:</span><span class="s5">2</span><span class="s1">]</span><span class="s3">, </span><span class="s1">*start_indices</span><span class="s3">, </span><span class="s1">**params)</span>
+                <span class="s3">for </span><span class="s1">terms_in </span><span class="s3">in </span><span class="s1">zip(*series_in)]</span>
+  <span class="s3">return </span><span class="s1">primal_out</span><span class="s3">, </span><span class="s1">series_out</span>
+
+<span class="s1">jet_rules[lax.dynamic_update_slice_p] = _dynamic_update_slice_jet_rule</span>
+
+<span class="s3">def </span><span class="s1">_cumulative_jet_rule(primals_in</span><span class="s3">, </span><span class="s1">series_in</span><span class="s3">, </span><span class="s1">*</span><span class="s3">, </span><span class="s1">axis: int</span><span class="s3">, </span><span class="s1">reverse: bool</span><span class="s3">,</span>
+                         <span class="s1">combine_fn: Callable):</span>
+  <span class="s0"># Irrespective of backend, we always use the parallel prefix scan</span>
+  <span class="s0"># implementation when differentiating because reduce_window is not</span>
+  <span class="s0"># arbitrarily differentiable.</span>
+  <span class="s3">return </span><span class="s1">jet(partial(lax.associative_scan</span><span class="s3">, </span><span class="s1">combine_fn</span><span class="s3">, </span><span class="s1">axis=axis</span><span class="s3">,</span>
+                     <span class="s1">reverse=reverse)</span><span class="s3">,</span>
+             <span class="s1">primals_in</span><span class="s3">, </span><span class="s1">series_in)</span>
+
+<span class="s1">deflinear(lax.cumsum_p)</span>
+<span class="s1">jet_rules[lax.cumprod_p] = partial(_cumulative_jet_rule</span><span class="s3">,</span>
+                                                <span class="s1">combine_fn=lax.mul)</span>
+<span class="s1">jet_rules[lax.cummax_p] = partial(_cumulative_jet_rule</span><span class="s3">,</span>
+                                               <span class="s1">combine_fn=lax.max)</span>
+<span class="s1">jet_rules[lax.cummin_p] = partial(_cumulative_jet_rule</span><span class="s3">,</span>
+                                               <span class="s1">combine_fn=lax.min)</span>
+
+
+<span class="s3">def </span><span class="s1">def_deriv(prim</span><span class="s3">, </span><span class="s1">deriv):</span>
+  <span class="s2">&quot;&quot;&quot; 
+  Define the jet rule for a primitive in terms of its first derivative. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">jet_rules[prim] = partial(deriv_prop</span><span class="s3">, </span><span class="s1">prim</span><span class="s3">, </span><span class="s1">deriv)</span>
+
+
+<span class="s3">def </span><span class="s1">deriv_prop(prim</span><span class="s3">, </span><span class="s1">deriv</span><span class="s3">, </span><span class="s1">primals_in</span><span class="s3">, </span><span class="s1">series_in):</span>
+  <span class="s1">x</span><span class="s3">, </span><span class="s1">= primals_in</span>
+  <span class="s1">series</span><span class="s3">, </span><span class="s1">= series_in</span>
+  <span class="s1">primal_out = prim.bind(x)</span>
+  <span class="s1">c0</span><span class="s3">, </span><span class="s1">cs = jet(deriv</span><span class="s3">, </span><span class="s1">primals_in</span><span class="s3">, </span><span class="s1">series_in)</span>
+  <span class="s1">c = [c0] + cs</span>
+  <span class="s1">u = [x] + series</span>
+  <span class="s1">v = [primal_out] + [</span><span class="s3">None</span><span class="s1">] * len(series)</span>
+  <span class="s3">for </span><span class="s1">k </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">1</span><span class="s3">, </span><span class="s1">len(v)):</span>
+    <span class="s1">v[k] = fact(k-</span><span class="s5">1</span><span class="s1">) * sum(_scale(k</span><span class="s3">, </span><span class="s1">j) * c[k-j] * u[j] </span><span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">1</span><span class="s3">, </span><span class="s1">k + </span><span class="s5">1</span><span class="s1">))</span>
+  <span class="s1">primal_out</span><span class="s3">, </span><span class="s1">*series_out = v</span>
+  <span class="s3">return </span><span class="s1">primal_out</span><span class="s3">, </span><span class="s1">series_out</span>
+
+
+<span class="s1">def_deriv(lax.erf_p</span><span class="s3">,</span>
+          <span class="s3">lambda </span><span class="s1">x: lax.mul(</span>
+              <span class="s1">lax_internal._const(x</span><span class="s3">, </span><span class="s5">2. </span><span class="s1">/ np.sqrt(np.pi))</span><span class="s3">,</span>
+              <span class="s1">lax.exp(lax.neg(lax.square(x)))))</span>
+
+
+<span class="s3">def </span><span class="s1">def_comp(prim</span><span class="s3">, </span><span class="s1">comp):</span>
+  <span class="s2">&quot;&quot;&quot; 
+  Define the jet rule for a primitive in terms of a composition of simpler primitives. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">jet_rules[prim] = partial(jet</span><span class="s3">, </span><span class="s1">comp)</span>
+
+
+<span class="s1">def_comp(lax.expm1_p</span><span class="s3">, lambda </span><span class="s1">x: lax.exp(x) - </span><span class="s5">1</span><span class="s1">)</span>
+<span class="s1">def_comp(lax.log1p_p</span><span class="s3">, lambda </span><span class="s1">x: lax.log(</span><span class="s5">1 </span><span class="s1">+ x))</span>
+<span class="s1">def_comp(lax.sqrt_p</span><span class="s3">, lambda </span><span class="s1">x: x ** </span><span class="s5">0.5</span><span class="s1">)</span>
+<span class="s1">def_comp(lax.rsqrt_p</span><span class="s3">, lambda </span><span class="s1">x: x ** -</span><span class="s5">0.5</span><span class="s1">)</span>
+<span class="s1">def_comp(lax.asinh_p</span><span class="s3">, lambda </span><span class="s1">x: lax.log(x + lax.sqrt(lax.square(x) + </span><span class="s5">1</span><span class="s1">)))</span>
+<span class="s1">def_comp(lax.acosh_p</span><span class="s3">, lambda </span><span class="s1">x: lax.log(x + lax.sqrt(lax.square(x) - </span><span class="s5">1</span><span class="s1">)))</span>
+<span class="s1">def_comp(lax.atanh_p</span><span class="s3">, lambda </span><span class="s1">x: </span><span class="s5">0.5 </span><span class="s1">* lax.log(lax.div(</span><span class="s5">1 </span><span class="s1">+ x</span><span class="s3">, </span><span class="s5">1 </span><span class="s1">- x)))</span>
+<span class="s1">def_comp(lax.erfc_p</span><span class="s3">, lambda </span><span class="s1">x: </span><span class="s5">1 </span><span class="s1">- lax.erf(x))</span>
+<span class="s1">def_comp(lax.rem_p</span><span class="s3">, lambda </span><span class="s1">x</span><span class="s3">, </span><span class="s1">y: x - y * lax.floor(x / y))</span>
+<span class="s1">def_comp(lax.clamp_p</span><span class="s3">, lambda </span><span class="s1">a</span><span class="s3">, </span><span class="s1">x</span><span class="s3">, </span><span class="s1">b: lax.min(lax.max(a</span><span class="s3">, </span><span class="s1">x)</span><span class="s3">, </span><span class="s1">b))</span>
+
+
+<span class="s3">def </span><span class="s1">_erf_inv_rule(primals_in</span><span class="s3">, </span><span class="s1">series_in):</span>
+  <span class="s1">x</span><span class="s3">, </span><span class="s1">= primals_in</span>
+  <span class="s1">series</span><span class="s3">, </span><span class="s1">= series_in</span>
+
+  <span class="s1">u = [x] + series</span>
+  <span class="s1">primal_out = lax.erf_inv(x)</span>
+  <span class="s1">v = [primal_out] + [</span><span class="s3">None</span><span class="s1">] * len(series)</span>
+
+  <span class="s0"># derivative on co-domain for caching purposes</span>
+  <span class="s1">deriv_const = np.sqrt(np.pi) / </span><span class="s5">2.</span>
+  <span class="s1">deriv_y = </span><span class="s3">lambda </span><span class="s1">y: lax.mul(deriv_const</span><span class="s3">, </span><span class="s1">lax.exp(lax.square(y)))</span>
+
+  <span class="s0"># manually propagate through deriv_y since we don't have lazy evaluation of sensitivities</span>
+
+  <span class="s1">c = [deriv_y(primal_out)] + [</span><span class="s3">None</span><span class="s1">] * (len(series) - </span><span class="s5">1</span><span class="s1">)</span>
+  <span class="s1">tmp_sq = [lax.square(v[</span><span class="s5">0</span><span class="s1">])] + [</span><span class="s3">None</span><span class="s1">] * (len(series) - </span><span class="s5">1</span><span class="s1">)</span>
+  <span class="s1">tmp_exp = [lax.exp(tmp_sq[</span><span class="s5">0</span><span class="s1">])] + [</span><span class="s3">None</span><span class="s1">] * (len(series) - </span><span class="s5">1</span><span class="s1">)</span>
+  <span class="s3">for </span><span class="s1">k </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">1</span><span class="s3">, </span><span class="s1">len(series)):</span>
+    <span class="s0"># we know c[:k], we compute c[k]</span>
+
+    <span class="s0"># propagate c to get v</span>
+    <span class="s1">v[k] = fact(k-</span><span class="s5">1</span><span class="s1">) * sum(_scale(k</span><span class="s3">, </span><span class="s1">j) * c[k-j] * u[j] </span><span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">1</span><span class="s3">, </span><span class="s1">k + </span><span class="s5">1</span><span class="s1">))</span>
+
+    <span class="s0"># propagate v to get next c</span>
+
+    <span class="s0"># square</span>
+    <span class="s1">tmp_sq[k] = fact(k) * sum(_scale2(k</span><span class="s3">, </span><span class="s1">j) * v[k-j] * v[j] </span><span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">range(k + </span><span class="s5">1</span><span class="s1">))</span>
+
+    <span class="s0"># exp</span>
+    <span class="s1">tmp_exp[k] = fact(k-</span><span class="s5">1</span><span class="s1">) * sum(_scale(k</span><span class="s3">, </span><span class="s1">j) * tmp_exp[k-j] * tmp_sq[j] </span><span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">1</span><span class="s3">, </span><span class="s1">k + </span><span class="s5">1</span><span class="s1">))</span>
+
+    <span class="s0"># const</span>
+    <span class="s1">c[k] = deriv_const * tmp_exp[k]</span>
+
+  <span class="s0"># we can't, and don't need, to compute c[k+1], just need to get the last v[k]</span>
+  <span class="s1">k = len(series)</span>
+  <span class="s1">v[k] = fact(k-</span><span class="s5">1</span><span class="s1">) * sum(_scale(k</span><span class="s3">, </span><span class="s1">j) * c[k-j] * u[j] </span><span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">1</span><span class="s3">, </span><span class="s1">k + </span><span class="s5">1</span><span class="s1">))</span>
+
+  <span class="s1">primal_out</span><span class="s3">, </span><span class="s1">*series_out = v</span>
+  <span class="s3">return </span><span class="s1">primal_out</span><span class="s3">, </span><span class="s1">series_out</span>
+<span class="s1">jet_rules[lax.erf_inv_p] = _erf_inv_rule</span>
+
+<span class="s0">### More complicated rules</span>
+
+<span class="s3">def </span><span class="s1">fact(n):</span>
+  <span class="s3">return </span><span class="s1">lax.exp(lax.lgamma(n+</span><span class="s5">1.</span><span class="s1">))</span>
+
+<span class="s3">def </span><span class="s1">_scale(k</span><span class="s3">, </span><span class="s1">j):</span>
+  <span class="s3">return </span><span class="s5">1. </span><span class="s1">/ (fact(k - j) * fact(j - </span><span class="s5">1</span><span class="s1">))</span>
+
+<span class="s3">def </span><span class="s1">_scale2(k</span><span class="s3">, </span><span class="s1">j):</span>
+  <span class="s3">return </span><span class="s5">1. </span><span class="s1">/ (fact(k - j) * fact(j))</span>
+
+<span class="s3">def </span><span class="s1">_exp_taylor(primals_in</span><span class="s3">, </span><span class="s1">series_in):</span>
+  <span class="s1">x</span><span class="s3">, </span><span class="s1">= primals_in</span>
+  <span class="s1">series</span><span class="s3">, </span><span class="s1">= series_in</span>
+  <span class="s1">u = [x] + series</span>
+  <span class="s1">v = [lax.exp(x)] + [</span><span class="s3">None</span><span class="s1">] * len(series)</span>
+  <span class="s3">for </span><span class="s1">k </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">1</span><span class="s3">,</span><span class="s1">len(v)):</span>
+    <span class="s1">v[k] = fact(k-</span><span class="s5">1</span><span class="s1">) * sum(_scale(k</span><span class="s3">, </span><span class="s1">j) * v[k-j] * u[j] </span><span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">1</span><span class="s3">, </span><span class="s1">k+</span><span class="s5">1</span><span class="s1">))</span>
+  <span class="s1">primal_out</span><span class="s3">, </span><span class="s1">*series_out = v</span>
+  <span class="s3">return </span><span class="s1">primal_out</span><span class="s3">, </span><span class="s1">series_out</span>
+<span class="s1">jet_rules[lax.exp_p] = _exp_taylor</span>
+
+<span class="s3">def </span><span class="s1">_pow_taylor(primals_in</span><span class="s3">, </span><span class="s1">series_in):</span>
+  <span class="s1">u_</span><span class="s3">, </span><span class="s1">r_ = primals_in</span>
+
+  <span class="s1">x</span><span class="s3">, </span><span class="s1">series = jet(</span><span class="s3">lambda </span><span class="s1">x</span><span class="s3">, </span><span class="s1">y: lax.mul(y</span><span class="s3">, </span><span class="s1">lax.log(x))</span><span class="s3">, </span><span class="s1">primals_in</span><span class="s3">, </span><span class="s1">series_in)</span>
+
+  <span class="s1">u = [x] + series</span>
+  <span class="s1">v = [u_ ** r_] + [</span><span class="s3">None</span><span class="s1">] * len(series)</span>
+  <span class="s3">for </span><span class="s1">k </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">1</span><span class="s3">, </span><span class="s1">len(v)):</span>
+    <span class="s1">v[k] = fact(k-</span><span class="s5">1</span><span class="s1">) * sum(_scale(k</span><span class="s3">, </span><span class="s1">j) * v[k-j] * u[j] </span><span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">1</span><span class="s3">, </span><span class="s1">k+</span><span class="s5">1</span><span class="s1">))</span>
+  <span class="s1">primal_out</span><span class="s3">, </span><span class="s1">*series_out = v</span>
+
+  <span class="s3">return </span><span class="s1">primal_out</span><span class="s3">, </span><span class="s1">series_out</span>
+<span class="s1">jet_rules[lax.pow_p] = _pow_taylor</span>
+
+<span class="s3">def </span><span class="s1">_integer_pow_taylor(primals_in</span><span class="s3">, </span><span class="s1">series_in</span><span class="s3">, </span><span class="s1">*</span><span class="s3">, </span><span class="s1">y):</span>
+  <span class="s3">if </span><span class="s1">y == </span><span class="s5">0</span><span class="s1">:</span>
+    <span class="s3">return </span><span class="s1">jet(jnp.ones_like</span><span class="s3">, </span><span class="s1">primals_in</span><span class="s3">, </span><span class="s1">series_in)</span>
+  <span class="s3">elif </span><span class="s1">y == </span><span class="s5">1</span><span class="s1">:</span>
+    <span class="s3">return </span><span class="s1">jet(</span><span class="s3">lambda </span><span class="s1">x: x</span><span class="s3">, </span><span class="s1">primals_in</span><span class="s3">, </span><span class="s1">series_in)</span>
+  <span class="s3">elif </span><span class="s1">y == </span><span class="s5">2</span><span class="s1">:</span>
+    <span class="s3">return </span><span class="s1">jet(</span><span class="s3">lambda </span><span class="s1">x: x * x</span><span class="s3">, </span><span class="s1">primals_in</span><span class="s3">, </span><span class="s1">series_in)</span>
+  <span class="s1">x</span><span class="s3">, </span><span class="s1">= primals_in</span>
+  <span class="s1">series</span><span class="s3">, </span><span class="s1">= series_in</span>
+  <span class="s1">u = [x] + series</span>
+  <span class="s1">v = [lax.integer_pow(x</span><span class="s3">, </span><span class="s1">y)] + [</span><span class="s3">None</span><span class="s1">] * len(series)</span>
+  <span class="s3">for </span><span class="s1">k </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">1</span><span class="s3">, </span><span class="s1">len(v)):</span>
+    <span class="s1">vu = sum(_scale(k</span><span class="s3">, </span><span class="s1">j) * v[k-j] * u[j] </span><span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">1</span><span class="s3">, </span><span class="s1">k + </span><span class="s5">1</span><span class="s1">))</span>
+    <span class="s1">uv = sum(_scale(k</span><span class="s3">, </span><span class="s1">j) * u[k-j] * v[j] </span><span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">1</span><span class="s3">, </span><span class="s1">k))</span>
+    <span class="s1">v[k] = jnp.where(x == </span><span class="s5">0</span><span class="s3">, </span><span class="s5">0</span><span class="s3">, </span><span class="s1">fact(k-</span><span class="s5">1</span><span class="s1">) * (y * vu - uv) / x)</span>
+  <span class="s1">primal_out</span><span class="s3">, </span><span class="s1">*series_out = v</span>
+
+  <span class="s3">return </span><span class="s1">primal_out</span><span class="s3">, </span><span class="s1">series_out</span>
+<span class="s1">jet_rules[lax.integer_pow_p] = _integer_pow_taylor</span>
+
+
+<span class="s3">def </span><span class="s1">_logistic_taylor(primals_in</span><span class="s3">, </span><span class="s1">series_in):</span>
+  <span class="s1">x</span><span class="s3">, </span><span class="s1">= primals_in</span>
+  <span class="s1">series</span><span class="s3">, </span><span class="s1">= series_in</span>
+  <span class="s1">u = [x] + series</span>
+  <span class="s1">v = [lax.logistic(x)] + [</span><span class="s3">None</span><span class="s1">] * len(series)</span>
+  <span class="s1">e = [v[</span><span class="s5">0</span><span class="s1">] * (</span><span class="s5">1 </span><span class="s1">- v[</span><span class="s5">0</span><span class="s1">])] + [</span><span class="s3">None</span><span class="s1">] * len(series)  </span><span class="s0"># terms for sigmoid' = sigmoid * (1 - sigmoid)</span>
+  <span class="s3">for </span><span class="s1">k </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">1</span><span class="s3">, </span><span class="s1">len(v)):</span>
+    <span class="s1">v[k] = fact(k-</span><span class="s5">1</span><span class="s1">) * sum(_scale(k</span><span class="s3">, </span><span class="s1">j) * e[k-j] * u[j] </span><span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">1</span><span class="s3">, </span><span class="s1">k+</span><span class="s5">1</span><span class="s1">))</span>
+    <span class="s1">e[k] = (</span><span class="s5">1 </span><span class="s1">- v[</span><span class="s5">0</span><span class="s1">]) * v[k] - fact(k) * sum(_scale2(k</span><span class="s3">, </span><span class="s1">j) * v[j] * v[k-j] </span><span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">1</span><span class="s3">, </span><span class="s1">k+</span><span class="s5">1</span><span class="s1">))</span>
+
+  <span class="s1">primal_out</span><span class="s3">, </span><span class="s1">*series_out = v</span>
+  <span class="s3">return </span><span class="s1">primal_out</span><span class="s3">, </span><span class="s1">series_out</span>
+
+<span class="s1">jet_rules[lax.logistic_p] = _logistic_taylor</span>
+
+
+<span class="s3">def </span><span class="s1">_tanh_taylor(primals_in</span><span class="s3">, </span><span class="s1">series_in):</span>
+  <span class="s1">x</span><span class="s3">, </span><span class="s1">= primals_in</span>
+  <span class="s1">series</span><span class="s3">, </span><span class="s1">= series_in</span>
+  <span class="s1">u = [</span><span class="s5">2</span><span class="s1">*x] + [</span><span class="s5">2 </span><span class="s1">* series_ </span><span class="s3">for </span><span class="s1">series_ </span><span class="s3">in </span><span class="s1">series]</span>
+  <span class="s1">primals_in</span><span class="s3">, </span><span class="s1">*series_in = u</span>
+  <span class="s1">primal_out</span><span class="s3">, </span><span class="s1">series_out = _logistic_taylor((primals_in</span><span class="s3">, </span><span class="s1">)</span><span class="s3">, </span><span class="s1">(series_in</span><span class="s3">, </span><span class="s1">))</span>
+  <span class="s1">series_out = [</span><span class="s5">2 </span><span class="s1">* series_ </span><span class="s3">for </span><span class="s1">series_ </span><span class="s3">in </span><span class="s1">series_out]</span>
+  <span class="s3">return </span><span class="s5">2 </span><span class="s1">* primal_out - </span><span class="s5">1</span><span class="s3">, </span><span class="s1">series_out</span>
+<span class="s1">jet_rules[lax.tanh_p] = _tanh_taylor</span>
+
+<span class="s3">def </span><span class="s1">_log_taylor(primals_in</span><span class="s3">, </span><span class="s1">series_in):</span>
+  <span class="s1">x</span><span class="s3">, </span><span class="s1">= primals_in</span>
+  <span class="s1">series</span><span class="s3">, </span><span class="s1">= series_in</span>
+  <span class="s1">u = [x] + series</span>
+  <span class="s1">v = [lax.log(x)] + [</span><span class="s3">None</span><span class="s1">] * len(series)</span>
+  <span class="s3">for </span><span class="s1">k </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">1</span><span class="s3">, </span><span class="s1">len(v)):</span>
+    <span class="s1">conv = sum(_scale(k</span><span class="s3">, </span><span class="s1">j) * v[j] * u[k-j] </span><span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">1</span><span class="s3">, </span><span class="s1">k))</span>
+    <span class="s1">v[k] = (u[k] - fact(k - </span><span class="s5">1</span><span class="s1">) * conv) / u[</span><span class="s5">0</span><span class="s1">]</span>
+  <span class="s1">primal_out</span><span class="s3">, </span><span class="s1">*series_out = v</span>
+  <span class="s3">return </span><span class="s1">primal_out</span><span class="s3">, </span><span class="s1">series_out</span>
+<span class="s1">jet_rules[lax.log_p] = _log_taylor</span>
+
+<span class="s3">def </span><span class="s1">_atan2_taylor(primals_in</span><span class="s3">, </span><span class="s1">series_in):</span>
+  <span class="s1">x</span><span class="s3">, </span><span class="s1">y = primals_in</span>
+  <span class="s1">primal_out = lax.atan2(x</span><span class="s3">, </span><span class="s1">y)</span>
+
+  <span class="s1">x</span><span class="s3">, </span><span class="s1">series = jet(lax.div</span><span class="s3">, </span><span class="s1">primals_in</span><span class="s3">, </span><span class="s1">series_in)</span>
+  <span class="s1">one = lax_internal._const(x</span><span class="s3">, </span><span class="s5">1</span><span class="s1">)</span>
+  <span class="s1">c0</span><span class="s3">, </span><span class="s1">cs = jet(</span><span class="s3">lambda </span><span class="s1">x: lax.div(one</span><span class="s3">, </span><span class="s5">1 </span><span class="s1">+ lax.square(x))</span><span class="s3">, </span><span class="s1">(x</span><span class="s3">, </span><span class="s1">)</span><span class="s3">, </span><span class="s1">(series</span><span class="s3">, </span><span class="s1">))</span>
+  <span class="s1">c = [c0] + cs</span>
+  <span class="s1">u = [x] + series</span>
+  <span class="s1">v = [primal_out] + [</span><span class="s3">None</span><span class="s1">] * len(series)</span>
+  <span class="s3">for </span><span class="s1">k </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">1</span><span class="s3">, </span><span class="s1">len(v)):</span>
+    <span class="s1">v[k] = fact(k-</span><span class="s5">1</span><span class="s1">) * sum(_scale(k</span><span class="s3">, </span><span class="s1">j) * c[k-j] * u[j] </span><span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">1</span><span class="s3">, </span><span class="s1">k + </span><span class="s5">1</span><span class="s1">))</span>
+  <span class="s1">primal_out</span><span class="s3">, </span><span class="s1">*series_out = v</span>
+  <span class="s3">return </span><span class="s1">primal_out</span><span class="s3">, </span><span class="s1">series_out</span>
+<span class="s1">jet_rules[lax.atan2_p] = _atan2_taylor</span>
+
+<span class="s3">def </span><span class="s1">_div_taylor_rule(primals_in</span><span class="s3">, </span><span class="s1">series_in):</span>
+  <span class="s1">x</span><span class="s3">, </span><span class="s1">y = primals_in</span>
+  <span class="s1">x_terms</span><span class="s3">, </span><span class="s1">y_terms = series_in</span>
+  <span class="s1">u = [x] + x_terms</span>
+  <span class="s1">w = [y] + y_terms</span>
+  <span class="s1">v = [</span><span class="s3">None</span><span class="s1">] * len(u)</span>
+  <span class="s3">def </span><span class="s1">scale(k</span><span class="s3">, </span><span class="s1">j): </span><span class="s3">return </span><span class="s5">1. </span><span class="s1">/ (fact(k - j) * fact(j))</span>
+  <span class="s3">for </span><span class="s1">k </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">0</span><span class="s3">, </span><span class="s1">len(v)):</span>
+    <span class="s1">conv = sum(scale(k</span><span class="s3">, </span><span class="s1">j) * v[j] * w[k-j] </span><span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">0</span><span class="s3">, </span><span class="s1">k))</span>
+    <span class="s1">v[k] = (u[k] - fact(k) * conv) / w[</span><span class="s5">0</span><span class="s1">]</span>
+  <span class="s1">primal_out</span><span class="s3">, </span><span class="s1">*series_out = v</span>
+  <span class="s3">return </span><span class="s1">primal_out</span><span class="s3">, </span><span class="s1">series_out</span>
+<span class="s1">jet_rules[lax.div_p] = _div_taylor_rule</span>
+
+<span class="s3">def </span><span class="s1">_sinusoidal_rule(sign</span><span class="s3">, </span><span class="s1">prims</span><span class="s3">, </span><span class="s1">primals_in</span><span class="s3">, </span><span class="s1">series_in):</span>
+  <span class="s1">x</span><span class="s3">, </span><span class="s1">= primals_in</span>
+  <span class="s1">series</span><span class="s3">, </span><span class="s1">= series_in</span>
+  <span class="s1">u = [x] + series</span>
+  <span class="s1">s</span><span class="s3">, </span><span class="s1">c = prims</span>
+  <span class="s1">s = [s(x)] + [</span><span class="s3">None</span><span class="s1">] * len(series)</span>
+  <span class="s1">c = [c(x)] + [</span><span class="s3">None</span><span class="s1">] * len(series)</span>
+  <span class="s3">for </span><span class="s1">k </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">1</span><span class="s3">, </span><span class="s1">len(s)):</span>
+    <span class="s1">s[k] = fact(k-</span><span class="s5">1</span><span class="s1">) * sum(_scale(k</span><span class="s3">, </span><span class="s1">j) * u[j] * c[k-j] </span><span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">1</span><span class="s3">, </span><span class="s1">k + </span><span class="s5">1</span><span class="s1">))</span>
+    <span class="s1">c[k] = fact(k-</span><span class="s5">1</span><span class="s1">) * sum(_scale(k</span><span class="s3">, </span><span class="s1">j) * u[j] * s[k-j] </span><span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">1</span><span class="s3">, </span><span class="s1">k + </span><span class="s5">1</span><span class="s1">)) * sign</span>
+  <span class="s3">return </span><span class="s1">(s[</span><span class="s5">0</span><span class="s1">]</span><span class="s3">, </span><span class="s1">s[</span><span class="s5">1</span><span class="s1">:])</span><span class="s3">, </span><span class="s1">(c[</span><span class="s5">0</span><span class="s1">]</span><span class="s3">, </span><span class="s1">c[</span><span class="s5">1</span><span class="s1">:])</span>
+
+<span class="s3">def </span><span class="s1">_get_ind(f</span><span class="s3">, </span><span class="s1">ind):</span>
+  <span class="s3">return lambda </span><span class="s1">*args: f(*args)[ind]</span>
+
+<span class="s1">jet_rules[lax.sin_p] = _get_ind(partial(_sinusoidal_rule</span><span class="s3">, </span><span class="s1">-</span><span class="s5">1</span><span class="s3">, </span><span class="s1">(lax.sin</span><span class="s3">, </span><span class="s1">lax.cos))</span><span class="s3">, </span><span class="s5">0</span><span class="s1">)</span>
+<span class="s1">jet_rules[lax.cos_p] = _get_ind(partial(_sinusoidal_rule</span><span class="s3">, </span><span class="s1">-</span><span class="s5">1</span><span class="s3">, </span><span class="s1">(lax.sin</span><span class="s3">, </span><span class="s1">lax.cos))</span><span class="s3">, </span><span class="s5">1</span><span class="s1">)</span>
+<span class="s1">jet_rules[lax.sinh_p] = _get_ind(partial(_sinusoidal_rule</span><span class="s3">, </span><span class="s5">1</span><span class="s3">, </span><span class="s1">(lax.sinh</span><span class="s3">, </span><span class="s1">lax.cosh))</span><span class="s3">, </span><span class="s5">0</span><span class="s1">)</span>
+<span class="s1">jet_rules[lax.cosh_p] = _get_ind(partial(_sinusoidal_rule</span><span class="s3">, </span><span class="s5">1</span><span class="s3">, </span><span class="s1">(lax.sinh</span><span class="s3">, </span><span class="s1">lax.cosh))</span><span class="s3">, </span><span class="s5">1</span><span class="s1">)</span>
+
+<span class="s3">def </span><span class="s1">_bilinear_taylor_rule(prim</span><span class="s3">, </span><span class="s1">primals_in</span><span class="s3">, </span><span class="s1">series_in</span><span class="s3">, </span><span class="s1">**params):</span>
+  <span class="s1">x</span><span class="s3">, </span><span class="s1">y = primals_in</span>
+  <span class="s1">x_terms</span><span class="s3">, </span><span class="s1">y_terms = series_in</span>
+  <span class="s1">u = [x] + x_terms</span>
+  <span class="s1">w = [y] + y_terms</span>
+  <span class="s1">v = [</span><span class="s3">None</span><span class="s1">] * len(u)</span>
+  <span class="s1">op = partial(prim.bind</span><span class="s3">, </span><span class="s1">**params)</span>
+  <span class="s3">def </span><span class="s1">scale(k</span><span class="s3">, </span><span class="s1">j): </span><span class="s3">return </span><span class="s5">1. </span><span class="s1">/ (fact(k - j) * fact(j))</span>
+  <span class="s3">for </span><span class="s1">k </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">0</span><span class="s3">, </span><span class="s1">len(v)):</span>
+    <span class="s1">v[k] = fact(k) * sum(scale(k</span><span class="s3">, </span><span class="s1">j) * op(u[j]</span><span class="s3">, </span><span class="s1">w[k-j]) </span><span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">0</span><span class="s3">, </span><span class="s1">k+</span><span class="s5">1</span><span class="s1">))</span>
+  <span class="s1">primal_out</span><span class="s3">, </span><span class="s1">*series_out = v</span>
+  <span class="s3">return </span><span class="s1">primal_out</span><span class="s3">, </span><span class="s1">series_out</span>
+<span class="s1">jet_rules[lax.dot_general_p] = partial(_bilinear_taylor_rule</span><span class="s3">, </span><span class="s1">lax.dot_general_p)</span>
+<span class="s1">jet_rules[lax.mul_p] = partial(_bilinear_taylor_rule</span><span class="s3">, </span><span class="s1">lax.mul_p)</span>
+<span class="s1">jet_rules[lax.conv_general_dilated_p] = partial(_bilinear_taylor_rule</span><span class="s3">, </span><span class="s1">lax.conv_general_dilated_p)</span>
+
+<span class="s3">def </span><span class="s1">_gather_taylor_rule(primals_in</span><span class="s3">, </span><span class="s1">series_in</span><span class="s3">, </span><span class="s1">**params):</span>
+  <span class="s1">operand</span><span class="s3">, </span><span class="s1">start_indices = primals_in</span>
+  <span class="s1">gs</span><span class="s3">, </span><span class="s1">_ = series_in</span>
+  <span class="s1">primal_out = lax.gather_p.bind(operand</span><span class="s3">, </span><span class="s1">start_indices</span><span class="s3">, </span><span class="s1">**params)</span>
+  <span class="s1">series_out = [lax.gather_p.bind(g</span><span class="s3">, </span><span class="s1">start_indices</span><span class="s3">, </span><span class="s1">**params) </span><span class="s3">for </span><span class="s1">g </span><span class="s3">in </span><span class="s1">gs]</span>
+  <span class="s3">return </span><span class="s1">primal_out</span><span class="s3">, </span><span class="s1">series_out</span>
+<span class="s1">jet_rules[lax.gather_p] = _gather_taylor_rule</span>
+
+<span class="s3">def </span><span class="s1">_gen_reduce_choose_taylor_rule(chooser_fun):</span>
+  <span class="s3">def </span><span class="s1">chooser_taylor_rule(primals_in</span><span class="s3">, </span><span class="s1">series_in</span><span class="s3">, </span><span class="s1">**params):</span>
+    <span class="s1">operand</span><span class="s3">, </span><span class="s1">= primals_in</span>
+    <span class="s1">gs</span><span class="s3">, </span><span class="s1">= series_in</span>
+    <span class="s1">primal_out = chooser_fun(operand</span><span class="s3">, </span><span class="s1">**params)</span>
+    <span class="s1">axes = params.pop(</span><span class="s4">&quot;axes&quot;</span><span class="s3">, None</span><span class="s1">)</span>
+    <span class="s1">primal_dtype = gs[</span><span class="s5">0</span><span class="s1">].dtype</span>
+    <span class="s1">shape = [</span><span class="s5">1 </span><span class="s3">if </span><span class="s1">i </span><span class="s3">in </span><span class="s1">axes </span><span class="s3">else </span><span class="s1">d </span><span class="s3">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">d </span><span class="s3">in </span><span class="s1">enumerate(operand.shape)]</span>
+    <span class="s1">location_indicators = lax.convert_element_type(</span>
+        <span class="s1">lax_internal._eq_meet(operand</span><span class="s3">, </span><span class="s1">lax.reshape(primal_out</span><span class="s3">, </span><span class="s1">shape))</span><span class="s3">,</span>
+        <span class="s1">primal_dtype)</span>
+    <span class="s1">counts = lax_internal._reduce_sum(location_indicators</span><span class="s3">, </span><span class="s1">axes)</span>
+    <span class="s3">def </span><span class="s1">_reduce_chooser_taylor_rule(g):</span>
+      <span class="s3">return </span><span class="s1">lax.div(</span>
+          <span class="s1">lax_internal._reduce_sum(lax.mul(g</span><span class="s3">, </span><span class="s1">location_indicators)</span><span class="s3">, </span><span class="s1">axes)</span><span class="s3">,</span>
+          <span class="s1">counts)</span>
+    <span class="s1">series_out = [_reduce_chooser_taylor_rule(g) </span><span class="s3">for </span><span class="s1">g </span><span class="s3">in </span><span class="s1">gs]</span>
+    <span class="s3">return </span><span class="s1">primal_out</span><span class="s3">, </span><span class="s1">series_out</span>
+  <span class="s3">return </span><span class="s1">chooser_taylor_rule</span>
+<span class="s1">jet_rules[lax.reduce_max_p] = _gen_reduce_choose_taylor_rule(</span>
+    <span class="s1">lax_internal._reduce_max)</span>
+<span class="s1">jet_rules[lax.reduce_min_p] = _gen_reduce_choose_taylor_rule(</span>
+    <span class="s1">lax_internal._reduce_min)</span>
+
+<span class="s3">def </span><span class="s1">_abs_taylor_rule(x</span><span class="s3">, </span><span class="s1">series_in</span><span class="s3">, </span><span class="s1">**params):</span>
+  <span class="s1">x</span><span class="s3">, </span><span class="s1">= x</span>
+  <span class="s1">zero = lax.full_like(x</span><span class="s3">, </span><span class="s5">0</span><span class="s3">, </span><span class="s1">shape=())</span>
+  <span class="s1">primal_out = lax.abs_p.bind(x</span><span class="s3">, </span><span class="s1">**params)</span>
+  <span class="s1">negs = lax.select(lax.lt(x</span><span class="s3">, </span><span class="s1">zero)</span><span class="s3">, </span><span class="s1">lax.full_like(x</span><span class="s3">, </span><span class="s1">-</span><span class="s5">1</span><span class="s1">)</span><span class="s3">, </span><span class="s1">lax.full_like(x</span><span class="s3">, </span><span class="s5">1.0</span><span class="s1">))</span>
+  <span class="s1">fix_sign = </span><span class="s3">lambda </span><span class="s1">y: negs * y</span>
+  <span class="s1">series_out = [fix_sign(*terms_in</span><span class="s3">, </span><span class="s1">**params) </span><span class="s3">for </span><span class="s1">terms_in </span><span class="s3">in </span><span class="s1">zip(*series_in)]</span>
+  <span class="s3">return </span><span class="s1">primal_out</span><span class="s3">, </span><span class="s1">series_out</span>
+<span class="s1">jet_rules[lax.abs_p] = _abs_taylor_rule</span>
+
+<span class="s3">def </span><span class="s1">_select_n_taylor_rule(primal_in</span><span class="s3">, </span><span class="s1">series_in</span><span class="s3">, </span><span class="s1">**params):</span>
+  <span class="s1">b</span><span class="s3">, </span><span class="s1">*cases = primal_in</span>
+  <span class="s1">primal_out = lax.select_n(b</span><span class="s3">, </span><span class="s1">*cases)</span>
+  <span class="s1">sel = </span><span class="s3">lambda </span><span class="s1">_</span><span class="s3">, </span><span class="s1">*xs: lax.select_n(b</span><span class="s3">, </span><span class="s1">*xs)</span>
+  <span class="s1">series_out = [sel(*terms_in) </span><span class="s3">for </span><span class="s1">terms_in </span><span class="s3">in </span><span class="s1">zip(*series_in)]</span>
+  <span class="s3">return </span><span class="s1">primal_out</span><span class="s3">, </span><span class="s1">series_out</span>
+<span class="s1">jet_rules[lax.select_n_p] = _select_n_taylor_rule</span>
+
+<span class="s3">def </span><span class="s1">_lax_max_taylor_rule(primal_in</span><span class="s3">, </span><span class="s1">series_in):</span>
+    <span class="s1">x</span><span class="s3">, </span><span class="s1">y = jnp.broadcast_arrays(*primal_in)</span>
+
+    <span class="s1">xgy = x &gt; y   </span><span class="s0"># greater than mask</span>
+    <span class="s1">xey = x == y  </span><span class="s0"># equal to mask</span>
+    <span class="s1">primal_out = lax.select(xgy</span><span class="s3">, </span><span class="s1">x</span><span class="s3">, </span><span class="s1">y)</span>
+
+    <span class="s3">def </span><span class="s1">select_max_and_avg_eq(x_i</span><span class="s3">, </span><span class="s1">y_i):</span>
+        <span class="s2">&quot;&quot;&quot;Select x where x&gt;y or average when x==y&quot;&quot;&quot;</span>
+        <span class="s1">max_i = lax.select(xgy</span><span class="s3">, </span><span class="s1">x_i</span><span class="s3">, </span><span class="s1">y_i)</span>
+        <span class="s1">max_i = lax.select(xey</span><span class="s3">, </span><span class="s1">(x_i + y_i)/</span><span class="s5">2</span><span class="s3">, </span><span class="s1">max_i)</span>
+        <span class="s3">return </span><span class="s1">max_i</span>
+
+    <span class="s1">series_out = [select_max_and_avg_eq(*jnp.broadcast_arrays(*terms_in)) </span><span class="s3">for </span><span class="s1">terms_in </span><span class="s3">in </span><span class="s1">zip(*series_in)]</span>
+    <span class="s3">return </span><span class="s1">primal_out</span><span class="s3">, </span><span class="s1">series_out</span>
+<span class="s1">jet_rules[lax.max_p] = _lax_max_taylor_rule</span>
+
+<span class="s3">def </span><span class="s1">_lax_min_taylor_rule(primal_in</span><span class="s3">, </span><span class="s1">series_in):</span>
+    <span class="s1">x</span><span class="s3">, </span><span class="s1">y = primal_in</span>
+    <span class="s1">xgy = x &lt; y   </span><span class="s0"># less than mask</span>
+    <span class="s1">xey = x == y  </span><span class="s0"># equal to mask</span>
+    <span class="s1">primal_out = lax.select(xgy</span><span class="s3">, </span><span class="s1">x</span><span class="s3">, </span><span class="s1">y)</span>
+
+    <span class="s3">def </span><span class="s1">select_min_and_avg_eq(x_i</span><span class="s3">, </span><span class="s1">y_i):</span>
+        <span class="s2">&quot;&quot;&quot;Select x where x&gt;y or average when x==y&quot;&quot;&quot;</span>
+        <span class="s1">min_i = lax.select(xgy</span><span class="s3">, </span><span class="s1">x_i</span><span class="s3">, </span><span class="s1">y_i)</span>
+        <span class="s1">min_i = lax.select(xey</span><span class="s3">, </span><span class="s1">(x_i + y_i)/</span><span class="s5">2</span><span class="s3">, </span><span class="s1">min_i)</span>
+        <span class="s3">return </span><span class="s1">min_i</span>
+
+    <span class="s1">series_out = [select_min_and_avg_eq(*terms_in) </span><span class="s3">for </span><span class="s1">terms_in </span><span class="s3">in </span><span class="s1">zip(*series_in)]</span>
+    <span class="s3">return </span><span class="s1">primal_out</span><span class="s3">, </span><span class="s1">series_out</span>
+<span class="s1">jet_rules[lax.min_p] = _lax_min_taylor_rule</span>
+
+<span class="s3">def </span><span class="s1">_scatter_add_rule(primals_in</span><span class="s3">, </span><span class="s1">series_in</span><span class="s3">, </span><span class="s1">*</span><span class="s3">, </span><span class="s1">update_jaxpr</span><span class="s3">, </span><span class="s1">update_consts</span><span class="s3">,</span>
+                      <span class="s1">dimension_numbers</span><span class="s3">, </span><span class="s1">indices_are_sorted</span><span class="s3">, </span><span class="s1">unique_indices</span><span class="s3">,</span>
+                      <span class="s1">mode):</span>
+  <span class="s1">bind = partial(lax.scatter_add_p.bind</span><span class="s3">, </span><span class="s1">update_jaxpr=update_jaxpr</span><span class="s3">,</span>
+                 <span class="s1">update_consts=update_consts</span><span class="s3">, </span><span class="s1">dimension_numbers=dimension_numbers</span><span class="s3">,</span>
+                 <span class="s1">indices_are_sorted=indices_are_sorted</span><span class="s3">,</span>
+                 <span class="s1">unique_indices=unique_indices</span><span class="s3">, </span><span class="s1">mode=mode)</span>
+  <span class="s1">operand</span><span class="s3">, </span><span class="s1">scatter_indices</span><span class="s3">, </span><span class="s1">updates = primals_in</span>
+  <span class="s1">primal_out = bind(operand</span><span class="s3">, </span><span class="s1">scatter_indices</span><span class="s3">, </span><span class="s1">updates)</span>
+  <span class="s1">series_out = [bind(d1</span><span class="s3">, </span><span class="s1">scatter_indices</span><span class="s3">, </span><span class="s1">d2) </span><span class="s3">for </span><span class="s1">d1</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">d2 </span><span class="s3">in </span><span class="s1">zip(*series_in)]</span>
+  <span class="s3">return </span><span class="s1">primal_out</span><span class="s3">, </span><span class="s1">series_out</span>
+<span class="s1">jet_rules[lax.scatter_add_p] = _scatter_add_rule</span>
+
+
+<span class="s1">@weakref_lru_cache</span>
+<span class="s3">def </span><span class="s1">_jet_jaxpr(</span>
+    <span class="s1">jaxpr: core.ClosedJaxpr</span><span class="s3">, </span><span class="s1">order: int</span><span class="s3">, </span><span class="s1">primals_and_series_avals</span><span class="s3">, </span><span class="s1">in_tree_def</span>
+<span class="s1">) -&gt; Tuple[core.ClosedJaxpr</span><span class="s3">, </span><span class="s1">Any]:</span>
+  <span class="s1">f = lu.wrap_init(core.jaxpr_as_fun(jaxpr))</span>
+  <span class="s1">f_jet</span><span class="s3">, </span><span class="s1">out_tree_def = traceable(jet_fun(jet_subtrace(f)</span><span class="s3">, </span><span class="s1">order)</span><span class="s3">, </span><span class="s1">in_tree_def)</span>
+  <span class="s1">jaxpr_jet</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">consts = pe.trace_to_jaxpr_dynamic(</span>
+      <span class="s1">f_jet</span><span class="s3">, </span><span class="s1">primals_and_series_avals)</span>
+  <span class="s3">return </span><span class="s1">core.ClosedJaxpr(jaxpr_jet</span><span class="s3">, </span><span class="s1">consts)</span><span class="s3">, </span><span class="s1">out_tree_def</span>
+
+
+<span class="s3">def </span><span class="s1">_pjit_jet_rule(primals_in</span><span class="s3">, </span><span class="s1">series_in</span><span class="s3">, </span><span class="s1">**params):</span>
+  <span class="s1">primals_and_series</span><span class="s3">, </span><span class="s1">in_tree_def = tree_flatten((primals_in</span><span class="s3">, </span><span class="s1">series_in))</span>
+  <span class="s1">order = len(series_in[</span><span class="s5">0</span><span class="s1">])</span>
+  <span class="s1">primals_and_series_avals = tuple(shaped_abstractify(x) </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">primals_and_series)</span>
+  <span class="s1">jaxpr_jet</span><span class="s3">, </span><span class="s1">out_tree_def = _jet_jaxpr(params[</span><span class="s4">'jaxpr'</span><span class="s1">]</span><span class="s3">, </span><span class="s1">order</span><span class="s3">,</span>
+                                       <span class="s1">primals_and_series_avals</span><span class="s3">, </span><span class="s1">in_tree_def)</span>
+  <span class="s1">num_series_in = len(primals_in) * order</span>
+  <span class="s1">num_series_out = len(params[</span><span class="s4">'out_shardings'</span><span class="s1">]) * order</span>
+  <span class="s1">new_params = {</span>
+      <span class="s1">**params</span><span class="s3">,</span>
+      <span class="s4">'jaxpr'</span><span class="s1">: jaxpr_jet</span><span class="s3">,</span>
+      <span class="s4">'in_shardings'</span><span class="s1">: (</span>
+          <span class="s1">params[</span><span class="s4">'in_shardings'</span><span class="s1">] + (pjit._UNSPECIFIED</span><span class="s3">,</span><span class="s1">) * num_series_in)</span><span class="s3">,</span>
+      <span class="s4">'out_shardings'</span><span class="s1">: params[</span><span class="s4">'out_shardings'</span><span class="s1">] + (pjit._UNSPECIFIED</span><span class="s3">,</span><span class="s1">) * num_series_out</span><span class="s3">,</span>
+      <span class="s4">'donated_invars'</span><span class="s1">: params[</span><span class="s4">'donated_invars'</span><span class="s1">] + (</span><span class="s3">False,</span><span class="s1">) * num_series_in</span><span class="s3">,</span>
+  <span class="s1">}</span>
+  <span class="s1">result = pjit.pjit_p.bind(*primals_and_series</span><span class="s3">, </span><span class="s1">**new_params)</span>
+  <span class="s3">return </span><span class="s1">tree_unflatten(out_tree_def()</span><span class="s3">, </span><span class="s1">result)</span>
+
+<span class="s1">jet_rules[pjit.pjit_p] = _pjit_jet_rule</span>
+</pre>
+</body>
+</html>

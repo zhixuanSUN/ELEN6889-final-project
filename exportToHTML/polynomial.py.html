@@ -1,0 +1,346 @@
+<html>
+<head>
+<title>polynomial.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6897bb;}
+.s4 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+polynomial.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2018 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+
+<span class="s2">from </span><span class="s1">functools </span><span class="s2">import </span><span class="s1">partial</span>
+<span class="s2">import </span><span class="s1">operator</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Optional</span><span class="s2">, </span><span class="s1">Tuple</span><span class="s2">, </span><span class="s1">Union</span>
+
+<span class="s2">import </span><span class="s1">numpy </span><span class="s2">as </span><span class="s1">np</span>
+
+<span class="s2">from </span><span class="s1">jax </span><span class="s2">import </span><span class="s1">jit</span>
+<span class="s2">from </span><span class="s1">jax </span><span class="s2">import </span><span class="s1">lax</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">dtypes</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">core</span>
+<span class="s2">from </span><span class="s1">jax._src.numpy.lax_numpy </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">arange</span><span class="s2">, </span><span class="s1">argmin</span><span class="s2">, </span><span class="s1">array</span><span class="s2">, </span><span class="s1">asarray</span><span class="s2">, </span><span class="s1">atleast_1d</span><span class="s2">, </span><span class="s1">concatenate</span><span class="s2">, </span><span class="s1">convolve</span><span class="s2">,</span>
+    <span class="s1">diag</span><span class="s2">, </span><span class="s1">dot</span><span class="s2">, </span><span class="s1">finfo</span><span class="s2">, </span><span class="s1">full</span><span class="s2">, </span><span class="s1">ones</span><span class="s2">, </span><span class="s1">outer</span><span class="s2">, </span><span class="s1">roll</span><span class="s2">, </span><span class="s1">trim_zeros</span><span class="s2">,</span>
+    <span class="s1">trim_zeros_tol</span><span class="s2">, </span><span class="s1">vander</span><span class="s2">, </span><span class="s1">zeros)</span>
+<span class="s2">from </span><span class="s1">jax._src.numpy.ufuncs </span><span class="s2">import </span><span class="s1">maximum</span><span class="s2">, </span><span class="s1">true_divide</span><span class="s2">, </span><span class="s1">sqrt</span>
+<span class="s2">from </span><span class="s1">jax._src.numpy.reductions </span><span class="s2">import </span><span class="s1">all</span>
+<span class="s2">from </span><span class="s1">jax._src.numpy </span><span class="s2">import </span><span class="s1">linalg</span>
+<span class="s2">from </span><span class="s1">jax._src.numpy.util </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">check_arraylike</span><span class="s2">, </span><span class="s1">promote_dtypes</span><span class="s2">, </span><span class="s1">promote_dtypes_inexact</span><span class="s2">, </span><span class="s1">_where</span><span class="s2">, </span><span class="s1">_wraps)</span>
+<span class="s2">from </span><span class="s1">jax._src.typing </span><span class="s2">import </span><span class="s1">Array</span><span class="s2">, </span><span class="s1">ArrayLike</span>
+
+
+<span class="s1">@jit</span>
+<span class="s2">def </span><span class="s1">_roots_no_zeros(p: Array) -&gt; Array:</span>
+  <span class="s0"># build companion matrix and find its eigenvalues (the roots)</span>
+  <span class="s2">if </span><span class="s1">p.size &lt; </span><span class="s3">2</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">array([]</span><span class="s2">, </span><span class="s1">dtype=dtypes.to_complex_dtype(p.dtype))</span>
+  <span class="s1">A = diag(ones((p.size - </span><span class="s3">2</span><span class="s2">,</span><span class="s1">)</span><span class="s2">, </span><span class="s1">p.dtype)</span><span class="s2">, </span><span class="s1">-</span><span class="s3">1</span><span class="s1">)</span>
+  <span class="s1">A = A.at[</span><span class="s3">0</span><span class="s2">, </span><span class="s1">:].set(-p[</span><span class="s3">1</span><span class="s1">:] / p[</span><span class="s3">0</span><span class="s1">])</span>
+  <span class="s2">return </span><span class="s1">linalg.eigvals(A)</span>
+
+
+<span class="s1">@jit</span>
+<span class="s2">def </span><span class="s1">_roots_with_zeros(p: Array</span><span class="s2">, </span><span class="s1">num_leading_zeros: int) -&gt; Array:</span>
+  <span class="s0"># Avoid lapack errors when p is all zero</span>
+  <span class="s1">p = _where(len(p) == num_leading_zeros</span><span class="s2">, </span><span class="s3">1.0</span><span class="s2">, </span><span class="s1">p)</span>
+  <span class="s0"># Roll any leading zeros to the end &amp; compute the roots</span>
+  <span class="s1">roots = _roots_no_zeros(roll(p</span><span class="s2">, </span><span class="s1">-num_leading_zeros))</span>
+  <span class="s0"># Sort zero roots to the end.</span>
+  <span class="s1">roots = lax.sort_key_val(roots == </span><span class="s3">0</span><span class="s2">, </span><span class="s1">roots)[</span><span class="s3">1</span><span class="s1">]</span>
+  <span class="s0"># Set roots associated with num_leading_zeros to NaN</span>
+  <span class="s2">return </span><span class="s1">_where(arange(roots.size) &lt; roots.size - num_leading_zeros</span><span class="s2">, </span><span class="s1">roots</span><span class="s2">, </span><span class="s1">complex(np.nan</span><span class="s2">, </span><span class="s1">np.nan))</span>
+
+
+<span class="s1">@_wraps(np.roots</span><span class="s2">, </span><span class="s1">lax_description=</span><span class="s4">&quot;&quot;&quot;</span><span class="s2">\ 
+</span><span class="s4">Unlike the numpy version of this function, the JAX version returns the roots in 
+a complex array regardless of the values of the roots. Additionally, the jax 
+version of this function adds the ``strip_zeros`` function which must be set to 
+False for the function to be compatible with JIT and other JAX transformations. 
+With ``strip_zeros=False``, if your coefficients have leading zeros, the 
+roots will be padded with NaN values: 
+ 
+&gt;&gt;&gt; coeffs = jnp.array([0, 1, 2]) 
+ 
+# The default behavior matches numpy and strips leading zeros: 
+&gt;&gt;&gt; jnp.roots(coeffs) 
+Array([-2.+0.j], dtype=complex64) 
+ 
+# With strip_zeros=False, extra roots are set to NaN: 
+&gt;&gt;&gt; jnp.roots(coeffs, strip_zeros=False) 
+Array([-2. +0.j, nan+nanj], dtype=complex64) 
+&quot;&quot;&quot;</span><span class="s2">,</span>
+<span class="s1">extra_params=</span><span class="s4">&quot;&quot;&quot; 
+strip_zeros : bool, default=True 
+    If set to True, then leading zeros in the coefficients will be stripped, similar 
+    to :func:`numpy.roots`. If set to False, leading zeros will not be stripped, and 
+    undefined roots will be represented by NaN values in the function output. 
+    ``strip_zeros`` must be set to ``False`` for the function to be compatible with 
+    :func:`jax.jit` and other JAX transformations. 
+&quot;&quot;&quot;</span><span class="s1">)</span>
+<span class="s2">def </span><span class="s1">roots(p: ArrayLike</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">strip_zeros: bool = </span><span class="s2">True</span><span class="s1">) -&gt; Array:</span>
+  <span class="s1">check_arraylike(</span><span class="s4">&quot;roots&quot;</span><span class="s2">, </span><span class="s1">p)</span>
+  <span class="s1">p_arr = atleast_1d(*promote_dtypes_inexact(p))</span>
+  <span class="s2">if </span><span class="s1">p_arr.ndim != </span><span class="s3">1</span><span class="s1">:</span>
+    <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Input must be a rank-1 array.&quot;</span><span class="s1">)</span>
+  <span class="s2">if </span><span class="s1">p_arr.size &lt; </span><span class="s3">2</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">array([]</span><span class="s2">, </span><span class="s1">dtype=dtypes.to_complex_dtype(p_arr.dtype))</span>
+  <span class="s1">num_leading_zeros = _where(all(p_arr == </span><span class="s3">0</span><span class="s1">)</span><span class="s2">, </span><span class="s1">len(p_arr)</span><span class="s2">, </span><span class="s1">argmin(p_arr == </span><span class="s3">0</span><span class="s1">))</span>
+
+  <span class="s2">if </span><span class="s1">strip_zeros:</span>
+    <span class="s1">num_leading_zeros = core.concrete_or_error(int</span><span class="s2">, </span><span class="s1">num_leading_zeros</span><span class="s2">,</span>
+      <span class="s4">&quot;The error occurred in the jnp.roots() function. To use this within a &quot;</span>
+      <span class="s4">&quot;JIT-compiled context, pass strip_zeros=False, but be aware that leading zeros &quot;</span>
+      <span class="s4">&quot;will be result in some returned roots being set to NaN.&quot;</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">_roots_no_zeros(p_arr[num_leading_zeros:])</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">_roots_with_zeros(p_arr</span><span class="s2">, </span><span class="s1">num_leading_zeros)</span>
+
+
+<span class="s1">_POLYFIT_DOC = </span><span class="s4">&quot;&quot;&quot;</span><span class="s2">\ 
+</span><span class="s4">Unlike NumPy's implementation of polyfit, :py:func:`jax.numpy.polyfit` will not warn on rank reduction, which indicates an ill conditioned matrix 
+Also, it works best on rcond &lt;= 10e-3 values. 
+&quot;&quot;&quot;</span>
+<span class="s1">@_wraps(np.polyfit</span><span class="s2">, </span><span class="s1">lax_description=_POLYFIT_DOC)</span>
+<span class="s1">@partial(jit</span><span class="s2">, </span><span class="s1">static_argnames=(</span><span class="s4">'deg'</span><span class="s2">, </span><span class="s4">'rcond'</span><span class="s2">, </span><span class="s4">'full'</span><span class="s2">, </span><span class="s4">'cov'</span><span class="s1">))</span>
+<span class="s2">def </span><span class="s1">polyfit(x: Array</span><span class="s2">, </span><span class="s1">y: Array</span><span class="s2">, </span><span class="s1">deg: int</span><span class="s2">, </span><span class="s1">rcond: Optional[float] = </span><span class="s2">None,</span>
+            <span class="s1">full: bool = </span><span class="s2">False, </span><span class="s1">w: Optional[Array] = </span><span class="s2">None, </span><span class="s1">cov: bool = </span><span class="s2">False</span>
+            <span class="s1">) -&gt; Union[Array</span><span class="s2">, </span><span class="s1">Tuple[Array</span><span class="s2">, </span><span class="s1">...]]:</span>
+  <span class="s1">check_arraylike(</span><span class="s4">&quot;polyfit&quot;</span><span class="s2">, </span><span class="s1">x</span><span class="s2">, </span><span class="s1">y)</span>
+  <span class="s1">deg = core.concrete_or_error(int</span><span class="s2">, </span><span class="s1">deg</span><span class="s2">, </span><span class="s4">&quot;deg must be int&quot;</span><span class="s1">)</span>
+  <span class="s1">order = deg + </span><span class="s3">1</span>
+  <span class="s0"># check arguments</span>
+  <span class="s2">if </span><span class="s1">deg &lt; </span><span class="s3">0</span><span class="s1">:</span>
+    <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;expected deg &gt;= 0&quot;</span><span class="s1">)</span>
+  <span class="s2">if </span><span class="s1">x.ndim != </span><span class="s3">1</span><span class="s1">:</span>
+    <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;expected 1D vector for x&quot;</span><span class="s1">)</span>
+  <span class="s2">if </span><span class="s1">x.size == </span><span class="s3">0</span><span class="s1">:</span>
+    <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;expected non-empty vector for x&quot;</span><span class="s1">)</span>
+  <span class="s2">if </span><span class="s1">y.ndim &lt; </span><span class="s3">1 </span><span class="s2">or </span><span class="s1">y.ndim &gt; </span><span class="s3">2</span><span class="s1">:</span>
+    <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;expected 1D or 2D array for y&quot;</span><span class="s1">)</span>
+  <span class="s2">if </span><span class="s1">x.shape[</span><span class="s3">0</span><span class="s1">] != y.shape[</span><span class="s3">0</span><span class="s1">]:</span>
+    <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;expected x and y to have same length&quot;</span><span class="s1">)</span>
+
+  <span class="s0"># set rcond</span>
+  <span class="s2">if </span><span class="s1">rcond </span><span class="s2">is None</span><span class="s1">:</span>
+    <span class="s1">rcond = len(x) * finfo(x.dtype).eps</span>
+  <span class="s1">rcond = core.concrete_or_error(float</span><span class="s2">, </span><span class="s1">rcond</span><span class="s2">, </span><span class="s4">&quot;rcond must be float&quot;</span><span class="s1">)</span>
+  <span class="s0"># set up least squares equation for powers of x</span>
+  <span class="s1">lhs = vander(x</span><span class="s2">, </span><span class="s1">order)</span>
+  <span class="s1">rhs = y</span>
+
+  <span class="s0"># apply weighting</span>
+  <span class="s2">if </span><span class="s1">w </span><span class="s2">is not None</span><span class="s1">:</span>
+    <span class="s1">check_arraylike(</span><span class="s4">&quot;polyfit&quot;</span><span class="s2">, </span><span class="s1">w)</span>
+    <span class="s1">w</span><span class="s2">, </span><span class="s1">= promote_dtypes_inexact(w)</span>
+    <span class="s2">if </span><span class="s1">w.ndim != </span><span class="s3">1</span><span class="s1">:</span>
+      <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;expected a 1-d array for weights&quot;</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">w.shape[</span><span class="s3">0</span><span class="s1">] != y.shape[</span><span class="s3">0</span><span class="s1">]:</span>
+      <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;expected w and y to have the same length&quot;</span><span class="s1">)</span>
+    <span class="s1">lhs *= w[:</span><span class="s2">, </span><span class="s1">np.newaxis]</span>
+    <span class="s2">if </span><span class="s1">rhs.ndim == </span><span class="s3">2</span><span class="s1">:</span>
+      <span class="s1">rhs *= w[:</span><span class="s2">, </span><span class="s1">np.newaxis]</span>
+    <span class="s2">else</span><span class="s1">:</span>
+      <span class="s1">rhs *= w</span>
+
+  <span class="s0"># scale lhs to improve condition number and solve</span>
+  <span class="s1">scale = sqrt((lhs*lhs).sum(axis=</span><span class="s3">0</span><span class="s1">))</span>
+  <span class="s1">lhs /= scale[np.newaxis</span><span class="s2">,</span><span class="s1">:]</span>
+  <span class="s1">c</span><span class="s2">, </span><span class="s1">resids</span><span class="s2">, </span><span class="s1">rank</span><span class="s2">, </span><span class="s1">s = linalg.lstsq(lhs</span><span class="s2">, </span><span class="s1">rhs</span><span class="s2">, </span><span class="s1">rcond)</span>
+  <span class="s1">c = (c.T/scale).T  </span><span class="s0"># broadcast scale coefficients</span>
+
+  <span class="s2">if </span><span class="s1">full:</span>
+    <span class="s2">return </span><span class="s1">c</span><span class="s2">, </span><span class="s1">resids</span><span class="s2">, </span><span class="s1">rank</span><span class="s2">, </span><span class="s1">s</span><span class="s2">, </span><span class="s1">asarray(rcond)</span>
+  <span class="s2">elif </span><span class="s1">cov:</span>
+    <span class="s1">Vbase = linalg.inv(dot(lhs.T</span><span class="s2">, </span><span class="s1">lhs))</span>
+    <span class="s1">Vbase /= outer(scale</span><span class="s2">, </span><span class="s1">scale)</span>
+    <span class="s2">if </span><span class="s1">cov == </span><span class="s4">&quot;unscaled&quot;</span><span class="s1">:</span>
+      <span class="s1">fac = </span><span class="s3">1</span>
+    <span class="s2">else</span><span class="s1">:</span>
+      <span class="s2">if </span><span class="s1">len(x) &lt;= order:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;the number of data points must exceed order &quot;</span>
+                            <span class="s4">&quot;to scale the covariance matrix&quot;</span><span class="s1">)</span>
+      <span class="s1">fac = resids / (len(x) - order)</span>
+      <span class="s1">fac = fac[</span><span class="s3">0</span><span class="s1">] </span><span class="s0">#making np.array() of shape (1,) to int</span>
+    <span class="s2">if </span><span class="s1">y.ndim == </span><span class="s3">1</span><span class="s1">:</span>
+      <span class="s2">return </span><span class="s1">c</span><span class="s2">, </span><span class="s1">Vbase * fac</span>
+    <span class="s2">else</span><span class="s1">:</span>
+      <span class="s2">return </span><span class="s1">c</span><span class="s2">, </span><span class="s1">Vbase[:</span><span class="s2">, </span><span class="s1">:</span><span class="s2">, </span><span class="s1">np.newaxis] * fac</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">c</span>
+
+
+<span class="s1">_POLY_DOC = </span><span class="s4">&quot;&quot;&quot;</span><span class="s2">\ 
+</span><span class="s4">This differs from np.poly when an integer array is given. 
+np.poly returns a result with dtype float64 in this case. 
+jax returns a result with an inexact type, but not necessarily 
+float64. 
+ 
+This also differs from np.poly when the input array strictly 
+contains pairs of complex conjugates, e.g. [1j, -1j, 1-1j, 1+1j]. 
+np.poly returns an array with a real dtype in such cases. 
+jax returns an array with a complex dtype in such cases. 
+&quot;&quot;&quot;</span>
+
+<span class="s1">@_wraps(np.poly</span><span class="s2">, </span><span class="s1">lax_description=_POLY_DOC)</span>
+<span class="s1">@jit</span>
+<span class="s2">def </span><span class="s1">poly(seq_of_zeros: Array) -&gt; Array:</span>
+  <span class="s1">check_arraylike(</span><span class="s4">'poly'</span><span class="s2">, </span><span class="s1">seq_of_zeros)</span>
+  <span class="s1">seq_of_zeros</span><span class="s2">, </span><span class="s1">= promote_dtypes_inexact(seq_of_zeros)</span>
+  <span class="s1">seq_of_zeros = atleast_1d(seq_of_zeros)</span>
+
+  <span class="s1">sh = seq_of_zeros.shape</span>
+  <span class="s2">if </span><span class="s1">len(sh) == </span><span class="s3">2 </span><span class="s2">and </span><span class="s1">sh[</span><span class="s3">0</span><span class="s1">] == sh[</span><span class="s3">1</span><span class="s1">] </span><span class="s2">and </span><span class="s1">sh[</span><span class="s3">0</span><span class="s1">] != </span><span class="s3">0</span><span class="s1">:</span>
+    <span class="s0"># import at runtime to avoid circular import</span>
+    <span class="s2">from </span><span class="s1">jax._src.numpy </span><span class="s2">import </span><span class="s1">linalg</span>
+    <span class="s1">seq_of_zeros = linalg.eigvals(seq_of_zeros)</span>
+
+  <span class="s2">if </span><span class="s1">seq_of_zeros.ndim != </span><span class="s3">1</span><span class="s1">:</span>
+    <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;input must be 1d or non-empty square 2d array.&quot;</span><span class="s1">)</span>
+
+  <span class="s1">dt = seq_of_zeros.dtype</span>
+  <span class="s2">if </span><span class="s1">len(seq_of_zeros) == </span><span class="s3">0</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">ones(()</span><span class="s2">, </span><span class="s1">dtype=dt)</span>
+
+  <span class="s1">a = ones((</span><span class="s3">1</span><span class="s2">,</span><span class="s1">)</span><span class="s2">, </span><span class="s1">dtype=dt)</span>
+  <span class="s2">for </span><span class="s1">k </span><span class="s2">in </span><span class="s1">range(len(seq_of_zeros)):</span>
+    <span class="s1">a = convolve(a</span><span class="s2">, </span><span class="s1">array([</span><span class="s3">1</span><span class="s2">, </span><span class="s1">-seq_of_zeros[k]]</span><span class="s2">, </span><span class="s1">dtype=dt)</span><span class="s2">, </span><span class="s1">mode=</span><span class="s4">'full'</span><span class="s1">)</span>
+
+  <span class="s2">return </span><span class="s1">a</span>
+
+
+<span class="s1">@_wraps(np.polyval</span><span class="s2">, </span><span class="s1">lax_description=</span><span class="s4">&quot;&quot;&quot;</span><span class="s2">\ 
+</span><span class="s4">The ``unroll`` parameter is JAX specific. It does not effect correctness but can 
+have a major impact on performance for evaluating high-order polynomials. The 
+parameter controls the number of unrolled steps with ``lax.scan`` inside the 
+``polyval`` implementation. Consider setting ``unroll=128`` (or even higher) to 
+improve runtime performance on accelerators, at the cost of increased 
+compilation time. 
+&quot;&quot;&quot;</span><span class="s1">)</span>
+<span class="s1">@partial(jit</span><span class="s2">, </span><span class="s1">static_argnames=[</span><span class="s4">'unroll'</span><span class="s1">])</span>
+<span class="s2">def </span><span class="s1">polyval(p: Array</span><span class="s2">, </span><span class="s1">x: Array</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">unroll: int = </span><span class="s3">16</span><span class="s1">) -&gt; Array:</span>
+  <span class="s1">check_arraylike(</span><span class="s4">&quot;polyval&quot;</span><span class="s2">, </span><span class="s1">p</span><span class="s2">, </span><span class="s1">x)</span>
+  <span class="s1">p</span><span class="s2">, </span><span class="s1">x = promote_dtypes_inexact(p</span><span class="s2">, </span><span class="s1">x)</span>
+  <span class="s1">shape = lax.broadcast_shapes(p.shape[</span><span class="s3">1</span><span class="s1">:]</span><span class="s2">, </span><span class="s1">x.shape)</span>
+  <span class="s1">y = lax.full_like(x</span><span class="s2">, </span><span class="s3">0</span><span class="s2">, </span><span class="s1">shape=shape</span><span class="s2">, </span><span class="s1">dtype=x.dtype)</span>
+  <span class="s1">y</span><span class="s2">, </span><span class="s1">_ = lax.scan(</span><span class="s2">lambda </span><span class="s1">y</span><span class="s2">, </span><span class="s1">p: (y * x + p</span><span class="s2">, None</span><span class="s1">)</span><span class="s2">, </span><span class="s1">y</span><span class="s2">, </span><span class="s1">p</span><span class="s2">, </span><span class="s1">unroll=unroll)</span>
+  <span class="s2">return </span><span class="s1">y</span>
+
+<span class="s1">@_wraps(np.polyadd)</span>
+<span class="s1">@jit</span>
+<span class="s2">def </span><span class="s1">polyadd(a1: Array</span><span class="s2">, </span><span class="s1">a2: Array) -&gt; Array:</span>
+  <span class="s1">check_arraylike(</span><span class="s4">&quot;polyadd&quot;</span><span class="s2">, </span><span class="s1">a1</span><span class="s2">, </span><span class="s1">a2)</span>
+  <span class="s1">a1</span><span class="s2">, </span><span class="s1">a2 = promote_dtypes(a1</span><span class="s2">, </span><span class="s1">a2)</span>
+  <span class="s2">if </span><span class="s1">a2.shape[</span><span class="s3">0</span><span class="s1">] &lt;= a1.shape[</span><span class="s3">0</span><span class="s1">]:</span>
+    <span class="s2">return </span><span class="s1">a1.at[-a2.shape[</span><span class="s3">0</span><span class="s1">]:].add(a2)</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">a2.at[-a1.shape[</span><span class="s3">0</span><span class="s1">]:].add(a1)</span>
+
+
+<span class="s1">@_wraps(np.polyint)</span>
+<span class="s1">@partial(jit</span><span class="s2">, </span><span class="s1">static_argnames=(</span><span class="s4">'m'</span><span class="s2">,</span><span class="s1">))</span>
+<span class="s2">def </span><span class="s1">polyint(p: Array</span><span class="s2">, </span><span class="s1">m: int = </span><span class="s3">1</span><span class="s2">, </span><span class="s1">k: Optional[int] = </span><span class="s2">None</span><span class="s1">) -&gt; Array:</span>
+  <span class="s1">m = core.concrete_or_error(operator.index</span><span class="s2">, </span><span class="s1">m</span><span class="s2">, </span><span class="s4">&quot;'m' argument of jnp.polyint&quot;</span><span class="s1">)</span>
+  <span class="s1">k = </span><span class="s3">0 </span><span class="s2">if </span><span class="s1">k </span><span class="s2">is None else </span><span class="s1">k</span>
+  <span class="s1">check_arraylike(</span><span class="s4">&quot;polyint&quot;</span><span class="s2">, </span><span class="s1">p</span><span class="s2">, </span><span class="s1">k)</span>
+  <span class="s1">p</span><span class="s2">, </span><span class="s1">k_arr = promote_dtypes_inexact(p</span><span class="s2">, </span><span class="s1">k)</span>
+  <span class="s2">if </span><span class="s1">m &lt; </span><span class="s3">0</span><span class="s1">:</span>
+    <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Order of integral must be positive (see polyder)&quot;</span><span class="s1">)</span>
+  <span class="s1">k_arr = atleast_1d(k_arr)</span>
+  <span class="s2">if </span><span class="s1">len(k_arr) == </span><span class="s3">1</span><span class="s1">:</span>
+    <span class="s1">k_arr = full((m</span><span class="s2">,</span><span class="s1">)</span><span class="s2">, </span><span class="s1">k_arr[</span><span class="s3">0</span><span class="s1">])</span>
+  <span class="s2">if </span><span class="s1">k_arr.shape != (m</span><span class="s2">,</span><span class="s1">):</span>
+    <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;k must be a scalar or a rank-1 array of length 1 or m.&quot;</span><span class="s1">)</span>
+  <span class="s2">if </span><span class="s1">m == </span><span class="s3">0</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">p</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s1">grid = (arange(len(p) + m</span><span class="s2">, </span><span class="s1">dtype=p.dtype)[np.newaxis]</span>
+            <span class="s1">- arange(m</span><span class="s2">, </span><span class="s1">dtype=p.dtype)[:</span><span class="s2">, </span><span class="s1">np.newaxis])</span>
+    <span class="s1">coeff = maximum(</span><span class="s3">1</span><span class="s2">, </span><span class="s1">grid).prod(</span><span class="s3">0</span><span class="s1">)[::-</span><span class="s3">1</span><span class="s1">]</span>
+    <span class="s2">return </span><span class="s1">true_divide(concatenate((p</span><span class="s2">, </span><span class="s1">k_arr))</span><span class="s2">, </span><span class="s1">coeff)</span>
+
+
+<span class="s1">@_wraps(np.polyder)</span>
+<span class="s1">@partial(jit</span><span class="s2">, </span><span class="s1">static_argnames=(</span><span class="s4">'m'</span><span class="s2">,</span><span class="s1">))</span>
+<span class="s2">def </span><span class="s1">polyder(p: Array</span><span class="s2">, </span><span class="s1">m: int = </span><span class="s3">1</span><span class="s1">) -&gt; Array:</span>
+  <span class="s1">check_arraylike(</span><span class="s4">&quot;polyder&quot;</span><span class="s2">, </span><span class="s1">p)</span>
+  <span class="s1">m = core.concrete_or_error(operator.index</span><span class="s2">, </span><span class="s1">m</span><span class="s2">, </span><span class="s4">&quot;'m' argument of jnp.polyder&quot;</span><span class="s1">)</span>
+  <span class="s1">p</span><span class="s2">, </span><span class="s1">= promote_dtypes_inexact(p)</span>
+  <span class="s2">if </span><span class="s1">m &lt; </span><span class="s3">0</span><span class="s1">:</span>
+    <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Order of derivative must be positive&quot;</span><span class="s1">)</span>
+  <span class="s2">if </span><span class="s1">m == </span><span class="s3">0</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">p</span>
+  <span class="s1">coeff = (arange(m</span><span class="s2">, </span><span class="s1">len(p)</span><span class="s2">, </span><span class="s1">dtype=p.dtype)[np.newaxis]</span>
+          <span class="s1">- arange(m</span><span class="s2">, </span><span class="s1">dtype=p.dtype)[:</span><span class="s2">, </span><span class="s1">np.newaxis]).prod(</span><span class="s3">0</span><span class="s1">)</span>
+  <span class="s2">return </span><span class="s1">p[:-m] * coeff[::-</span><span class="s3">1</span><span class="s1">]</span>
+
+
+<span class="s1">_LEADING_ZEROS_DOC = </span><span class="s4">&quot;&quot;&quot;</span><span class="s2">\ 
+</span><span class="s4">Setting trim_leading_zeros=True makes the output match that of numpy. 
+But prevents the function from being able to be used in compiled code. 
+Due to differences in accumulation of floating point arithmetic errors, the cutoff for values to be 
+considered zero may lead to inconsistent results between NumPy and JAX, and even between different 
+JAX backends. The result may lead to inconsistent output shapes when trim_leading_zeros=True. 
+&quot;&quot;&quot;</span>
+
+<span class="s1">@_wraps(np.polymul</span><span class="s2">, </span><span class="s1">lax_description=_LEADING_ZEROS_DOC)</span>
+<span class="s2">def </span><span class="s1">polymul(a1: ArrayLike</span><span class="s2">, </span><span class="s1">a2: ArrayLike</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">trim_leading_zeros: bool = </span><span class="s2">False</span><span class="s1">) -&gt; Array:</span>
+  <span class="s1">check_arraylike(</span><span class="s4">&quot;polymul&quot;</span><span class="s2">, </span><span class="s1">a1</span><span class="s2">, </span><span class="s1">a2)</span>
+  <span class="s1">a1_arr</span><span class="s2">, </span><span class="s1">a2_arr = promote_dtypes_inexact(a1</span><span class="s2">, </span><span class="s1">a2)</span>
+  <span class="s2">if </span><span class="s1">trim_leading_zeros </span><span class="s2">and </span><span class="s1">(len(a1_arr) &gt; </span><span class="s3">1 </span><span class="s2">or </span><span class="s1">len(a2_arr) &gt; </span><span class="s3">1</span><span class="s1">):</span>
+    <span class="s1">a1_arr</span><span class="s2">, </span><span class="s1">a2_arr = trim_zeros(a1_arr</span><span class="s2">, </span><span class="s1">trim=</span><span class="s4">'f'</span><span class="s1">)</span><span class="s2">, </span><span class="s1">trim_zeros(a2_arr</span><span class="s2">, </span><span class="s1">trim=</span><span class="s4">'f'</span><span class="s1">)</span>
+  <span class="s2">if </span><span class="s1">len(a1_arr) == </span><span class="s3">0</span><span class="s1">:</span>
+    <span class="s1">a1_arr = asarray([</span><span class="s3">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">dtype=a2_arr.dtype)</span>
+  <span class="s2">if </span><span class="s1">len(a2_arr) == </span><span class="s3">0</span><span class="s1">:</span>
+    <span class="s1">a2_arr = asarray([</span><span class="s3">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">dtype=a1_arr.dtype)</span>
+  <span class="s2">return </span><span class="s1">convolve(a1_arr</span><span class="s2">, </span><span class="s1">a2_arr</span><span class="s2">, </span><span class="s1">mode=</span><span class="s4">'full'</span><span class="s1">)</span>
+
+<span class="s1">@_wraps(np.polydiv</span><span class="s2">, </span><span class="s1">lax_description=_LEADING_ZEROS_DOC)</span>
+<span class="s2">def </span><span class="s1">polydiv(u: ArrayLike</span><span class="s2">, </span><span class="s1">v: ArrayLike</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">trim_leading_zeros: bool = </span><span class="s2">False</span><span class="s1">) -&gt; Tuple[Array</span><span class="s2">, </span><span class="s1">Array]:</span>
+  <span class="s1">check_arraylike(</span><span class="s4">&quot;polydiv&quot;</span><span class="s2">, </span><span class="s1">u</span><span class="s2">, </span><span class="s1">v)</span>
+  <span class="s1">u_arr</span><span class="s2">, </span><span class="s1">v_arr = promote_dtypes_inexact(u</span><span class="s2">, </span><span class="s1">v)</span>
+  <span class="s1">m = len(u_arr) - </span><span class="s3">1</span>
+  <span class="s1">n = len(v_arr) - </span><span class="s3">1</span>
+  <span class="s1">scale = </span><span class="s3">1. </span><span class="s1">/ v_arr[</span><span class="s3">0</span><span class="s1">]</span>
+  <span class="s1">q: Array = zeros(max(m - n + </span><span class="s3">1</span><span class="s2">, </span><span class="s3">1</span><span class="s1">)</span><span class="s2">, </span><span class="s1">dtype = u_arr.dtype) </span><span class="s0"># force same dtype</span>
+  <span class="s2">for </span><span class="s1">k </span><span class="s2">in </span><span class="s1">range(</span><span class="s3">0</span><span class="s2">, </span><span class="s1">m-n+</span><span class="s3">1</span><span class="s1">):</span>
+    <span class="s1">d = scale * u_arr[k]</span>
+    <span class="s1">q = q.at[k].set(d)</span>
+    <span class="s1">u_arr = u_arr.at[k:k+n+</span><span class="s3">1</span><span class="s1">].add(-d*v_arr)</span>
+  <span class="s2">if </span><span class="s1">trim_leading_zeros:</span>
+    <span class="s0"># use the square root of finfo(dtype) to approximate the absolute tolerance used in numpy</span>
+    <span class="s1">u_arr = trim_zeros_tol(u_arr</span><span class="s2">, </span><span class="s1">tol=sqrt(finfo(u_arr.dtype).eps)</span><span class="s2">, </span><span class="s1">trim=</span><span class="s4">'f'</span><span class="s1">)</span>
+  <span class="s2">return </span><span class="s1">q</span><span class="s2">, </span><span class="s1">u_arr</span>
+
+<span class="s1">@_wraps(np.polysub)</span>
+<span class="s1">@jit</span>
+<span class="s2">def </span><span class="s1">polysub(a1: Array</span><span class="s2">, </span><span class="s1">a2: Array) -&gt; Array:</span>
+  <span class="s1">check_arraylike(</span><span class="s4">&quot;polysub&quot;</span><span class="s2">, </span><span class="s1">a1</span><span class="s2">, </span><span class="s1">a2)</span>
+  <span class="s1">a1</span><span class="s2">, </span><span class="s1">a2 = promote_dtypes(a1</span><span class="s2">, </span><span class="s1">a2)</span>
+  <span class="s2">return </span><span class="s1">polyadd(a1</span><span class="s2">, </span><span class="s1">-a2)</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,188 @@
+<html>
+<head>
+<title>colab_lib.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+colab_lib.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2022 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+<span class="s2">&quot;&quot;&quot;Module for building interfaces in Colab.&quot;&quot;&quot;</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">annotations</span>
+
+<span class="s3">import </span><span class="s1">abc</span>
+<span class="s3">import </span><span class="s1">dataclasses</span>
+<span class="s3">import </span><span class="s1">functools</span>
+<span class="s3">import </span><span class="s1">sys</span>
+<span class="s3">import </span><span class="s1">uuid</span>
+
+<span class="s3">from </span><span class="s1">typing </span><span class="s3">import </span><span class="s1">Any</span><span class="s3">, </span><span class="s1">Dict</span><span class="s3">, </span><span class="s1">List</span><span class="s3">, </span><span class="s1">Union</span>
+
+<span class="s1">IS_COLAB_ENABLED = </span><span class="s4">&quot;google.colab&quot; </span><span class="s3">in </span><span class="s1">sys.modules</span>
+<span class="s3">if </span><span class="s1">IS_COLAB_ENABLED:</span>
+  <span class="s0"># pylint: disable=g-import-not-at-top</span>
+  <span class="s0"># pytype: disable=import-error</span>
+  <span class="s3">from </span><span class="s1">google.colab </span><span class="s3">import </span><span class="s1">output</span>
+  <span class="s3">from </span><span class="s1">IPython </span><span class="s3">import </span><span class="s1">display</span>
+  <span class="s0"># pytype: enable=import-error</span>
+  <span class="s0"># pylint: enable=g-import-not-at-top</span>
+
+
+<span class="s3">class </span><span class="s1">DOMElement(metaclass=abc.ABCMeta):</span>
+
+  <span class="s1">@abc.abstractmethod</span>
+  <span class="s3">def </span><span class="s1">render(self):</span>
+    <span class="s3">pass</span>
+
+
+<span class="s1">Element = Union[DOMElement</span><span class="s3">, </span><span class="s1">str]</span>
+
+
+<span class="s3">class </span><span class="s1">DynamicDOMElement(DOMElement):</span>
+  <span class="s2">&quot;&quot;&quot;A DOM element that can be mutated.&quot;&quot;&quot;</span>
+
+  <span class="s1">@abc.abstractmethod</span>
+  <span class="s3">def </span><span class="s1">render(self):</span>
+    <span class="s3">pass</span>
+
+  <span class="s1">@abc.abstractmethod</span>
+  <span class="s3">def </span><span class="s1">append(self</span><span class="s3">, </span><span class="s1">child: DOMElement):</span>
+    <span class="s3">pass</span>
+
+  <span class="s1">@abc.abstractmethod</span>
+  <span class="s3">def </span><span class="s1">update(self</span><span class="s3">, </span><span class="s1">elem: DOMElement):</span>
+    <span class="s3">pass</span>
+
+  <span class="s1">@abc.abstractmethod</span>
+  <span class="s3">def </span><span class="s1">clear(self):</span>
+    <span class="s3">pass</span>
+
+<span class="s1">@dataclasses.dataclass</span>
+<span class="s3">class </span><span class="s1">DynamicDiv(DynamicDOMElement):</span>
+  <span class="s2">&quot;&quot;&quot;A `div` that can be edited.&quot;&quot;&quot;</span>
+  <span class="s1">_uuid: str = dataclasses.field(init=</span><span class="s3">False</span><span class="s1">)</span>
+  <span class="s1">_root_elem: DOMElement = dataclasses.field(init=</span><span class="s3">False</span><span class="s1">)</span>
+  <span class="s1">elem: Union[DOMElement</span><span class="s3">, </span><span class="s1">str]</span>
+
+  <span class="s3">def </span><span class="s1">__post_init__(self):</span>
+    <span class="s1">self._uuid = str(uuid.uuid4())</span>
+    <span class="s1">self._rendered = </span><span class="s3">False</span>
+    <span class="s1">self._root_elem = div(id=self.tag)</span>
+
+  <span class="s1">@property</span>
+  <span class="s3">def </span><span class="s1">tag(self):</span>
+    <span class="s3">return </span><span class="s4">f&quot;tag-</span><span class="s3">{</span><span class="s1">self._uuid</span><span class="s3">}</span><span class="s4">&quot;</span>
+
+  <span class="s3">def </span><span class="s1">render(self):</span>
+    <span class="s3">if </span><span class="s1">self._rendered:</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Can't call `render` twice.&quot;</span><span class="s1">)</span>
+    <span class="s1">self._root_elem.render()</span>
+    <span class="s1">self._rendered = </span><span class="s3">True</span>
+    <span class="s1">self.append(self.elem)</span>
+
+  <span class="s3">def </span><span class="s1">append(self</span><span class="s3">, </span><span class="s1">child: DOMElement):</span>
+    <span class="s3">if not </span><span class="s1">self._rendered:</span>
+      <span class="s1">self.render()</span>
+    <span class="s3">with </span><span class="s1">output.use_tags([self.tag]):</span>
+      <span class="s3">with </span><span class="s1">output.redirect_to_element(</span><span class="s4">f&quot;#</span><span class="s3">{</span><span class="s1">self.tag</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s1">):</span>
+        <span class="s1">child.render()</span>
+
+  <span class="s3">def </span><span class="s1">update(self</span><span class="s3">, </span><span class="s1">elem: DOMElement):</span>
+    <span class="s1">self.clear()</span>
+    <span class="s1">self.elem = elem</span>
+    <span class="s1">self.render()</span>
+
+  <span class="s3">def </span><span class="s1">clear(self):</span>
+    <span class="s1">output.clear(output_tags=[self.tag])</span>
+    <span class="s1">self._rendered = </span><span class="s3">False</span>
+
+
+<span class="s1">@dataclasses.dataclass</span>
+<span class="s3">class </span><span class="s1">StaticDOMElement(DOMElement):</span>
+  <span class="s2">&quot;&quot;&quot;An immutable DOM element.&quot;&quot;&quot;</span>
+  <span class="s1">_uuid: str = dataclasses.field(init=</span><span class="s3">False</span><span class="s1">)</span>
+  <span class="s1">name: str</span>
+  <span class="s1">children: List[Union[str</span><span class="s3">, </span><span class="s1">DOMElement]]</span>
+  <span class="s1">attrs: Dict[str</span><span class="s3">, </span><span class="s1">str]</span>
+
+  <span class="s3">def </span><span class="s1">html(self):</span>
+    <span class="s1">attr_str = </span><span class="s4">&quot;&quot;</span>
+    <span class="s3">if </span><span class="s1">self.attrs:</span>
+      <span class="s1">attr_str = </span><span class="s4">&quot; &quot; </span><span class="s1">+ (</span><span class="s4">&quot; &quot;</span><span class="s1">.join(</span>
+          <span class="s1">[</span><span class="s4">f&quot;</span><span class="s3">{</span><span class="s1">key</span><span class="s3">}</span><span class="s4">=</span><span class="s3">\&quot;{</span><span class="s1">value</span><span class="s3">}\&quot;</span><span class="s4">&quot; </span><span class="s3">for </span><span class="s1">key</span><span class="s3">, </span><span class="s1">value </span><span class="s3">in </span><span class="s1">self.attrs.items()]))</span>
+    <span class="s1">children = []</span>
+    <span class="s1">children = </span><span class="s4">&quot;</span><span class="s3">\n</span><span class="s4">&quot;</span><span class="s1">.join([str(c) </span><span class="s3">for </span><span class="s1">c </span><span class="s3">in </span><span class="s1">self.children])</span>
+    <span class="s3">return </span><span class="s4">f&quot;&lt;</span><span class="s3">{</span><span class="s1">self.name</span><span class="s3">}{</span><span class="s1">attr_str</span><span class="s3">}</span><span class="s4">&gt;</span><span class="s3">{</span><span class="s1">children</span><span class="s3">}</span><span class="s4">&lt;/</span><span class="s3">{</span><span class="s1">self.name</span><span class="s3">}</span><span class="s4">&gt;&quot;</span>
+
+  <span class="s3">def </span><span class="s1">render(self):</span>
+    <span class="s1">display.display(display.HTML(self.html()))</span>
+
+  <span class="s3">def </span><span class="s1">attr(self</span><span class="s3">, </span><span class="s1">key: str) -&gt; str:</span>
+    <span class="s3">return </span><span class="s1">self.attrs[key]</span>
+
+  <span class="s3">def </span><span class="s1">__str__(self):</span>
+    <span class="s3">return </span><span class="s1">self.html()</span>
+
+  <span class="s3">def </span><span class="s1">__repr__(self):</span>
+    <span class="s3">return </span><span class="s1">self.html()</span>
+
+  <span class="s3">def </span><span class="s1">append(self</span><span class="s3">, </span><span class="s1">child: DOMElement) -&gt; DOMElement:</span>
+    <span class="s3">return </span><span class="s1">dataclasses.replace(self</span><span class="s3">, </span><span class="s1">children=[*self.children</span><span class="s3">, </span><span class="s1">child])</span>
+
+  <span class="s3">def </span><span class="s1">replace(self</span><span class="s3">, </span><span class="s1">**kwargs) -&gt; DOMElement:</span>
+    <span class="s3">return </span><span class="s1">dataclasses.replace(self</span><span class="s3">, </span><span class="s1">**kwargs)</span>
+
+
+<span class="s3">def </span><span class="s1">_style_dict_to_str(style_dict: Dict[str</span><span class="s3">, </span><span class="s1">Any]) -&gt; str:</span>
+  <span class="s3">return </span><span class="s4">&quot; &quot;</span><span class="s1">.join([</span><span class="s4">f&quot;</span><span class="s3">{</span><span class="s1">k</span><span class="s3">}</span><span class="s4">: </span><span class="s3">{</span><span class="s1">v</span><span class="s3">}</span><span class="s4">;&quot; </span><span class="s3">for </span><span class="s1">k</span><span class="s3">, </span><span class="s1">v </span><span class="s3">in </span><span class="s1">style_dict.items()])</span>
+
+
+<span class="s3">def </span><span class="s1">dynamic(elem: StaticDOMElement) -&gt; DynamicDiv:</span>
+  <span class="s3">return </span><span class="s1">DynamicDiv(elem)</span>
+
+
+<span class="s3">def </span><span class="s1">_make_elem(tag: str</span><span class="s3">, </span><span class="s1">*children: Element</span><span class="s3">, </span><span class="s1">**attrs) -&gt; StaticDOMElement:</span>
+  <span class="s2">&quot;&quot;&quot;Helper function for making DOM elements.&quot;&quot;&quot;</span>
+  <span class="s3">return </span><span class="s1">StaticDOMElement(tag</span><span class="s3">, </span><span class="s1">list(children)</span><span class="s3">, </span><span class="s1">attrs)</span>
+
+
+<span class="s1">code = functools.partial(_make_elem</span><span class="s3">, </span><span class="s4">&quot;code&quot;</span><span class="s1">)</span>
+<span class="s1">div = functools.partial(_make_elem</span><span class="s3">, </span><span class="s4">&quot;div&quot;</span><span class="s1">)</span>
+<span class="s1">li = functools.partial(_make_elem</span><span class="s3">, </span><span class="s4">&quot;li&quot;</span><span class="s1">)</span>
+<span class="s1">ol = functools.partial(_make_elem</span><span class="s3">, </span><span class="s4">&quot;ol&quot;</span><span class="s1">)</span>
+<span class="s1">pre = functools.partial(_make_elem</span><span class="s3">, </span><span class="s4">&quot;pre&quot;</span><span class="s1">)</span>
+<span class="s1">progress = functools.partial(_make_elem</span><span class="s3">, </span><span class="s4">&quot;progress&quot;</span><span class="s1">)</span>
+<span class="s1">span = functools.partial(_make_elem</span><span class="s3">, </span><span class="s4">&quot;span&quot;</span><span class="s1">)</span>
+
+
+<span class="s3">def </span><span class="s1">css(text: str) -&gt; StaticDOMElement:</span>
+  <span class="s3">return </span><span class="s1">StaticDOMElement(</span><span class="s4">&quot;style&quot;</span><span class="s3">, </span><span class="s1">[text]</span><span class="s3">, </span><span class="s1">{})</span>
+
+
+<span class="s3">def </span><span class="s1">style(*args</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+  <span class="s3">return </span><span class="s1">_style_dict_to_str(dict(*args</span><span class="s3">, </span><span class="s1">**kwargs))</span>
+</pre>
+</body>
+</html>

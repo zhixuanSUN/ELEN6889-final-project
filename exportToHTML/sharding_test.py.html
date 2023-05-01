@@ -1,0 +1,756 @@
+<html>
+<head>
+<title>sharding_test.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+sharding_test.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2021 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+<span class="s2">&quot;&quot;&quot;Tests for the jax2tf conversion of pjit.&quot;&quot;&quot;</span>
+<span class="s3">import </span><span class="s1">contextlib</span>
+<span class="s3">from </span><span class="s1">functools </span><span class="s3">import </span><span class="s1">partial</span>
+<span class="s3">import </span><span class="s1">logging</span>
+<span class="s3">import </span><span class="s1">os</span>
+<span class="s3">import </span><span class="s1">re</span>
+<span class="s3">from </span><span class="s1">typing </span><span class="s3">import </span><span class="s1">Any</span><span class="s3">, </span><span class="s1">Sequence</span>
+<span class="s3">import </span><span class="s1">unittest</span>
+
+<span class="s3">from </span><span class="s1">absl.testing </span><span class="s3">import </span><span class="s1">absltest</span>
+<span class="s3">from </span><span class="s1">absl.testing </span><span class="s3">import </span><span class="s1">parameterized</span>
+
+<span class="s3">import </span><span class="s1">jax</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">test_util </span><span class="s3">as </span><span class="s1">jtu</span>
+<span class="s3">from </span><span class="s1">jax.config </span><span class="s3">import </span><span class="s1">config</span>
+<span class="s3">from </span><span class="s1">jax </span><span class="s3">import </span><span class="s1">lax</span>
+<span class="s3">from </span><span class="s1">jax.experimental </span><span class="s3">import </span><span class="s1">jax2tf</span>
+<span class="s3">from </span><span class="s1">jax.experimental </span><span class="s3">import </span><span class="s1">pjit</span>
+<span class="s3">from </span><span class="s1">jax.experimental.maps </span><span class="s3">import </span><span class="s1">xmap</span>
+<span class="s3">from </span><span class="s1">jax.experimental.shard_map </span><span class="s3">import </span><span class="s1">shard_map</span>
+<span class="s3">from </span><span class="s1">jax.sharding </span><span class="s3">import </span><span class="s1">Mesh</span>
+<span class="s3">from </span><span class="s1">jax.sharding </span><span class="s3">import </span><span class="s1">PartitionSpec </span><span class="s3">as </span><span class="s1">P</span>
+<span class="s3">import </span><span class="s1">jax.numpy </span><span class="s3">as </span><span class="s1">jnp</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">xla_bridge</span>
+
+<span class="s3">import </span><span class="s1">numpy </span><span class="s3">as </span><span class="s1">np</span>
+
+<span class="s3">import </span><span class="s1">tensorflow </span><span class="s3">as </span><span class="s1">tf  </span><span class="s0"># type: ignore[import]</span>
+
+<span class="s1">config.parse_flags_with_absl()</span>
+
+<span class="s0"># Must come after initializing the flags</span>
+<span class="s3">from </span><span class="s1">jax.experimental.jax2tf.tests </span><span class="s3">import </span><span class="s1">tf_test_util</span>
+
+<span class="s1">prev_xla_flags = </span><span class="s3">None</span>
+
+
+<span class="s3">def </span><span class="s1">setUpModule():</span>
+  <span class="s3">global </span><span class="s1">prev_xla_flags</span>
+  <span class="s1">prev_xla_flags = os.getenv(</span><span class="s4">&quot;XLA_FLAGS&quot;</span><span class="s1">)</span>
+  <span class="s1">flags_str = prev_xla_flags </span><span class="s3">or </span><span class="s4">&quot;&quot;</span>
+  <span class="s0"># Don't override user-specified device count, or other XLA flags.</span>
+  <span class="s3">if </span><span class="s4">&quot;xla_force_host_platform_device_count&quot; </span><span class="s3">not in </span><span class="s1">flags_str:</span>
+    <span class="s1">os.environ[</span><span class="s4">&quot;XLA_FLAGS&quot;</span><span class="s1">] = (flags_str +</span>
+                               <span class="s4">&quot; --xla_force_host_platform_device_count=8&quot;</span><span class="s1">)</span>
+  <span class="s0"># Clear any cached backends so new CPU backend will pick up the env var.</span>
+  <span class="s1">xla_bridge.get_backend.cache_clear()</span>
+  <span class="s1">jtu.set_spmd_lowering_flag(</span><span class="s3">True</span><span class="s1">)</span>
+
+
+<span class="s3">def </span><span class="s1">tearDownModule():</span>
+  <span class="s3">if </span><span class="s1">prev_xla_flags </span><span class="s3">is None</span><span class="s1">:</span>
+    <span class="s3">del </span><span class="s1">os.environ[</span><span class="s4">&quot;XLA_FLAGS&quot;</span><span class="s1">]</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s1">os.environ[</span><span class="s4">&quot;XLA_FLAGS&quot;</span><span class="s1">] = prev_xla_flags</span>
+  <span class="s1">xla_bridge.get_backend.cache_clear()</span>
+  <span class="s1">jtu.restore_spmd_lowering_flag()</span>
+
+
+<span class="s3">class </span><span class="s1">ShardingTest(tf_test_util.JaxToTfTestCase):</span>
+  <span class="s2">&quot;&quot;&quot;Tests that inspect the HLO for the sharding annotations. 
+ 
+  To verify that the tests do run indeed on multiple devices you can run 
+ 
+     perftools/gputools/profiler/jfprof.sh jax/experimental/jax2tf/tests:sharding_test_tpu -- -c opt --test_filter=ShardingTest.test_shmap_all_to_all --test_arg=--vmodule=jax2tf=3 -- 
+  &quot;&quot;&quot;</span>
+  <span class="s3">def </span><span class="s1">setUp(self):</span>
+    <span class="s1">super().setUp()</span>
+    <span class="s3">if </span><span class="s1">jtu.device_under_test() == </span><span class="s4">&quot;gpu&quot;</span><span class="s1">:</span>
+      <span class="s3">raise </span><span class="s1">unittest.SkipTest(</span><span class="s4">&quot;Sharding HLO tests not useful for GPU&quot;</span><span class="s1">)</span>
+
+    <span class="s3">if </span><span class="s1">len(jax.devices()) &lt; </span><span class="s5">2</span><span class="s1">:</span>
+      <span class="s3">raise </span><span class="s1">unittest.SkipTest(</span><span class="s4">&quot;Test requires at least 2 local devices&quot;</span><span class="s1">)</span>
+    <span class="s1">self.devices = np.array(jax.devices()[:</span><span class="s5">2</span><span class="s1">])  </span><span class="s0"># use 2 devices</span>
+
+    <span class="s3">if </span><span class="s1">jtu.device_under_test() == </span><span class="s4">&quot;tpu&quot;</span><span class="s1">:</span>
+      <span class="s1">resolver = tf.distribute.cluster_resolver.TPUClusterResolver(tpu=</span><span class="s4">''</span><span class="s1">)</span>
+      <span class="s1">tf.config.experimental_connect_to_cluster(resolver)</span>
+      <span class="s0"># Do TPU init at beginning since it will wipe out all HBMs.</span>
+      <span class="s1">self.topology = tf.tpu.experimental.initialize_tpu_system(resolver)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s1">self.topology = </span><span class="s3">None</span>
+  <span class="s3">def </span><span class="s1">log_jax_hlo(self</span><span class="s3">, </span><span class="s1">f_jax</span><span class="s3">, </span><span class="s1">args: Sequence[Any]</span><span class="s3">, </span><span class="s1">*</span><span class="s3">,</span>
+                  <span class="s1">num_replicas=</span><span class="s5">1</span><span class="s3">, </span><span class="s1">num_partitions=</span><span class="s5">2</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot;Log the HLO generated from JAX before and after optimizations&quot;&quot;&quot;</span>
+    <span class="s1">jax_comp = f_jax.lower(*args).compiler_ir(dialect=</span><span class="s4">&quot;mhlo&quot;</span><span class="s1">)</span>
+    <span class="s1">jax_hlo = str(jax_comp)</span>
+    <span class="s1">logging.info(</span><span class="s4">&quot;[%s] got JAX HLO %s&quot;</span><span class="s3">, </span><span class="s1">self._testMethodName</span><span class="s3">, </span><span class="s1">jax_hlo)</span>
+
+    <span class="s0"># We only dump JAX optimized code on the TPU</span>
+    <span class="s3">if </span><span class="s1">jtu.device_under_test() == </span><span class="s4">&quot;tpu&quot;</span><span class="s1">:</span>
+      <span class="s1">backend = xla_bridge.get_backend()</span>
+      <span class="s1">device_assignment = np.arange(num_partitions * num_replicas)</span>
+      <span class="s1">device_assignment = np.reshape(device_assignment</span><span class="s3">, </span><span class="s1">(-</span><span class="s5">1</span><span class="s3">, </span><span class="s1">num_partitions))</span>
+      <span class="s1">use_spmd_partitioning = num_partitions &gt; </span><span class="s5">1</span>
+      <span class="s1">compile_options = xla_bridge.get_compile_options(</span>
+          <span class="s1">num_replicas=num_replicas</span><span class="s3">,</span>
+          <span class="s1">num_partitions=num_partitions</span><span class="s3">,</span>
+          <span class="s1">device_assignment=device_assignment</span><span class="s3">,</span>
+          <span class="s1">use_spmd_partitioning=use_spmd_partitioning</span><span class="s3">,</span>
+      <span class="s1">)</span>
+      <span class="s1">jax_optimized_hlo = backend.compile(</span>
+          <span class="s1">jax_hlo</span><span class="s3">, </span><span class="s1">compile_options).hlo_modules()[</span><span class="s5">0</span><span class="s1">].to_string()</span>
+      <span class="s1">logging.info(</span><span class="s4">&quot;[%s] got JAX optimized HLO for platform %s %s&quot;</span><span class="s3">,</span>
+                   <span class="s1">self._testMethodName</span><span class="s3">, </span><span class="s1">backend.platform</span><span class="s3">, </span><span class="s1">jax_optimized_hlo)</span>
+
+  <span class="s3">def </span><span class="s1">device_assignment(self</span><span class="s3">,</span>
+                        <span class="s1">computation_shape=(</span><span class="s5">1</span><span class="s3">, </span><span class="s5">1</span><span class="s3">, </span><span class="s5">1</span><span class="s3">, </span><span class="s5">2</span><span class="s1">)</span><span class="s3">,</span>
+                        <span class="s1">num_replicas=</span><span class="s5">1</span><span class="s1">):</span>
+    <span class="s1">self.assertEqual(jtu.device_under_test()</span><span class="s3">, </span><span class="s4">&quot;tpu&quot;</span><span class="s1">)</span>
+    <span class="s3">return </span><span class="s1">tf.tpu.experimental.DeviceAssignment.build(</span>
+        <span class="s1">self.topology</span><span class="s3">, </span><span class="s1">computation_shape=computation_shape</span><span class="s3">,</span>
+        <span class="s1">num_replicas=num_replicas)</span>
+
+  <span class="s3">def </span><span class="s1">tf_hlo(self</span><span class="s3">, </span><span class="s1">f_tf</span><span class="s3">, </span><span class="s1">args_tf: Sequence[Any]) -&gt; str:</span>
+    <span class="s2">&quot;&quot;&quot;Get the unoptimized HLO from TF&quot;&quot;&quot;</span>
+    <span class="s1">f_tf_fun = tf.function(f_tf</span><span class="s3">, </span><span class="s1">autograph=</span><span class="s3">False, </span><span class="s1">jit_compile=</span><span class="s3">True</span><span class="s1">)</span>
+    <span class="s1">logging.info(</span><span class="s4">&quot;[%s] Got TF graph %s&quot;</span><span class="s3">,</span>
+                 <span class="s1">self._testMethodName</span><span class="s3">,</span>
+                 <span class="s1">f_tf_fun.get_concrete_function(*args_tf).graph.as_graph_def())</span>
+    <span class="s1">device_name = </span><span class="s4">f&quot;/device:</span><span class="s3">{</span><span class="s1">jtu.device_under_test().upper()</span><span class="s3">}</span><span class="s4">:0&quot;</span>
+    <span class="s1">tf_hlo_generator = f_tf_fun.experimental_get_compiler_ir(*args_tf)</span>
+    <span class="s1">tf_hlo = tf_hlo_generator(stage=</span><span class="s4">&quot;hlo&quot;</span><span class="s3">, </span><span class="s1">device_name=device_name)</span>
+    <span class="s1">logging.info(</span><span class="s4">&quot;[%s] got TF HLO %s&quot;</span><span class="s3">, </span><span class="s1">self._testMethodName</span><span class="s3">, </span><span class="s1">tf_hlo)</span>
+    <span class="s1">tf_optimized_hlo = tf_hlo_generator(stage=</span><span class="s4">&quot;optimized_hlo&quot;</span><span class="s3">,</span>
+                                        <span class="s1">device_name=device_name)</span>
+    <span class="s1">logging.info(</span><span class="s4">&quot;[%s] got TF optimized HLO for %s: %s&quot;</span><span class="s3">, </span><span class="s1">self._testMethodName</span><span class="s3">,</span>
+                 <span class="s1">device_name</span><span class="s3">, </span><span class="s1">tf_optimized_hlo)</span>
+    <span class="s0"># Before we check, we drop the metadata= at the end of tf_hlo</span>
+    <span class="s3">return </span><span class="s1">re.sub(</span><span class="s4">r'metadata=.*'</span><span class="s3">, </span><span class="s4">''</span><span class="s3">, </span><span class="s1">tf_hlo)</span>
+
+
+  <span class="s3">def </span><span class="s1">GEQ(self</span><span class="s3">, </span><span class="s1">value):</span>
+    <span class="s0"># Construct an expected &gt;= value. See `check_sharding`.</span>
+    <span class="s3">return </span><span class="s1">(</span><span class="s4">&quot;&gt;=&quot;</span><span class="s3">, </span><span class="s1">value)</span>
+
+  <span class="s3">def </span><span class="s1">check_sharding(self</span><span class="s3">, </span><span class="s1">f_tf</span><span class="s3">, </span><span class="s1">args_tf: Sequence[Any]</span><span class="s3">, </span><span class="s1">*</span><span class="s3">,</span>
+                     <span class="s1">checks=()):</span>
+    <span class="s2">&quot;&quot;&quot;Check the sharding in TF. 
+ 
+    Args: 
+      f_tf: the TF callable 
+      args_tf: the TF args 
+      checks: a list of tuples. The first element is a regular expression, the 
+        second element is an integer representing the expected number of 
+        occurrences of the regular expression in the TF HLO. As a special case, 
+        the second element can be the result of `self.GEQ(v)` to check that 
+        the number of occurrences is greater or equal to a value. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">tf_hlo = self.tf_hlo(f_tf</span><span class="s3">, </span><span class="s1">args_tf)</span>
+    <span class="s3">for </span><span class="s1">check_re</span><span class="s3">, </span><span class="s1">expected_count </span><span class="s3">in </span><span class="s1">checks:</span>
+      <span class="s1">count = len(re.findall(check_re</span><span class="s3">, </span><span class="s1">tf_hlo))</span>
+      <span class="s3">if </span><span class="s1">isinstance(expected_count</span><span class="s3">, </span><span class="s1">int):</span>
+        <span class="s1">self.assertEqual(</span>
+            <span class="s1">count</span><span class="s3">, </span><span class="s1">expected_count</span><span class="s3">,</span>
+            <span class="s1">(</span><span class="s4">f&quot;regular expression `</span><span class="s3">{</span><span class="s1">check_re</span><span class="s3">}</span><span class="s4">` expected to occur &quot;</span>
+            <span class="s4">f&quot;</span><span class="s3">{</span><span class="s1">expected_count</span><span class="s3">} </span><span class="s4">times but occurs </span><span class="s3">{</span><span class="s1">count</span><span class="s3">} </span><span class="s4">times in &quot;</span>
+            <span class="s4">f&quot;the TF HLO.</span><span class="s3">\n</span><span class="s4">This is the TF HLO:</span><span class="s3">\n{</span><span class="s1">tf_hlo</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s1">))</span>
+      <span class="s3">elif </span><span class="s1">isinstance(expected_count</span><span class="s3">, </span><span class="s1">tuple) </span><span class="s3">and </span><span class="s1">expected_count[</span><span class="s5">0</span><span class="s1">] == </span><span class="s4">&quot;&gt;=&quot;</span><span class="s1">:</span>
+        <span class="s1">self.assertGreaterEqual(</span>
+            <span class="s1">count</span><span class="s3">, </span><span class="s1">expected_count[</span><span class="s5">1</span><span class="s1">]</span><span class="s3">,</span>
+            <span class="s1">(</span><span class="s4">f&quot;regular expression `</span><span class="s3">{</span><span class="s1">check_re</span><span class="s3">}</span><span class="s4">` expected to occur &quot;</span>
+            <span class="s4">f&quot;at least </span><span class="s3">{</span><span class="s1">expected_count[</span><span class="s5">1</span><span class="s1">]</span><span class="s3">} </span><span class="s4">times but occurs </span><span class="s3">{</span><span class="s1">count</span><span class="s3">} </span><span class="s4">times in &quot;</span>
+            <span class="s4">f&quot;the TF HLO.</span><span class="s3">\n</span><span class="s4">This is the TF HLO:</span><span class="s3">\n{</span><span class="s1">tf_hlo</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s1">))</span>
+      <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">assert False</span>
+
+  <span class="s1">@parameterized.named_parameters(</span>
+      <span class="s1">dict(testcase_name=</span><span class="s4">f&quot;_in_shardings=</span><span class="s3">{</span><span class="s1">in_shardings</span><span class="s3">}</span><span class="s4">_out_shardings=</span><span class="s3">{</span><span class="s1">out_shardings</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s3">,</span>
+           <span class="s1">in_shardings=in_shardings</span><span class="s3">, </span><span class="s1">out_shardings=out_shardings)</span>
+      <span class="s3">for </span><span class="s1">in_shardings </span><span class="s3">in </span><span class="s1">(</span><span class="s4">&quot;missing&quot;</span><span class="s3">, None, </span><span class="s4">&quot;P&quot;</span><span class="s1">)</span>
+      <span class="s3">for </span><span class="s1">out_shardings </span><span class="s3">in </span><span class="s1">(</span><span class="s4">&quot;missing&quot;</span><span class="s3">, None, </span><span class="s4">&quot;P&quot;</span><span class="s1">)</span>
+  <span class="s1">)</span>
+  <span class="s1">@jtu.with_mesh([(</span><span class="s4">&quot;x&quot;</span><span class="s3">, </span><span class="s5">2</span><span class="s1">)])</span>
+  <span class="s3">def </span><span class="s1">test_pjit_basic(self</span><span class="s3">, </span><span class="s1">in_shardings=</span><span class="s3">None, </span><span class="s1">out_shardings=</span><span class="s4">&quot;missing&quot;</span><span class="s1">):</span>
+    <span class="s0"># Ensure that we can distinguish the inputs and outputs by shape</span>
+    <span class="s3">def </span><span class="s1">f_jax(x):  </span><span class="s0"># f32[10,20] -&gt; f32[20,10]</span>
+      <span class="s3">return </span><span class="s1">jnp.sin(x.T)</span>
+
+    <span class="s1">pjit_kwargs = {}</span>
+    <span class="s3">if </span><span class="s1">in_shardings != </span><span class="s4">&quot;missing&quot;</span><span class="s1">:</span>
+      <span class="s1">pjit_kwargs[</span><span class="s4">&quot;in_shardings&quot;</span><span class="s1">] = (P(</span><span class="s3">None, </span><span class="s4">&quot;x&quot;</span><span class="s1">) </span><span class="s3">if </span><span class="s1">in_shardings == </span><span class="s4">&quot;P&quot; </span><span class="s3">else None</span><span class="s1">)</span>
+    <span class="s3">if </span><span class="s1">out_shardings != </span><span class="s4">&quot;missing&quot;</span><span class="s1">:</span>
+      <span class="s1">pjit_kwargs[</span><span class="s4">&quot;out_shardings&quot;</span><span class="s1">] = (P(</span><span class="s4">&quot;x&quot;</span><span class="s3">, None</span><span class="s1">) </span><span class="s3">if </span><span class="s1">out_shardings == </span><span class="s4">&quot;P&quot; </span><span class="s3">else None</span><span class="s1">)</span>
+    <span class="s1">f_jax = pjit.pjit(f_jax</span><span class="s3">, </span><span class="s1">**pjit_kwargs)</span>
+
+    <span class="s1">x_shape = (</span><span class="s5">10</span><span class="s3">, </span><span class="s5">20</span><span class="s1">)</span>
+    <span class="s1">x = np.arange(np.prod(x_shape)</span><span class="s3">, </span><span class="s1">dtype=np.float32).reshape(x_shape)</span>
+
+    <span class="s1">self.log_jax_hlo(f_jax</span><span class="s3">, </span><span class="s1">[x]</span><span class="s3">, </span><span class="s1">num_partitions=</span><span class="s5">2</span><span class="s1">)</span>
+
+    <span class="s1">@tf.function(autograph=</span><span class="s3">False, </span><span class="s1">jit_compile=</span><span class="s3">True</span><span class="s1">)</span>
+    <span class="s3">def </span><span class="s1">f_tf(x):</span>
+      <span class="s1">f_converted = jax2tf.convert(f_jax)</span>
+      <span class="s3">if </span><span class="s1">jtu.device_under_test() == </span><span class="s4">&quot;tpu&quot;</span><span class="s1">:</span>
+        <span class="s3">return </span><span class="s1">tf.compat.v1.tpu.rewrite(</span>
+            <span class="s1">f_converted</span><span class="s3">, </span><span class="s1">[tf.convert_to_tensor(x)]</span><span class="s3">,</span>
+            <span class="s1">device_assignment=self.device_assignment(</span>
+                <span class="s1">computation_shape=[</span><span class="s5">1</span><span class="s3">, </span><span class="s5">1</span><span class="s3">, </span><span class="s5">1</span><span class="s3">, </span><span class="s5">2</span><span class="s1">]</span><span class="s3">,</span>
+            <span class="s1">))[</span><span class="s5">0</span><span class="s1">]</span>
+      <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">return </span><span class="s1">f_converted(x)</span>
+
+    <span class="s0"># Annotation count for the input</span>
+    <span class="s1">count_in_P = </span><span class="s5">1 </span><span class="s3">if </span><span class="s1">in_shardings == </span><span class="s4">&quot;P&quot; </span><span class="s3">else </span><span class="s5">0</span>
+    <span class="s3">if </span><span class="s1">config.jax2tf_default_native_serialization:</span>
+      <span class="s0"># With native serialization even unspecified in_shardings turn into replicated</span>
+      <span class="s1">count_in_replicated = </span><span class="s5">1 </span><span class="s3">if </span><span class="s1">in_shardings </span><span class="s3">in </span><span class="s1">[</span><span class="s3">None, </span><span class="s4">&quot;missing&quot;</span><span class="s1">] </span><span class="s3">else </span><span class="s5">0</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s1">count_in_replicated = </span><span class="s5">1 </span><span class="s3">if </span><span class="s1">in_shardings </span><span class="s3">is None else </span><span class="s5">0</span>
+    <span class="s0"># Annotation count for the output</span>
+    <span class="s1">count_out_P = </span><span class="s5">1 </span><span class="s3">if </span><span class="s1">out_shardings == </span><span class="s4">&quot;P&quot; </span><span class="s3">else </span><span class="s5">0</span>
+    <span class="s1">count_out_replicated = </span><span class="s5">1 </span><span class="s3">if </span><span class="s1">out_shardings </span><span class="s3">is None else </span><span class="s5">0</span>
+
+    <span class="s1">self.check_sharding(</span>
+        <span class="s1">jax2tf.convert(f_jax)</span><span class="s3">, </span><span class="s1">[x]</span><span class="s3">,</span>
+        <span class="s1">checks=[</span>
+            <span class="s0"># The argument</span>
+            <span class="s1">(</span><span class="s4">r&quot;f32\[10,20\].*custom_call_target.*Sharding.*sharding.*devices=\[1,2\]&quot;</span><span class="s3">,</span>
+             <span class="s1">count_in_P)</span><span class="s3">,</span>
+            <span class="s1">(</span><span class="s4">r&quot;f32\[10,20\].*custom_call_target.*Sharding.*sharding.*replicated&quot;</span><span class="s3">,</span>
+             <span class="s1">count_in_replicated)</span><span class="s3">,</span>
+            <span class="s0"># The result</span>
+            <span class="s1">(</span><span class="s4">r&quot;f32\[20,10\].*custom_call_target.*Sharding.*sharding.*devices=\[2,1\]&quot;</span><span class="s3">,</span>
+             <span class="s1">count_out_P)</span><span class="s3">,</span>
+            <span class="s1">(</span><span class="s4">r&quot;f32\[20,10\].*custom_call_target.*Sharding.*sharding.*replicated&quot;</span><span class="s3">,</span>
+             <span class="s1">count_out_replicated)</span><span class="s3">,</span>
+            <span class="s0"># No other shardings</span>
+            <span class="s1">(</span><span class="s4">r&quot;custom_call_target.*Sharding&quot;</span><span class="s3">,</span>
+             <span class="s1">count_in_P + count_in_replicated + count_out_P + count_out_replicated)</span><span class="s3">,</span>
+        <span class="s1">])</span>
+
+    <span class="s1">res_jax = f_jax(x)</span>
+    <span class="s1">res_tf = f_tf(x)</span>
+    <span class="s1">self.assertAllClose(res_tf.numpy()</span><span class="s3">, </span><span class="s1">res_jax)</span>
+
+  <span class="s1">@jtu.with_mesh([(</span><span class="s4">&quot;x&quot;</span><span class="s3">, </span><span class="s5">2</span><span class="s1">)])</span>
+  <span class="s3">def </span><span class="s1">test_pjit_variable_arg(self):</span>
+    <span class="s0"># The first argument is a tf.Variable</span>
+    <span class="s1">@partial(pjit.pjit</span><span class="s3">, </span><span class="s1">in_shardings=(P(</span><span class="s3">None, </span><span class="s4">&quot;x&quot;</span><span class="s1">)</span><span class="s3">, </span><span class="s1">P(</span><span class="s4">&quot;x&quot;</span><span class="s3">, None</span><span class="s1">))</span><span class="s3">,</span>
+             <span class="s1">out_shardings=</span><span class="s3">None</span><span class="s1">)</span>
+    <span class="s3">def </span><span class="s1">f_jax(x</span><span class="s3">, </span><span class="s1">y):  </span><span class="s0"># f32[10,20] , f32[20,30] -&gt; f32[10,30]</span>
+      <span class="s3">return </span><span class="s1">x @ y</span>
+
+    <span class="s1">shape_x = (</span><span class="s5">10</span><span class="s3">, </span><span class="s5">20</span><span class="s1">)</span>
+    <span class="s1">x = np.arange(np.prod(shape_x)</span><span class="s3">, </span><span class="s1">dtype=np.float32).reshape(shape_x)</span>
+    <span class="s1">shape_y = (</span><span class="s5">20</span><span class="s3">, </span><span class="s5">30</span><span class="s1">)</span>
+    <span class="s1">y = np.arange(np.prod(shape_y)</span><span class="s3">, </span><span class="s1">dtype=np.float32).reshape(shape_y)</span>
+
+    <span class="s1">self.log_jax_hlo(f_jax</span><span class="s3">, </span><span class="s1">[x</span><span class="s3">, </span><span class="s1">y]</span><span class="s3">, </span><span class="s1">num_partitions=</span><span class="s5">2</span><span class="s1">)</span>
+
+    <span class="s1">x_v = tf.Variable(x)</span>
+    <span class="s1">f_tf = </span><span class="s3">lambda </span><span class="s1">y: jax2tf.convert(f_jax)(x_v</span><span class="s3">, </span><span class="s1">y)</span>
+
+    <span class="s1">self.check_sharding(</span>
+        <span class="s1">f_tf</span><span class="s3">, </span><span class="s1">[y]</span><span class="s3">,</span>
+        <span class="s1">checks=[</span>
+            <span class="s0"># The variable argument</span>
+            <span class="s1">(</span><span class="s4">r&quot;f32\[10,20\].*custom_call_target.*Sharding.*sharding.*devices=\[1,2\]&quot;</span><span class="s3">, </span><span class="s5">1</span><span class="s1">)</span><span class="s3">,</span>
+            <span class="s0"># The y argument</span>
+            <span class="s1">(</span><span class="s4">r&quot;f32\[20,30\].*custom_call_target.*Sharding.*sharding.*devices=\[2,1\]&quot;</span><span class="s3">, </span><span class="s5">1</span><span class="s1">)</span><span class="s3">,</span>
+            <span class="s0"># The output sharding</span>
+            <span class="s1">(</span><span class="s4">r&quot;f32\[10,30\].*custom_call_target.*Sharding.*sharding.*replicated&quot;</span><span class="s3">, </span><span class="s5">1</span><span class="s1">)</span><span class="s3">,</span>
+            <span class="s0"># No other annotations</span>
+            <span class="s1">(</span><span class="s4">r&quot;custom_call_target.*Sharding&quot;</span><span class="s3">, </span><span class="s5">3</span><span class="s1">)</span>
+        <span class="s1">])</span>
+
+
+  <span class="s1">@jtu.with_mesh([(</span><span class="s4">&quot;x&quot;</span><span class="s3">, </span><span class="s5">2</span><span class="s1">)])</span>
+  <span class="s3">def </span><span class="s1">test_pjit_closed_over_const(self):</span>
+    <span class="s1">x = np.ones((</span><span class="s5">10</span><span class="s3">, </span><span class="s5">20</span><span class="s1">)</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s1">const = jnp.full((</span><span class="s5">10</span><span class="s3">, </span><span class="s5">20</span><span class="s1">)</span><span class="s3">, </span><span class="s5">7</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+
+    <span class="s1">@partial(pjit.pjit</span><span class="s3">, </span><span class="s1">in_shardings=(P(</span><span class="s4">&quot;x&quot;</span><span class="s1">)</span><span class="s3">,</span><span class="s1">)</span><span class="s3">, </span><span class="s1">out_shardings=</span><span class="s3">None</span><span class="s1">)</span>
+    <span class="s3">def </span><span class="s1">f_jax(x):  </span><span class="s0"># f32[10,20] -&gt; f32[20,10]</span>
+      <span class="s3">return </span><span class="s1">(x * const).T</span>
+
+    <span class="s1">@tf.function(autograph=</span><span class="s3">False, </span><span class="s1">jit_compile=</span><span class="s3">True</span><span class="s1">)</span>
+    <span class="s3">def </span><span class="s1">f_tf(x):</span>
+      <span class="s1">f_converted = jax2tf.convert(f_jax)</span>
+      <span class="s3">if </span><span class="s1">jtu.device_under_test() == </span><span class="s4">&quot;tpu&quot;</span><span class="s1">:</span>
+        <span class="s3">return </span><span class="s1">tf.compat.v1.tpu.rewrite(</span>
+            <span class="s1">f_converted</span><span class="s3">, </span><span class="s1">[tf.convert_to_tensor(x)]</span><span class="s3">,</span>
+            <span class="s1">device_assignment=self.device_assignment(</span>
+                <span class="s1">computation_shape=[</span><span class="s5">1</span><span class="s3">, </span><span class="s5">1</span><span class="s3">, </span><span class="s5">1</span><span class="s3">, </span><span class="s5">2</span><span class="s1">])</span>
+        <span class="s1">)[</span><span class="s5">0</span><span class="s1">]</span>
+      <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">return </span><span class="s1">f_converted(x)</span>
+
+    <span class="s1">self.check_sharding(</span>
+        <span class="s1">jax2tf.convert(f_jax)</span><span class="s3">, </span><span class="s1">[x]</span><span class="s3">,</span>
+        <span class="s1">checks=[</span>
+            <span class="s0"># x</span>
+            <span class="s1">(</span><span class="s4">r&quot;f32\[10,20\].*custom_call_target.*Sharding.*sharding.*devices=\[2,1\]&quot;</span><span class="s3">,</span>
+             <span class="s5">1</span><span class="s1">)</span><span class="s3">,</span>
+            <span class="s0"># The result</span>
+            <span class="s1">(</span><span class="s4">r&quot;f32\[20,10\].*custom_call_target.*Sharding.*sharding.*replicated&quot;</span><span class="s3">,</span>
+             <span class="s1">self.GEQ(</span><span class="s5">1</span><span class="s1">))</span><span class="s3">,</span>
+        <span class="s1">])</span>
+
+    <span class="s1">res_jax = f_jax(x)</span>
+    <span class="s1">res_tf = f_tf(x)</span>
+    <span class="s1">self.assertAllClose(res_tf</span><span class="s3">, </span><span class="s1">res_jax)</span>
+
+  <span class="s1">@parameterized.named_parameters(</span>
+      <span class="s1">dict(testcase_name=</span><span class="s4">f&quot;_nested_pjit=</span><span class="s3">{</span><span class="s1">nested_pjit</span><span class="s3">}</span><span class="s4">_constraint=</span><span class="s3">{</span><span class="s1">constraint=</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s3">,</span>
+           <span class="s1">nested_pjit=nested_pjit)</span>
+      <span class="s0"># We add a constraint either with a nested pjit or with a sharding_constraint</span>
+      <span class="s3">for </span><span class="s1">nested_pjit </span><span class="s3">in </span><span class="s1">(</span><span class="s3">True, False</span><span class="s1">)</span>
+      <span class="s3">for </span><span class="s1">constraint </span><span class="s3">in </span><span class="s1">(</span><span class="s3">None, </span><span class="s4">&quot;P&quot;</span><span class="s1">)</span>
+  <span class="s1">)</span>
+  <span class="s1">@jtu.with_mesh([(</span><span class="s4">&quot;x&quot;</span><span class="s3">, </span><span class="s5">2</span><span class="s1">)])</span>
+  <span class="s3">def </span><span class="s1">test_pjit_sharding_constraint(self</span><span class="s3">, </span><span class="s1">nested_pjit=</span><span class="s3">True, </span><span class="s1">constraint=</span><span class="s4">&quot;P&quot;</span><span class="s1">):</span>
+    <span class="s1">constraint_sharding = P(</span><span class="s4">&quot;x&quot;</span><span class="s3">, None</span><span class="s1">) </span><span class="s3">if </span><span class="s1">constraint == </span><span class="s4">&quot;P&quot; </span><span class="s3">else None</span>
+    <span class="s1">@partial(pjit.pjit</span><span class="s3">, </span><span class="s1">in_shardings=</span><span class="s3">None,</span>
+             <span class="s1">out_shardings=</span><span class="s3">None</span><span class="s1">)</span>
+    <span class="s3">def </span><span class="s1">f_jax(x):  </span><span class="s0"># x: f32[10, 20]</span>
+      <span class="s1">y = jnp.concatenate([x</span><span class="s3">, </span><span class="s1">x]</span><span class="s3">, </span><span class="s1">axis=</span><span class="s5">1</span><span class="s1">)  </span><span class="s0"># y: f32[10, 40]</span>
+      <span class="s3">if </span><span class="s1">nested_pjit:</span>
+        <span class="s1">y = pjit.pjit(</span><span class="s3">lambda </span><span class="s1">y: y</span><span class="s3">, </span><span class="s1">in_shardings=constraint_sharding</span><span class="s3">,</span>
+                      <span class="s1">out_shardings=constraint_sharding)(y)</span>
+      <span class="s3">else</span><span class="s1">:</span>
+        <span class="s1">y = pjit.with_sharding_constraint(y</span><span class="s3">, </span><span class="s1">constraint_sharding)</span>
+      <span class="s3">return </span><span class="s1">jnp.concatenate([y</span><span class="s3">, </span><span class="s1">y]</span><span class="s3">, </span><span class="s1">axis=</span><span class="s5">1</span><span class="s1">)  </span><span class="s0"># res: f32[10, 80]</span>
+
+    <span class="s1">shape = (</span><span class="s5">10</span><span class="s3">, </span><span class="s5">20</span><span class="s1">)</span>
+    <span class="s1">x = np.arange(np.prod(shape)</span><span class="s3">, </span><span class="s1">dtype=np.float32).reshape(shape)</span>
+
+    <span class="s1">self.log_jax_hlo(f_jax</span><span class="s3">, </span><span class="s1">[x]</span><span class="s3">, </span><span class="s1">num_partitions=</span><span class="s5">2</span><span class="s1">)</span>
+    <span class="s1">f_tf = jax2tf.convert(f_jax)</span>
+
+    <span class="s0"># If we use a pjit then we see two constraints, otherwise only 1</span>
+    <span class="s1">count_inner_sharding = </span><span class="s5">2 </span><span class="s3">if </span><span class="s1">nested_pjit </span><span class="s3">else </span><span class="s5">1</span>
+    <span class="s1">self.check_sharding(</span>
+        <span class="s1">f_tf</span><span class="s3">, </span><span class="s1">[x]</span><span class="s3">,</span>
+        <span class="s1">checks=[</span>
+            <span class="s0"># The input argument</span>
+            <span class="s1">(</span><span class="s4">r&quot;f32\[10,20\].*custom_call_target.*Sharding.*sharding.*replicated&quot;</span><span class="s3">, </span><span class="s5">1</span><span class="s1">)</span><span class="s3">,</span>
+            <span class="s0"># The y argument</span>
+            <span class="s1">(</span><span class="s4">r&quot;f32\[10,40\].*custom_call_target.*Sharding.*sharding.*devices=\[2,1\]&quot;</span><span class="s3">,</span>
+             <span class="s1">count_inner_sharding)</span><span class="s3">,</span>
+            <span class="s0"># The output sharding</span>
+            <span class="s1">(</span><span class="s4">r&quot;f32\[10,80\].*custom_call_target.*Sharding.*sharding.*replicated&quot;</span><span class="s3">, </span><span class="s5">1</span><span class="s1">)</span><span class="s3">,</span>
+            <span class="s0"># No other annotations</span>
+            <span class="s1">(</span><span class="s4">r&quot;custom_call_target.*Sharding&quot;</span><span class="s3">, </span><span class="s5">2 </span><span class="s1">+ count_inner_sharding)</span>
+        <span class="s1">])</span>
+
+
+  <span class="s1">@parameterized.named_parameters(</span>
+      <span class="s1">dict(testcase_name=</span><span class="s4">f&quot;_in_shardings=</span><span class="s3">{</span><span class="s1">in_shardings</span><span class="s3">}</span><span class="s4">_out_shardings=</span><span class="s3">{</span><span class="s1">out_shardings</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s3">,</span>
+           <span class="s1">in_shardings=in_shardings</span><span class="s3">, </span><span class="s1">out_shardings=out_shardings)</span>
+      <span class="s3">for </span><span class="s1">in_shardings </span><span class="s3">in </span><span class="s1">(</span><span class="s4">&quot;missing&quot;</span><span class="s3">, None, </span><span class="s4">&quot;P&quot;</span><span class="s1">)</span>
+      <span class="s3">for </span><span class="s1">out_shardings </span><span class="s3">in </span><span class="s1">(</span><span class="s4">&quot;missing&quot;</span><span class="s3">, None, </span><span class="s4">&quot;P&quot;</span><span class="s1">)</span>
+  <span class="s1">)</span>
+  <span class="s1">@jtu.with_mesh([(</span><span class="s4">&quot;x&quot;</span><span class="s3">, </span><span class="s5">2</span><span class="s1">)])</span>
+  <span class="s3">def </span><span class="s1">test_grad_pjit(self</span><span class="s3">, </span><span class="s1">in_shardings=</span><span class="s4">&quot;missing&quot;</span><span class="s3">, </span><span class="s1">out_shardings=</span><span class="s4">&quot;None&quot;</span><span class="s1">):</span>
+    <span class="s3">def </span><span class="s1">f_jax(x):  </span><span class="s0"># x: f32[10,20] -&gt; f32[20,10]</span>
+      <span class="s3">return </span><span class="s1">jnp.sin(x.T)</span>
+
+    <span class="s1">pjit_kwargs = {}</span>
+    <span class="s3">if </span><span class="s1">in_shardings != </span><span class="s4">&quot;missing&quot;</span><span class="s1">:</span>
+      <span class="s1">pjit_kwargs[</span><span class="s4">&quot;in_shardings&quot;</span><span class="s1">] = (P(</span><span class="s3">None, </span><span class="s4">&quot;x&quot;</span><span class="s1">) </span><span class="s3">if </span><span class="s1">in_shardings == </span><span class="s4">&quot;P&quot; </span><span class="s3">else None</span><span class="s1">)</span>
+    <span class="s3">if </span><span class="s1">out_shardings != </span><span class="s4">&quot;missing&quot;</span><span class="s1">:</span>
+      <span class="s1">pjit_kwargs[</span><span class="s4">&quot;out_shardings&quot;</span><span class="s1">] = (P(</span><span class="s4">&quot;x&quot;</span><span class="s3">, None</span><span class="s1">) </span><span class="s3">if </span><span class="s1">out_shardings == </span><span class="s4">&quot;P&quot; </span><span class="s3">else None</span><span class="s1">)</span>
+    <span class="s1">f_jax = pjit.pjit(f_jax</span><span class="s3">, </span><span class="s1">**pjit_kwargs)</span>
+    <span class="s1">x_shape = (</span><span class="s5">10</span><span class="s3">, </span><span class="s5">20</span><span class="s1">)</span>
+    <span class="s1">x = np.arange(np.prod(x_shape)</span><span class="s3">, </span><span class="s1">dtype=np.float32).reshape(x_shape)</span>
+
+    <span class="s3">def </span><span class="s1">f_grad_tf(x_v</span><span class="s3">, </span><span class="s1">res_ct):</span>
+      <span class="s3">with </span><span class="s1">tf.GradientTape(persistent=</span><span class="s3">True</span><span class="s1">) </span><span class="s3">as </span><span class="s1">tape:</span>
+        <span class="s1">tape.watch(x_v)</span>
+        <span class="s1">res_tf = jax2tf.convert(f_jax)(x_v)</span>
+        <span class="s3">return </span><span class="s1">tape.gradient(res_tf</span><span class="s3">, </span><span class="s1">x_v</span><span class="s3">, </span><span class="s1">output_gradients=res_ct)</span>
+
+    <span class="s0"># Annotation count for the primal input and the grad output</span>
+    <span class="s1">count_in_P = self.GEQ(</span><span class="s5">2</span><span class="s1">) </span><span class="s3">if </span><span class="s1">in_shardings == </span><span class="s4">&quot;P&quot; </span><span class="s3">else </span><span class="s5">0</span>
+    <span class="s3">if </span><span class="s1">config.jax2tf_default_native_serialization:</span>
+      <span class="s0"># With native serialization even unspecified in_shardings turn into replicated</span>
+      <span class="s1">count_in_replicated = self.GEQ(</span><span class="s5">2</span><span class="s1">) </span><span class="s3">if </span><span class="s1">in_shardings </span><span class="s3">in </span><span class="s1">[</span><span class="s3">None, </span><span class="s4">&quot;missing&quot;</span><span class="s1">] </span><span class="s3">else </span><span class="s5">0</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s1">count_in_replicated = self.GEQ(</span><span class="s5">2</span><span class="s1">) </span><span class="s3">if </span><span class="s1">in_shardings </span><span class="s3">is None else </span><span class="s5">0</span>
+    <span class="s0"># Annotation count for the contangent input</span>
+    <span class="s1">count_out_P = self.GEQ(</span><span class="s5">1</span><span class="s1">) </span><span class="s3">if </span><span class="s1">out_shardings == </span><span class="s4">&quot;P&quot; </span><span class="s3">else </span><span class="s5">0</span>
+    <span class="s3">if </span><span class="s1">config.jax2tf_default_native_serialization:</span>
+      <span class="s0"># With native serialization even unspecified in_shardings turn into replicated</span>
+      <span class="s1">count_out_replicated = self.GEQ(</span><span class="s5">1</span><span class="s1">) </span><span class="s3">if </span><span class="s1">out_shardings </span><span class="s3">in </span><span class="s1">[</span><span class="s3">None, </span><span class="s4">&quot;missing&quot;</span><span class="s1">] </span><span class="s3">else </span><span class="s5">0</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s1">count_out_replicated = self.GEQ(</span><span class="s5">1</span><span class="s1">) </span><span class="s3">if </span><span class="s1">out_shardings </span><span class="s3">is None else </span><span class="s5">0</span>
+
+    <span class="s1">self.check_sharding(f_grad_tf</span><span class="s3">, </span><span class="s1">[x</span><span class="s3">, </span><span class="s1">x.T]</span><span class="s3">,</span>
+        <span class="s1">checks=[</span>
+            <span class="s0"># The input primal argument, and the output grad</span>
+            <span class="s1">(</span><span class="s4">r&quot;f32\[10,20\].*custom_call_target.*Sharding.*sharding.*devices=\[1,2\]&quot;</span><span class="s3">, </span><span class="s1">count_in_P)</span><span class="s3">,</span>
+            <span class="s1">(</span><span class="s4">r&quot;f32\[10,20\].*custom_call_target.*Sharding.*sharding.*replicated&quot;</span><span class="s3">, </span><span class="s1">count_in_replicated)</span><span class="s3">,</span>
+            <span class="s0"># The primal result, and the input cotangent</span>
+            <span class="s1">(</span><span class="s4">r&quot;f32\[20,10\].*custom_call_target.*Sharding.*sharding.*devices=\[2,1\]&quot;</span><span class="s3">, </span><span class="s1">count_out_P)</span><span class="s3">,</span>
+            <span class="s1">(</span><span class="s4">r&quot;f32\[20,10\].*custom_call_target.*Sharding.*sharding.*replicated&quot;</span><span class="s3">, </span><span class="s1">count_out_replicated)</span><span class="s3">,</span>
+        <span class="s1">])</span>
+
+  <span class="s1">@parameterized.named_parameters(</span>
+      <span class="s1">dict(testcase_name=</span><span class="s4">f&quot;_kind=</span><span class="s3">{</span><span class="s1">kind</span><span class="s3">}</span><span class="s4">_in_shardings=</span><span class="s3">{</span><span class="s1">in_shardings</span><span class="s3">}</span><span class="s4">_out_shardings=</span><span class="s3">{</span><span class="s1">out_shardings</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s3">,</span>
+           <span class="s1">kind=kind</span><span class="s3">, </span><span class="s1">in_shardings=in_shardings</span><span class="s3">, </span><span class="s1">out_shardings=out_shardings)</span>
+      <span class="s3">for </span><span class="s1">kind </span><span class="s3">in </span><span class="s1">(</span><span class="s4">&quot;pjit&quot;</span><span class="s3">, </span><span class="s4">&quot;jit&quot;</span><span class="s3">, </span><span class="s4">&quot;sharding_constraint&quot;</span><span class="s1">)</span>
+      <span class="s3">for </span><span class="s1">in_shardings </span><span class="s3">in </span><span class="s1">(</span>
+          <span class="s1">(</span><span class="s4">&quot;none&quot;</span><span class="s3">, </span><span class="s4">&quot;P&quot;</span><span class="s1">) </span><span class="s3">if </span><span class="s1">kind == </span><span class="s4">&quot;sharding_constraint&quot; </span><span class="s3">else</span>
+          <span class="s1">(</span><span class="s4">&quot;unspecified&quot;</span><span class="s3">,</span><span class="s1">) </span><span class="s3">if </span><span class="s1">kind == </span><span class="s4">&quot;jit&quot; </span><span class="s3">else</span>
+          <span class="s1">(</span><span class="s4">&quot;unspecified&quot;</span><span class="s3">, </span><span class="s4">&quot;none&quot;</span><span class="s3">, </span><span class="s4">&quot;P&quot;</span><span class="s1">))</span>
+      <span class="s3">for </span><span class="s1">out_shardings </span><span class="s3">in </span><span class="s1">(</span>
+          <span class="s1">(</span><span class="s4">&quot;unspecified&quot;</span><span class="s3">,</span><span class="s1">) </span><span class="s3">if </span><span class="s1">kind </span><span class="s3">in </span><span class="s1">[</span><span class="s4">&quot;sharding_constraint&quot;</span><span class="s3">, </span><span class="s4">&quot;jit&quot;</span><span class="s1">] </span><span class="s3">else</span>
+          <span class="s1">(</span><span class="s4">&quot;unspecified&quot;</span><span class="s3">, </span><span class="s4">&quot;none&quot;</span><span class="s3">, </span><span class="s4">&quot;P&quot;</span><span class="s1">))</span>
+  <span class="s1">)</span>
+  <span class="s3">def </span><span class="s1">test_pjit_error_inner_sharding(self</span><span class="s3">, </span><span class="s1">kind=</span><span class="s4">&quot;pjit&quot;</span><span class="s3">, </span><span class="s1">in_shardings=</span><span class="s4">&quot;P&quot;</span><span class="s3">,</span>
+                                     <span class="s1">out_shardings=</span><span class="s4">&quot;none&quot;</span><span class="s1">):</span>
+    <span class="s0"># Check that we raise an error if there is no top-level pjit but we convert</span>
+    <span class="s0"># a function with non-replicated shardings (with native lowering).</span>
+    <span class="s1">shardings_map = dict(none=</span><span class="s3">None, </span><span class="s1">P=P(</span><span class="s4">&quot;x&quot;</span><span class="s1">))</span>
+
+    <span class="s3">def </span><span class="s1">f_jax(x):</span>
+      <span class="s3">if </span><span class="s1">kind == </span><span class="s4">&quot;pjit&quot;</span><span class="s1">:</span>
+        <span class="s1">pjit_kwargs = {}</span>
+        <span class="s3">if </span><span class="s1">in_shardings != </span><span class="s4">&quot;unspecified&quot;</span><span class="s1">:</span>
+          <span class="s1">pjit_kwargs[</span><span class="s4">&quot;in_shardings&quot;</span><span class="s1">] = shardings_map[in_shardings]</span>
+        <span class="s3">if </span><span class="s1">out_shardings != </span><span class="s4">&quot;unspecified&quot;</span><span class="s1">:</span>
+          <span class="s1">pjit_kwargs[</span><span class="s4">&quot;out_shardings&quot;</span><span class="s1">] = shardings_map[out_shardings]</span>
+        <span class="s1">res = pjit.pjit(</span><span class="s3">lambda </span><span class="s1">x: x * </span><span class="s5">2.</span><span class="s3">, </span><span class="s1">**pjit_kwargs)(x)</span>
+      <span class="s3">elif </span><span class="s1">kind == </span><span class="s4">&quot;jit&quot;</span><span class="s1">:</span>
+        <span class="s1">res = jax.jit(</span><span class="s3">lambda </span><span class="s1">x: x * </span><span class="s5">2.</span><span class="s1">)(x)</span>
+      <span class="s3">elif </span><span class="s1">kind == </span><span class="s4">&quot;sharding_constraint&quot;</span><span class="s1">:</span>
+        <span class="s1">res = pjit.with_sharding_constraint(x * </span><span class="s5">2.</span><span class="s3">, </span><span class="s1">shardings_map[in_shardings])</span>
+      <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">assert False</span>
+      <span class="s3">return </span><span class="s1">res</span>
+
+    <span class="s1">expect_error = (in_shardings == </span><span class="s4">&quot;P&quot; </span><span class="s3">or </span><span class="s1">out_shardings == </span><span class="s4">&quot;P&quot;</span><span class="s1">)</span>
+    <span class="s1">shape = (</span><span class="s5">8</span><span class="s3">, </span><span class="s5">10</span><span class="s1">)</span>
+    <span class="s1">x = np.arange(np.prod(shape)</span><span class="s3">, </span><span class="s1">dtype=np.float32).reshape(shape)</span>
+
+    <span class="s1">f_tf = tf.function(jax2tf.convert(f_jax</span><span class="s3">, </span><span class="s1">native_serialization=</span><span class="s3">True</span><span class="s1">)</span><span class="s3">,</span>
+                       <span class="s1">autograph=</span><span class="s3">False, </span><span class="s1">jit_compile=</span><span class="s3">True</span><span class="s1">)</span>
+    <span class="s3">with </span><span class="s1">contextlib.ExitStack() </span><span class="s3">as </span><span class="s1">stack:</span>
+      <span class="s3">if </span><span class="s1">expect_error:</span>
+        <span class="s1">stack.enter_context(self.assertRaisesRegex(</span>
+            <span class="s1">ValueError</span><span class="s3">,</span>
+            <span class="s4">&quot;Lowered function does not have a top-level pjit but it has non-replicated sharding annotations&quot;</span><span class="s1">))</span>
+      <span class="s3">with </span><span class="s1">Mesh(self.devices</span><span class="s3">, </span><span class="s1">axis_names=(</span><span class="s4">&quot;x&quot;</span><span class="s3">,</span><span class="s1">)):</span>
+        <span class="s1">f_tf(x)</span>
+
+  <span class="s1">@parameterized.named_parameters(</span>
+      <span class="s1">dict(testcase_name=</span><span class="s4">f&quot;_func=</span><span class="s3">{</span><span class="s1">func</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s3">, </span><span class="s1">func=func)</span>
+      <span class="s3">for </span><span class="s1">func </span><span class="s3">in </span><span class="s1">(</span><span class="s4">&quot;pjit_sharded&quot;</span><span class="s3">, </span><span class="s4">&quot;pjit_replicated&quot;</span><span class="s3">,</span>
+                   <span class="s4">&quot;nested_pjit_sharded&quot;</span><span class="s3">, </span><span class="s4">&quot;nested_pjit_replicated&quot;</span><span class="s1">)</span>
+  <span class="s1">)</span>
+  <span class="s3">def </span><span class="s1">test_pjit_eager_error(self</span><span class="s3">, </span><span class="s1">func=</span><span class="s4">&quot;pjit_sharded&quot;</span><span class="s1">):</span>
+    <span class="s3">if </span><span class="s1">config.jax2tf_default_native_serialization:</span>
+      <span class="s3">raise </span><span class="s1">unittest.SkipTest(</span><span class="s4">&quot;There is no error in eager mode for native serialization&quot;</span><span class="s1">)</span>
+
+    <span class="s0"># Define some test functions</span>
+    <span class="s1">@partial(pjit.pjit</span><span class="s3">, </span><span class="s1">in_shardings=(P(</span><span class="s4">&quot;x&quot;</span><span class="s1">)</span><span class="s3">,</span><span class="s1">)</span><span class="s3">,</span>
+             <span class="s1">out_shardings=</span><span class="s3">None</span><span class="s1">)</span>
+    <span class="s3">def </span><span class="s1">f_pjit_sharded(a):</span>
+      <span class="s3">return </span><span class="s1">a + a</span>
+
+    <span class="s1">@partial(pjit.pjit</span><span class="s3">, </span><span class="s1">in_shardings=</span><span class="s3">None,</span>
+             <span class="s1">out_shardings=</span><span class="s3">None</span><span class="s1">)</span>
+    <span class="s3">def </span><span class="s1">f_pjit_replicated(a):</span>
+      <span class="s3">return </span><span class="s1">a + a</span>
+
+    <span class="s3">def </span><span class="s1">f_nested_pjit_sharded(a):</span>
+      <span class="s3">return </span><span class="s1">a + pjit.pjit(jnp.sin</span><span class="s3">, </span><span class="s1">in_shardings=(P(</span><span class="s4">&quot;x&quot;</span><span class="s1">)</span><span class="s3">,</span><span class="s1">)</span><span class="s3">, </span><span class="s1">out_shardings=</span><span class="s3">None</span><span class="s1">)(a)</span>
+
+    <span class="s3">def </span><span class="s1">f_nested_pjit_replicated(a):</span>
+      <span class="s3">return </span><span class="s1">a + pjit.pjit(jnp.sin</span><span class="s3">, </span><span class="s1">in_shardings=</span><span class="s3">None, </span><span class="s1">out_shardings=</span><span class="s3">None</span><span class="s1">)(a)</span>
+
+    <span class="s1">shape = (</span><span class="s5">8</span><span class="s3">, </span><span class="s5">10</span><span class="s1">)</span>
+    <span class="s1">a = np.arange(np.prod(shape)</span><span class="s3">, </span><span class="s1">dtype=np.float32).reshape(shape)</span>
+
+    <span class="s3">if </span><span class="s1">func == </span><span class="s4">&quot;pjit_sharded&quot;</span><span class="s1">:</span>
+      <span class="s1">f_jax = f_pjit_sharded</span>
+    <span class="s3">elif </span><span class="s1">func == </span><span class="s4">&quot;pjit_replicated&quot;</span><span class="s1">:</span>
+      <span class="s1">f_jax = f_pjit_replicated</span>
+    <span class="s3">elif </span><span class="s1">func == </span><span class="s4">&quot;nested_pjit_sharded&quot;</span><span class="s1">:</span>
+      <span class="s1">f_jax = f_nested_pjit_sharded</span>
+    <span class="s3">elif </span><span class="s1">func == </span><span class="s4">&quot;nested_pjit_replicated&quot;</span><span class="s1">:</span>
+      <span class="s1">f_jax = f_nested_pjit_replicated</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s3">assert False</span>
+
+    <span class="s3">with </span><span class="s1">Mesh(self.devices</span><span class="s3">, </span><span class="s1">axis_names=(</span><span class="s4">&quot;x&quot;</span><span class="s3">,</span><span class="s1">)):</span>
+      <span class="s1">_ = f_jax(a)</span>
+      <span class="s3">with </span><span class="s1">self.assertRaisesRegex(</span>
+          <span class="s1">ValueError</span><span class="s3">,</span>
+          <span class="s4">&quot;function with sharded arguments or results must be used under a `tf.function` context&quot;</span><span class="s1">):</span>
+        <span class="s1">jax2tf.convert(f_jax)(a)</span>
+
+  <span class="s3">def </span><span class="s1">test_xmap_basic(self):</span>
+    <span class="s1">devices = np.reshape(self.devices</span><span class="s3">, </span><span class="s1">(</span><span class="s5">1</span><span class="s3">, </span><span class="s5">2</span><span class="s1">))</span>
+    <span class="s1">ashape = (</span><span class="s5">16</span><span class="s3">, </span><span class="s5">8</span><span class="s3">, </span><span class="s5">5</span><span class="s1">)</span>
+    <span class="s1">a = np.arange(np.prod(ashape)</span><span class="s3">, </span><span class="s1">dtype=np.float32).reshape(ashape)</span>
+    <span class="s1">bshape = (</span><span class="s5">2</span><span class="s3">, </span><span class="s5">7</span><span class="s1">)</span>
+    <span class="s1">b = np.arange(np.prod(bshape)</span><span class="s3">, </span><span class="s1">dtype=np.float32).reshape(bshape)</span>
+
+    <span class="s0"># f_jax: f32[16,8,5], f32[2,7] -&gt; f32[16,8,10], f32[2,28]</span>
+    <span class="s0"># lambda ...: f32[5], f32[7] -&gt; f32[10], f32[28]</span>
+    <span class="s1">f_jax = xmap(</span><span class="s3">lambda </span><span class="s1">a</span><span class="s3">, </span><span class="s1">b: (jnp.concatenate([a</span><span class="s3">, </span><span class="s1">a]</span><span class="s3">, </span><span class="s1">axis=</span><span class="s5">0</span><span class="s1">) * </span><span class="s5">2.</span><span class="s3">,</span>
+                               <span class="s1">jnp.concatenate([b</span><span class="s3">, </span><span class="s1">b</span><span class="s3">, </span><span class="s1">b</span><span class="s3">, </span><span class="s1">b]</span><span class="s3">, </span><span class="s1">axis=</span><span class="s5">0</span><span class="s1">) * </span><span class="s5">4.</span><span class="s1">)</span><span class="s3">,</span>
+                 <span class="s1">in_axes=({</span><span class="s5">0</span><span class="s1">: </span><span class="s4">'a'</span><span class="s3">, </span><span class="s5">1</span><span class="s1">: </span><span class="s4">'b'</span><span class="s1">}</span><span class="s3">, </span><span class="s1">[</span><span class="s4">'c'</span><span class="s3">, </span><span class="s1">...])</span><span class="s3">,</span>
+                 <span class="s1">out_axes=({</span><span class="s5">0</span><span class="s1">: </span><span class="s4">'a'</span><span class="s3">, </span><span class="s5">1</span><span class="s1">: </span><span class="s4">'b'</span><span class="s1">}</span><span class="s3">, </span><span class="s1">[</span><span class="s4">'c'</span><span class="s3">, </span><span class="s1">...])</span><span class="s3">,</span>
+                 <span class="s1">axis_resources={</span><span class="s4">'a'</span><span class="s1">: </span><span class="s4">'x'</span><span class="s3">, </span><span class="s4">'b'</span><span class="s1">: </span><span class="s4">'y'</span><span class="s3">, </span><span class="s4">'c'</span><span class="s1">: </span><span class="s4">'x'</span><span class="s1">})</span>
+
+    <span class="s1">@tf.function(autograph=</span><span class="s3">False, </span><span class="s1">jit_compile=</span><span class="s3">True</span><span class="s1">)</span>
+    <span class="s3">def </span><span class="s1">f_tf(a</span><span class="s3">, </span><span class="s1">b):</span>
+      <span class="s0"># xmap works only with native serialization</span>
+      <span class="s1">f_converted = jax2tf.convert(f_jax</span><span class="s3">, </span><span class="s1">native_serialization=</span><span class="s3">True</span><span class="s1">)</span>
+      <span class="s3">if </span><span class="s1">jtu.device_under_test() == </span><span class="s4">&quot;tpu&quot;</span><span class="s1">:</span>
+        <span class="s1">res = tf.compat.v1.tpu.rewrite(</span>
+            <span class="s1">f_converted</span><span class="s3">, </span><span class="s1">[tf.convert_to_tensor(a)</span><span class="s3">, </span><span class="s1">tf.convert_to_tensor(b)]</span><span class="s3">,</span>
+            <span class="s1">device_assignment=self.device_assignment(</span>
+                <span class="s1">computation_shape=[</span><span class="s5">1</span><span class="s3">, </span><span class="s5">1</span><span class="s3">, </span><span class="s5">1</span><span class="s3">, </span><span class="s5">2</span><span class="s1">])</span>
+        <span class="s1">)</span>
+        <span class="s3">return </span><span class="s1">(res[</span><span class="s5">0</span><span class="s1">]</span><span class="s3">, </span><span class="s1">res[</span><span class="s5">1</span><span class="s1">])</span>
+      <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">return </span><span class="s1">f_converted(a</span><span class="s3">, </span><span class="s1">b)</span>
+
+    <span class="s3">with </span><span class="s1">Mesh(devices</span><span class="s3">, </span><span class="s1">(</span><span class="s4">'x'</span><span class="s3">, </span><span class="s4">'y'</span><span class="s1">)):</span>
+      <span class="s1">res_jax = f_jax(a</span><span class="s3">, </span><span class="s1">b)</span>
+      <span class="s1">self.assertAllClose(res_jax</span><span class="s3">, </span><span class="s1">(jnp.concatenate([a</span><span class="s3">, </span><span class="s1">a]</span><span class="s3">, </span><span class="s1">axis=</span><span class="s5">2</span><span class="s1">) * </span><span class="s5">2.</span><span class="s3">,</span>
+                                    <span class="s1">jnp.concatenate([b</span><span class="s3">, </span><span class="s1">b</span><span class="s3">, </span><span class="s1">b</span><span class="s3">, </span><span class="s1">b]</span><span class="s3">, </span><span class="s1">axis=</span><span class="s5">1</span><span class="s1">) * </span><span class="s5">4.</span><span class="s1">))</span>
+      <span class="s1">res_tf = f_tf(a</span><span class="s3">, </span><span class="s1">b)</span>
+      <span class="s1">self.assertAllClose(res_tf</span><span class="s3">, </span><span class="s1">res_jax)</span>
+
+      <span class="s1">self.check_sharding(</span>
+          <span class="s1">jax2tf.convert(f_jax</span><span class="s3">, </span><span class="s1">native_serialization=</span><span class="s3">True</span><span class="s1">)</span><span class="s3">, </span><span class="s1">[a</span><span class="s3">, </span><span class="s1">b]</span><span class="s3">,</span>
+          <span class="s1">checks=[</span>
+              <span class="s1">(</span><span class="s4">r&quot;f32\[16,8,5\].*custom_call_target.*Sharding.*sharding.*devices=\[1,2,1\]&quot;</span><span class="s3">, </span><span class="s5">1</span><span class="s1">)</span><span class="s3">,</span>
+              <span class="s0"># The output sharding</span>
+              <span class="s1">(</span><span class="s4">r&quot;f32\[2,7\].*custom_call_target.*Sharding.*sharding.*replicated&quot;</span><span class="s3">, </span><span class="s5">1</span><span class="s1">)</span><span class="s3">,</span>
+              <span class="s1">(</span><span class="s4">r&quot;f32\[2,28\].*custom_call_target.*Sharding.*sharding.*replicated&quot;</span><span class="s3">, </span><span class="s5">1</span><span class="s1">)</span><span class="s3">,</span>
+          <span class="s1">])</span>
+
+  <span class="s3">def </span><span class="s1">test_xmap_collective_reduce(self):</span>
+    <span class="s1">devices = np.reshape(self.devices</span><span class="s3">, </span><span class="s1">(</span><span class="s5">1</span><span class="s3">, </span><span class="s5">2</span><span class="s1">))</span>
+    <span class="s1">ashape = (</span><span class="s5">16</span><span class="s3">, </span><span class="s5">8</span><span class="s3">, </span><span class="s5">5</span><span class="s1">)</span>
+    <span class="s1">a = np.arange(np.prod(ashape)</span><span class="s3">, </span><span class="s1">dtype=np.float32).reshape(ashape)</span>
+    <span class="s1">bshape = (</span><span class="s5">2</span><span class="s3">, </span><span class="s5">7</span><span class="s1">)</span>
+    <span class="s1">b = np.arange(np.prod(bshape)</span><span class="s3">, </span><span class="s1">dtype=np.float32).reshape(bshape)</span>
+    <span class="s1">f_jax = xmap(</span><span class="s3">lambda </span><span class="s1">a</span><span class="s3">, </span><span class="s1">b: (lax.psum(a * </span><span class="s5">2.</span><span class="s3">, </span><span class="s4">'a'</span><span class="s1">)</span><span class="s3">, </span><span class="s1">b * </span><span class="s5">4.</span><span class="s1">)</span><span class="s3">,</span>
+                 <span class="s1">in_axes=([</span><span class="s4">'a'</span><span class="s3">, </span><span class="s4">'b'</span><span class="s3">, </span><span class="s1">...]</span><span class="s3">, </span><span class="s1">{</span><span class="s5">0</span><span class="s1">: </span><span class="s4">'c'</span><span class="s1">})</span><span class="s3">,</span>
+                 <span class="s1">out_axes=([</span><span class="s4">'b'</span><span class="s3">, </span><span class="s1">...]</span><span class="s3">, </span><span class="s1">{</span><span class="s5">0</span><span class="s1">: </span><span class="s4">'c'</span><span class="s1">})</span><span class="s3">,</span>
+                 <span class="s1">axis_resources={</span><span class="s4">'a'</span><span class="s1">: </span><span class="s4">'x'</span><span class="s3">, </span><span class="s4">'b'</span><span class="s1">: </span><span class="s4">'y'</span><span class="s3">, </span><span class="s4">'c'</span><span class="s1">: </span><span class="s4">'x'</span><span class="s1">})</span>
+
+    <span class="s1">@tf.function(autograph=</span><span class="s3">False, </span><span class="s1">jit_compile=</span><span class="s3">True</span><span class="s1">)</span>
+    <span class="s3">def </span><span class="s1">f_tf(a</span><span class="s3">, </span><span class="s1">b):</span>
+      <span class="s1">f_converted = jax2tf.convert(f_jax</span><span class="s3">, </span><span class="s1">native_serialization=</span><span class="s3">True</span><span class="s1">)</span>
+      <span class="s3">if </span><span class="s1">jtu.device_under_test() == </span><span class="s4">&quot;tpu&quot;</span><span class="s1">:</span>
+        <span class="s1">res = tf.compat.v1.tpu.rewrite(</span>
+            <span class="s1">f_converted</span><span class="s3">, </span><span class="s1">[tf.convert_to_tensor(a)</span><span class="s3">, </span><span class="s1">tf.convert_to_tensor(b)]</span><span class="s3">,</span>
+            <span class="s1">device_assignment=self.device_assignment(</span>
+                <span class="s1">computation_shape=[</span><span class="s5">1</span><span class="s3">, </span><span class="s5">1</span><span class="s3">, </span><span class="s5">1</span><span class="s3">, </span><span class="s5">2</span><span class="s1">])</span>
+        <span class="s1">)</span>
+        <span class="s3">return </span><span class="s1">(res[</span><span class="s5">0</span><span class="s1">]</span><span class="s3">, </span><span class="s1">res[</span><span class="s5">1</span><span class="s1">])</span>
+      <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">return </span><span class="s1">f_converted(a</span><span class="s3">, </span><span class="s1">b)</span>
+
+    <span class="s3">with </span><span class="s1">Mesh(devices</span><span class="s3">, </span><span class="s1">(</span><span class="s4">'x'</span><span class="s3">, </span><span class="s4">'y'</span><span class="s1">)):</span>
+      <span class="s1">res_jax = f_jax(a</span><span class="s3">, </span><span class="s1">b)</span>
+      <span class="s1">self.assertAllClose(res_jax</span><span class="s3">, </span><span class="s1">((a * </span><span class="s5">2.</span><span class="s1">).sum(</span><span class="s5">0</span><span class="s1">)</span><span class="s3">, </span><span class="s1">b * </span><span class="s5">4.</span><span class="s1">))</span>
+      <span class="s1">res_tf = f_tf(a</span><span class="s3">, </span><span class="s1">b)</span>
+      <span class="s1">self.assertAllClose(res_tf</span><span class="s3">, </span><span class="s1">res_jax)</span>
+      <span class="s1">self.check_sharding(</span>
+          <span class="s1">jax2tf.convert(f_jax</span><span class="s3">, </span><span class="s1">native_serialization=</span><span class="s3">True</span><span class="s1">)</span><span class="s3">, </span><span class="s1">[a</span><span class="s3">, </span><span class="s1">b]</span><span class="s3">,</span>
+          <span class="s1">checks=[</span>
+              <span class="s1">(</span><span class="s4">r&quot;f32\[16,8,5\].*custom_call_target.*Sharding.*sharding.*devices=\[1,2,1\]&quot;</span><span class="s3">, </span><span class="s5">1</span><span class="s1">)</span><span class="s3">,</span>
+              <span class="s1">(</span><span class="s4">r&quot;f32\[2,7\].*custom_call_target.*Sharding.*sharding.*replicated&quot;</span><span class="s3">, </span><span class="s5">2</span><span class="s1">)</span><span class="s3">,</span>
+              <span class="s1">(</span><span class="s4">r&quot;f32\[8,5\].*custom_call_target.*Sharding.*sharding.*devices=\[2,1\]&quot;</span><span class="s3">, </span><span class="s5">1</span><span class="s1">)</span><span class="s3">,</span>
+          <span class="s1">])</span>
+
+  <span class="s3">def </span><span class="s1">test_grad_xmap(self):</span>
+    <span class="s1">devices = np.reshape(self.devices</span><span class="s3">, </span><span class="s1">(</span><span class="s5">1</span><span class="s3">, </span><span class="s5">2</span><span class="s1">))</span>
+    <span class="s1">ashape = (</span><span class="s5">16</span><span class="s3">, </span><span class="s5">8</span><span class="s3">, </span><span class="s5">5</span><span class="s1">)</span>
+    <span class="s1">a = np.arange(np.prod(ashape)</span><span class="s3">, </span><span class="s1">dtype=np.float32).reshape(ashape)</span>
+
+    <span class="s0"># f_jax: f32[16,8,5]-&gt; f32[16,8,10]</span>
+    <span class="s0"># lambda ...: f32[5]-&gt; f32[10]</span>
+    <span class="s1">f_jax = xmap(</span><span class="s3">lambda </span><span class="s1">a: jnp.concatenate([a</span><span class="s3">, </span><span class="s1">a]</span><span class="s3">, </span><span class="s1">axis=</span><span class="s5">0</span><span class="s1">) * </span><span class="s5">2.</span><span class="s3">,</span>
+                 <span class="s1">in_axes=({</span><span class="s5">0</span><span class="s1">: </span><span class="s4">'a'</span><span class="s3">, </span><span class="s5">1</span><span class="s1">: </span><span class="s4">'b'</span><span class="s1">})</span><span class="s3">,</span>
+                 <span class="s1">out_axes={</span><span class="s5">0</span><span class="s1">: </span><span class="s4">'a'</span><span class="s3">, </span><span class="s5">1</span><span class="s1">: </span><span class="s4">'b'</span><span class="s1">}</span><span class="s3">,</span>
+                 <span class="s1">axis_resources={</span><span class="s4">'a'</span><span class="s1">: </span><span class="s4">'x'</span><span class="s3">, </span><span class="s4">'b'</span><span class="s1">: </span><span class="s4">'y'</span><span class="s1">})</span>
+
+    <span class="s3">def </span><span class="s1">f_grad_tf(a</span><span class="s3">, </span><span class="s1">res_ct):</span>
+      <span class="s3">with </span><span class="s1">tf.GradientTape(persistent=</span><span class="s3">True</span><span class="s1">) </span><span class="s3">as </span><span class="s1">tape:</span>
+        <span class="s1">tape.watch(a)</span>
+        <span class="s1">res_tf = jax2tf.convert(f_jax</span><span class="s3">, </span><span class="s1">native_serialization=</span><span class="s3">True</span><span class="s1">)(a)</span>
+        <span class="s3">return </span><span class="s1">tape.gradient(res_tf</span><span class="s3">, </span><span class="s1">a</span><span class="s3">, </span><span class="s1">output_gradients=res_ct)</span>
+
+
+    <span class="s3">with </span><span class="s1">Mesh(devices</span><span class="s3">, </span><span class="s1">(</span><span class="s4">'x'</span><span class="s3">, </span><span class="s4">'y'</span><span class="s1">)):</span>
+      <span class="s1">self.check_sharding(f_grad_tf</span><span class="s3">, </span><span class="s1">[a</span><span class="s3">, </span><span class="s1">np.concatenate([a</span><span class="s3">, </span><span class="s1">a]</span><span class="s3">, </span><span class="s1">axis=</span><span class="s5">2</span><span class="s1">)]</span><span class="s3">,</span>
+          <span class="s1">checks=[</span>
+              <span class="s0"># Primal input and grad output</span>
+              <span class="s1">(</span><span class="s4">r&quot;f32\[16,8,5\].*custom_call_target.*Sharding.*sharding.*devices=\[1,2,1\]&quot;</span><span class="s3">, </span><span class="s1">self.GEQ(</span><span class="s5">2</span><span class="s1">))</span><span class="s3">,</span>
+              <span class="s0"># Input cotangent</span>
+              <span class="s1">(</span><span class="s4">r&quot;f32\[16,8,10\].*custom_call_target.*Sharding.*sharding.*devices=\[1,2,1\]&quot;</span><span class="s3">, </span><span class="s1">self.GEQ(</span><span class="s5">1</span><span class="s1">))</span><span class="s3">,</span>
+          <span class="s1">])</span>
+
+  <span class="s1">@jtu.ignore_warning(category=UserWarning</span><span class="s3">,</span>
+                      <span class="s1">message=</span><span class="s4">&quot;all_to_all .* are only implemented properly for TPUs and GPUs .*&quot;</span><span class="s1">)</span>
+  <span class="s3">def </span><span class="s1">test_shmap_all_to_all(self):</span>
+    <span class="s3">if </span><span class="s1">jtu.device_under_test() == </span><span class="s4">&quot;cpu&quot;</span><span class="s1">:</span>
+      <span class="s3">raise </span><span class="s1">unittest.SkipTest(</span><span class="s4">&quot;TODO(b/268295912): ShardingRemover crash&quot;</span><span class="s1">)</span>
+
+    <span class="s1">mesh = Mesh(self.devices</span><span class="s3">, </span><span class="s1">axis_names=(</span><span class="s4">'x'</span><span class="s1">))</span>
+    <span class="s1">a = np.arange(np.prod(</span><span class="s5">4 </span><span class="s1">* </span><span class="s5">4</span><span class="s1">)</span><span class="s3">, </span><span class="s1">dtype=np.float32).reshape((</span><span class="s5">4</span><span class="s3">, </span><span class="s5">4</span><span class="s1">))</span>
+
+    <span class="s1">@partial(pjit.pjit</span><span class="s3">,</span>
+             <span class="s1">in_shardings=(P(</span><span class="s4">'x'</span><span class="s3">, None</span><span class="s1">)</span><span class="s3">,</span><span class="s1">)</span><span class="s3">, </span><span class="s1">out_shardings=P(</span><span class="s3">None, </span><span class="s4">'x'</span><span class="s1">))</span>
+    <span class="s1">@partial(shard_map</span><span class="s3">, </span><span class="s1">mesh=mesh</span><span class="s3">,</span>
+             <span class="s1">in_specs=(P(</span><span class="s4">'x'</span><span class="s3">, None</span><span class="s1">)</span><span class="s3">,</span><span class="s1">)</span><span class="s3">, </span><span class="s1">out_specs=P(</span><span class="s3">None, </span><span class="s4">'x'</span><span class="s1">))</span>
+    <span class="s3">def </span><span class="s1">f_jax(b):  </span><span class="s0"># b: f32[2, 4]</span>
+      <span class="s3">return </span><span class="s1">lax.all_to_all(b</span><span class="s3">, </span><span class="s4">'x'</span><span class="s3">, </span><span class="s1">split_axis=</span><span class="s5">1</span><span class="s3">, </span><span class="s1">concat_axis=</span><span class="s5">1</span><span class="s3">, </span><span class="s1">tiled=</span><span class="s3">True</span><span class="s1">)</span>
+
+    <span class="s1">@tf.function(autograph=</span><span class="s3">False, </span><span class="s1">jit_compile=</span><span class="s3">True</span><span class="s1">)</span>
+    <span class="s3">def </span><span class="s1">f_tf(a):</span>
+      <span class="s1">f_converted = jax2tf.convert(f_jax</span><span class="s3">, </span><span class="s1">native_serialization=</span><span class="s3">True</span><span class="s1">)</span>
+      <span class="s3">if </span><span class="s1">jtu.device_under_test() == </span><span class="s4">&quot;tpu&quot;</span><span class="s1">:</span>
+        <span class="s3">return </span><span class="s1">tf.compat.v1.tpu.rewrite(</span>
+            <span class="s1">f_converted</span><span class="s3">, </span><span class="s1">[tf.convert_to_tensor(a)]</span><span class="s3">,</span>
+            <span class="s1">device_assignment=self.device_assignment(</span>
+                <span class="s1">computation_shape=[</span><span class="s5">1</span><span class="s3">, </span><span class="s5">1</span><span class="s3">, </span><span class="s5">1</span><span class="s3">, </span><span class="s5">2</span><span class="s1">])</span>
+        <span class="s1">)[</span><span class="s5">0</span><span class="s1">]</span>
+      <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">return </span><span class="s1">f_converted(a)</span>
+
+    <span class="s3">with </span><span class="s1">mesh:</span>
+      <span class="s1">res_jax = f_jax(a)  </span><span class="s0"># res: f32[2, 8]</span>
+      <span class="s1">b0</span><span class="s3">, </span><span class="s1">b1 = np.split(a</span><span class="s3">, </span><span class="s5">2</span><span class="s3">, </span><span class="s1">axis=</span><span class="s5">0</span><span class="s1">)  </span><span class="s0"># The shard_map in_specs splits on axis 0</span>
+      <span class="s1">b00</span><span class="s3">, </span><span class="s1">b01 = np.split(b0</span><span class="s3">, </span><span class="s5">2</span><span class="s3">, </span><span class="s1">axis=</span><span class="s5">1</span><span class="s1">)  </span><span class="s0"># split_axis=1</span>
+      <span class="s1">b10</span><span class="s3">, </span><span class="s1">b11 = np.split(b1</span><span class="s3">, </span><span class="s5">2</span><span class="s3">, </span><span class="s1">axis=</span><span class="s5">1</span><span class="s1">)</span>
+      <span class="s1">b0 = np.concatenate([b00</span><span class="s3">, </span><span class="s1">b10]</span><span class="s3">, </span><span class="s1">axis=</span><span class="s5">1</span><span class="s1">)  </span><span class="s0"># concat_axis=1</span>
+      <span class="s1">b1 = np.concatenate([b01</span><span class="s3">, </span><span class="s1">b11]</span><span class="s3">, </span><span class="s1">axis=</span><span class="s5">1</span><span class="s1">)</span>
+      <span class="s1">res = np.concatenate([b0</span><span class="s3">, </span><span class="s1">b1]</span><span class="s3">, </span><span class="s1">axis=</span><span class="s5">1</span><span class="s1">)  </span><span class="s0"># out_specs concatenates on axis 1</span>
+      <span class="s1">self.assertAllClose(res_jax</span><span class="s3">, </span><span class="s1">res)</span>
+      <span class="s1">res_tf = f_tf(a)</span>
+      <span class="s1">self.assertAllClose(res_tf</span><span class="s3">, </span><span class="s1">res_jax)</span>
+
+      <span class="s0"># TODO(b/274648842): Failed to GetCompilerIr</span>
+      <span class="s0"># self.check_sharding(</span>
+      <span class="s0">#     jax2tf.convert(f_jax, native_serialization=True), [a],</span>
+      <span class="s0">#     checks=[])</span>
+
+  <span class="s1">@unittest.skip(</span><span class="s4">&quot;TODO(b/268295912): ShardingRemover crash&quot;</span><span class="s1">)</span>
+  <span class="s3">def </span><span class="s1">test_repro_xla_bug_shmap_collective_permute(self):</span>
+    <span class="s1">mesh = Mesh(self.devices</span><span class="s3">, </span><span class="s1">axis_names=(</span><span class="s4">'x'</span><span class="s1">))</span>
+
+    <span class="s1">@partial(pjit.pjit</span><span class="s3">,</span>
+             <span class="s1">in_shardings=(P(</span><span class="s4">'x'</span><span class="s3">, None</span><span class="s1">)</span><span class="s3">,</span><span class="s1">)</span><span class="s3">, </span><span class="s1">out_shardings=P(</span><span class="s4">'x'</span><span class="s3">, None</span><span class="s1">))</span>
+    <span class="s1">@partial(shard_map</span><span class="s3">, </span><span class="s1">mesh=mesh</span><span class="s3">,</span>
+             <span class="s1">in_specs=(P(</span><span class="s4">'x'</span><span class="s3">, None</span><span class="s1">)</span><span class="s3">,</span><span class="s1">)</span><span class="s3">, </span><span class="s1">out_specs=P(</span><span class="s4">'x'</span><span class="s3">, None</span><span class="s1">))</span>
+    <span class="s3">def </span><span class="s1">f_jax(b):  </span><span class="s0"># b: f32[2, 4]</span>
+      <span class="s1">axis_size = lax.psum(</span><span class="s5">1</span><span class="s3">, </span><span class="s4">'x'</span><span class="s1">)</span>
+      <span class="s1">perm = [(j</span><span class="s3">, </span><span class="s1">(j + </span><span class="s5">1</span><span class="s1">) % axis_size) </span><span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">range(axis_size)]</span>
+      <span class="s3">return </span><span class="s1">lax.ppermute(b</span><span class="s3">, </span><span class="s4">'x'</span><span class="s3">, </span><span class="s1">perm=perm)</span>
+
+    <span class="s3">with </span><span class="s1">mesh:</span>
+      <span class="s1">a = np.arange(np.prod(</span><span class="s5">4 </span><span class="s1">* </span><span class="s5">4</span><span class="s1">)).reshape((</span><span class="s5">4</span><span class="s3">, </span><span class="s5">4</span><span class="s1">))</span>
+      <span class="s1">res_jax = f_jax(a)</span>
+      <span class="s1">b0</span><span class="s3">, </span><span class="s1">b1 = np.split(a</span><span class="s3">, </span><span class="s5">2</span><span class="s3">, </span><span class="s1">axis=</span><span class="s5">0</span><span class="s1">)  </span><span class="s0"># The shard_map splits on axis 0</span>
+      <span class="s1">b0</span><span class="s3">, </span><span class="s1">b1 = b1</span><span class="s3">, </span><span class="s1">b0</span>
+      <span class="s1">expected = np.concatenate([b0</span><span class="s3">, </span><span class="s1">b1]</span><span class="s3">, </span><span class="s1">axis=</span><span class="s5">0</span><span class="s1">)  </span><span class="s0"># out_specs concatenates on axis 0</span>
+      <span class="s1">self.assertAllClose(res_jax</span><span class="s3">, </span><span class="s1">expected)</span>
+
+      <span class="s0"># XLA bug: invoke the f_tf without tpu.replicate</span>
+      <span class="s1">f_tf = tf.function(</span>
+          <span class="s1">jax2tf.convert(f_jax</span><span class="s3">, </span><span class="s1">native_serialization=</span><span class="s3">True</span><span class="s1">)</span><span class="s3">,</span>
+          <span class="s1">autograph=</span><span class="s3">False, </span><span class="s1">jit_compile=</span><span class="s3">True</span><span class="s1">)</span>
+
+      <span class="s1">res_tf = f_tf(a)</span>
+      <span class="s1">self.assertAllClose(res_tf</span><span class="s3">, </span><span class="s1">expected)</span>
+
+  <span class="s3">def </span><span class="s1">test_shmap_collective_permute(self):</span>
+    <span class="s3">if </span><span class="s1">jtu.device_under_test() == </span><span class="s4">&quot;cpu&quot;</span><span class="s1">:</span>
+      <span class="s3">raise </span><span class="s1">unittest.SkipTest(</span><span class="s4">&quot;TODO(b/268295912): ShardingRemover crash&quot;</span><span class="s1">)</span>
+    <span class="s1">mesh = Mesh(self.devices</span><span class="s3">, </span><span class="s1">axis_names=(</span><span class="s4">'x'</span><span class="s1">))</span>
+    <span class="s1">a = np.arange(np.prod(</span><span class="s5">4 </span><span class="s1">* </span><span class="s5">4</span><span class="s1">)</span><span class="s3">, </span><span class="s1">dtype=np.float32).reshape((</span><span class="s5">4</span><span class="s3">, </span><span class="s5">4</span><span class="s1">))</span>
+
+    <span class="s1">@partial(pjit.pjit</span><span class="s3">,</span>
+             <span class="s1">in_shardings=(P(</span><span class="s4">'x'</span><span class="s3">, None</span><span class="s1">)</span><span class="s3">,</span><span class="s1">)</span><span class="s3">, </span><span class="s1">out_shardings=P(</span><span class="s4">'x'</span><span class="s3">, None</span><span class="s1">))</span>
+    <span class="s1">@partial(shard_map</span><span class="s3">, </span><span class="s1">mesh=mesh</span><span class="s3">,</span>
+             <span class="s1">in_specs=(P(</span><span class="s4">'x'</span><span class="s3">, None</span><span class="s1">)</span><span class="s3">,</span><span class="s1">)</span><span class="s3">, </span><span class="s1">out_specs=P(</span><span class="s4">'x'</span><span class="s3">, None</span><span class="s1">))</span>
+    <span class="s3">def </span><span class="s1">f_jax(b):  </span><span class="s0"># b: f32[2, 4]</span>
+      <span class="s1">axis_size = lax.psum(</span><span class="s5">1</span><span class="s3">, </span><span class="s4">'x'</span><span class="s1">)</span>
+      <span class="s1">perm = [(j</span><span class="s3">, </span><span class="s1">(j + </span><span class="s5">1</span><span class="s1">) % axis_size) </span><span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">range(axis_size)]</span>
+      <span class="s3">return </span><span class="s1">lax.ppermute(b</span><span class="s3">, </span><span class="s4">'x'</span><span class="s3">, </span><span class="s1">perm=perm)</span>
+
+    <span class="s1">@tf.function(autograph=</span><span class="s3">False, </span><span class="s1">jit_compile=</span><span class="s3">True</span><span class="s1">)</span>
+    <span class="s3">def </span><span class="s1">f_tf(a):</span>
+      <span class="s1">f_converted = jax2tf.convert(f_jax</span><span class="s3">, </span><span class="s1">native_serialization=</span><span class="s3">True</span><span class="s1">)</span>
+      <span class="s3">if </span><span class="s1">jtu.device_under_test() == </span><span class="s4">&quot;tpu&quot;</span><span class="s1">:</span>
+        <span class="s1">res = tf.compat.v1.tpu.rewrite(</span>
+            <span class="s1">f_converted</span><span class="s3">, </span><span class="s1">[tf.convert_to_tensor(a)]</span><span class="s3">,</span>
+            <span class="s1">device_assignment=self.device_assignment(</span>
+                <span class="s1">computation_shape=[</span><span class="s5">1</span><span class="s3">, </span><span class="s5">1</span><span class="s3">, </span><span class="s5">1</span><span class="s3">, </span><span class="s5">2</span><span class="s1">])</span>
+        <span class="s1">)[</span><span class="s5">0</span><span class="s1">]</span>
+      <span class="s3">else</span><span class="s1">:</span>
+        <span class="s1">res = f_converted(a)</span>
+      <span class="s3">return </span><span class="s1">res</span>
+
+    <span class="s3">with </span><span class="s1">mesh:</span>
+      <span class="s1">res_jax = f_jax(a)</span>
+      <span class="s1">b0</span><span class="s3">, </span><span class="s1">b1 = np.split(a</span><span class="s3">, </span><span class="s5">2</span><span class="s3">, </span><span class="s1">axis=</span><span class="s5">0</span><span class="s1">)  </span><span class="s0"># The shard_map splits on axis 0</span>
+      <span class="s1">b0</span><span class="s3">, </span><span class="s1">b1 = b1</span><span class="s3">, </span><span class="s1">b0</span>
+      <span class="s1">expected = np.concatenate([b0</span><span class="s3">, </span><span class="s1">b1]</span><span class="s3">, </span><span class="s1">axis=</span><span class="s5">0</span><span class="s1">)  </span><span class="s0"># out_specs concatenates on axis 0</span>
+      <span class="s1">self.assertAllClose(res_jax</span><span class="s3">, </span><span class="s1">expected)</span>
+      <span class="s1">res_tf = f_tf(a)</span>
+      <span class="s1">self.assertAllClose(res_tf</span><span class="s3">, </span><span class="s1">expected)</span>
+      <span class="s0"># TODO(b/274648842): Failed to GetCompilerIr</span>
+      <span class="s0"># self.check_sharding(</span>
+      <span class="s0">#     jax2tf.convert(f_jax, native_serialization=True), [a],</span>
+      <span class="s0">#     checks=[])</span>
+
+<span class="s3">if </span><span class="s1">__name__ == </span><span class="s4">&quot;__main__&quot;</span><span class="s1">:</span>
+  <span class="s1">absltest.main(testLoader=jtu.JaxTestLoader())</span>
+</pre>
+</body>
+</html>

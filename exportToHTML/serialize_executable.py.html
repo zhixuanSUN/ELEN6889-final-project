@@ -1,0 +1,114 @@
+<html>
+<head>
+<title>serialize_executable.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+serialize_executable.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2018 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+<span class="s2">&quot;&quot;&quot;Pickling support for precompiled binaries.&quot;&quot;&quot;</span>
+
+<span class="s3">import </span><span class="s1">pickle</span>
+<span class="s3">import </span><span class="s1">io</span>
+<span class="s3">from </span><span class="s1">typing </span><span class="s3">import </span><span class="s1">Optional</span><span class="s3">, </span><span class="s1">Union</span>
+
+<span class="s3">import </span><span class="s1">jax</span>
+<span class="s3">from </span><span class="s1">jax._src.lib </span><span class="s3">import </span><span class="s1">xla_client </span><span class="s3">as </span><span class="s1">xc</span>
+
+
+<span class="s3">def </span><span class="s1">serialize(compiled: jax.stages.Compiled):</span>
+  <span class="s2">&quot;&quot;&quot;Serializes a compiled binary. 
+ 
+  Because pytrees are not serializable, they are returned so that 
+  the user can handle them properly. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">unloaded_executable = getattr(compiled._executable</span><span class="s3">,</span>
+                                <span class="s4">'_unloaded_executable'</span><span class="s3">, None</span><span class="s1">)</span>
+  <span class="s3">if </span><span class="s1">unloaded_executable </span><span class="s3">is None</span><span class="s1">:</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Compilation does not support serialization&quot;</span><span class="s1">)</span>
+  <span class="s1">args_info_flat</span><span class="s3">, </span><span class="s1">in_tree = jax.tree_util.tree_flatten(compiled.args_info)</span>
+
+  <span class="s3">with </span><span class="s1">io.BytesIO() </span><span class="s3">as </span><span class="s1">file:</span>
+    <span class="s1">_JaxPjrtPickler(file).dump(</span>
+        <span class="s1">(unloaded_executable</span><span class="s3">, </span><span class="s1">args_info_flat</span><span class="s3">, </span><span class="s1">compiled._no_kwargs))</span>
+    <span class="s3">return </span><span class="s1">file.getvalue()</span><span class="s3">, </span><span class="s1">in_tree</span><span class="s3">, </span><span class="s1">compiled.out_tree</span>
+
+
+<span class="s3">def </span><span class="s1">deserialize_and_load(serialized</span><span class="s3">,</span>
+                         <span class="s1">in_tree</span><span class="s3">,</span>
+                         <span class="s1">out_tree</span><span class="s3">,</span>
+                         <span class="s1">backend: Optional[Union[str</span><span class="s3">, </span><span class="s1">xc.Client]] = </span><span class="s3">None</span><span class="s1">):</span>
+  <span class="s2">&quot;&quot;&quot;Constructs a jax.stages.Compiled from a serialized executable.&quot;&quot;&quot;</span>
+
+  <span class="s3">if </span><span class="s1">backend </span><span class="s3">is None or </span><span class="s1">isinstance(backend</span><span class="s3">, </span><span class="s1">str):</span>
+    <span class="s1">backend = jax.devices(backend)[</span><span class="s5">0</span><span class="s1">].client</span>
+
+  <span class="s1">(unloaded_executable</span><span class="s3">, </span><span class="s1">args_info_flat</span><span class="s3">,</span>
+   <span class="s1">no_kwargs) = _JaxPjrtUnpickler(io.BytesIO(serialized)</span><span class="s3">, </span><span class="s1">backend).load()</span>
+
+  <span class="s1">args_info = in_tree.unflatten(args_info_flat)</span>
+
+  <span class="s1">loaded_compiled_obj = unloaded_executable.load()</span>
+
+  <span class="s3">return </span><span class="s1">jax.stages.Compiled(</span>
+      <span class="s1">loaded_compiled_obj</span><span class="s3">, </span><span class="s1">args_info</span><span class="s3">, </span><span class="s1">out_tree</span><span class="s3">, </span><span class="s1">no_kwargs=no_kwargs)</span>
+
+
+<span class="s3">class </span><span class="s1">_JaxPjrtPickler(pickle.Pickler):</span>
+  <span class="s1">device_types = (xc.Device</span><span class="s3">,</span><span class="s1">)</span>
+  <span class="s1">client_types = (xc.Client</span><span class="s3">,</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">persistent_id(self</span><span class="s3">, </span><span class="s1">obj):</span>
+    <span class="s3">if </span><span class="s1">isinstance(obj</span><span class="s3">, </span><span class="s1">xc.LoadedExecutable):</span>
+      <span class="s3">return </span><span class="s1">(</span><span class="s4">'exec'</span><span class="s3">, </span><span class="s1">obj.client.serialize_executable(obj)</span><span class="s3">,</span>
+              <span class="s1">obj.compile_options())</span>
+    <span class="s3">if </span><span class="s1">isinstance(obj</span><span class="s3">, </span><span class="s1">xc._xla.Executable):</span>
+      <span class="s3">return </span><span class="s1">(</span><span class="s4">'exec'</span><span class="s3">, </span><span class="s1">obj.serialize()</span><span class="s3">, </span><span class="s1">obj.compile_options())</span>
+    <span class="s3">if </span><span class="s1">isinstance(obj</span><span class="s3">, </span><span class="s1">self.device_types):</span>
+      <span class="s3">return </span><span class="s1">(</span><span class="s4">'device'</span><span class="s3">, </span><span class="s1">obj.id)</span>
+    <span class="s3">if </span><span class="s1">isinstance(obj</span><span class="s3">, </span><span class="s1">self.client_types):</span>
+      <span class="s3">return </span><span class="s1">(</span><span class="s4">'client'</span><span class="s3">,</span><span class="s1">)</span>
+
+
+<span class="s3">class </span><span class="s1">_JaxPjrtUnpickler(pickle.Unpickler):</span>
+
+  <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">file</span><span class="s3">, </span><span class="s1">backend):</span>
+    <span class="s1">super().__init__(file)</span>
+    <span class="s1">self.backend = backend</span>
+    <span class="s1">self.devices_by_id = {d.id: d </span><span class="s3">for </span><span class="s1">d </span><span class="s3">in </span><span class="s1">backend.devices()}</span>
+
+  <span class="s3">def </span><span class="s1">persistent_load(self</span><span class="s3">, </span><span class="s1">pid):</span>
+    <span class="s3">if </span><span class="s1">pid[</span><span class="s5">0</span><span class="s1">] == </span><span class="s4">'exec'</span><span class="s1">:</span>
+      <span class="s3">return </span><span class="s1">self.backend.deserialize_executable(pid[</span><span class="s5">1</span><span class="s1">]</span><span class="s3">, </span><span class="s1">pid[</span><span class="s5">2</span><span class="s1">])</span>
+    <span class="s3">if </span><span class="s1">pid[</span><span class="s5">0</span><span class="s1">] == </span><span class="s4">'device'</span><span class="s1">:</span>
+      <span class="s3">return </span><span class="s1">self.devices_by_id[pid[</span><span class="s5">1</span><span class="s1">]]</span>
+    <span class="s3">if </span><span class="s1">pid[</span><span class="s5">0</span><span class="s1">] == </span><span class="s4">'client'</span><span class="s1">:</span>
+      <span class="s3">return </span><span class="s1">self.backend</span>
+    <span class="s3">raise </span><span class="s1">pickle.UnpicklingError</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,87 @@
+<html>
+<head>
+<title>betaln.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #629755; font-style: italic;}
+.s4 { color: #6897bb;}
+.s5 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+betaln.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">jax </span><span class="s0">import </span><span class="s1">lax</span>
+<span class="s0">import </span><span class="s1">jax.numpy </span><span class="s0">as </span><span class="s1">jnp</span>
+<span class="s0">from </span><span class="s1">jax._src.typing </span><span class="s0">import </span><span class="s1">Array</span><span class="s0">, </span><span class="s1">ArrayLike</span>
+<span class="s0">from </span><span class="s1">jax._src.numpy.util </span><span class="s0">import </span><span class="s1">promote_args_inexact</span>
+
+<span class="s2"># Note: for mysterious reasons, annotating this leads to very slow mypy runs.</span>
+<span class="s2"># def algdiv(a: ArrayLike, b: ArrayLike) -&gt; Array:</span>
+
+<span class="s0">def </span><span class="s1">algdiv(a</span><span class="s0">, </span><span class="s1">b):</span>
+    <span class="s3">&quot;&quot;&quot; 
+    Compute ``log(gamma(a))/log(gamma(a + b))`` when ``b &gt;= 8``. 
+ 
+    Derived from scipy's implmentation of `algdiv`_. 
+ 
+    This differs from the scipy implementation in that it assumes a &lt;= b 
+    because recomputing ``a, b = jnp.minimum(a, b), jnp.maximum(a, b)`` might 
+    be expensive and this is only called by ``betaln``. 
+ 
+    .. _algdiv: 
+        https://github.com/scipy/scipy/blob/c89dfc2b90d993f2a8174e57e0cbc8fbe6f3ee19/scipy/special/cdflib/algdiv.f 
+    &quot;&quot;&quot;</span>
+    <span class="s1">c0 = </span><span class="s4">0.833333333333333e-01</span>
+    <span class="s1">c1 = -</span><span class="s4">0.277777777760991e-02</span>
+    <span class="s1">c2 = </span><span class="s4">0.793650666825390e-03</span>
+    <span class="s1">c3 = -</span><span class="s4">0.595202931351870e-03</span>
+    <span class="s1">c4 = </span><span class="s4">0.837308034031215e-03</span>
+    <span class="s1">c5 = -</span><span class="s4">0.165322962780713e-02</span>
+    <span class="s1">h = a / b</span>
+    <span class="s1">c = h / (</span><span class="s4">1 </span><span class="s1">+ h)</span>
+    <span class="s1">x = h / (</span><span class="s4">1 </span><span class="s1">+ h)</span>
+    <span class="s1">d = b + (a - </span><span class="s4">0.5</span><span class="s1">)</span>
+    <span class="s2"># Set sN = (1 - x**n)/(1 - x)</span>
+    <span class="s1">x2 = x * x</span>
+    <span class="s1">s3 = </span><span class="s4">1.0 </span><span class="s1">+ (x + x2)</span>
+    <span class="s1">s5 = </span><span class="s4">1.0 </span><span class="s1">+ (x + x2 * s3)</span>
+    <span class="s1">s7 = </span><span class="s4">1.0 </span><span class="s1">+ (x + x2 * s5)</span>
+    <span class="s1">s9 = </span><span class="s4">1.0 </span><span class="s1">+ (x + x2 * s7)</span>
+    <span class="s1">s11 = </span><span class="s4">1.0 </span><span class="s1">+ (x + x2 * s9)</span>
+    <span class="s2"># Set w = del(b) - del(a + b)</span>
+    <span class="s2"># where del(x) is defined by ln(gamma(x)) = (x - 0.5)*ln(x) - x + 0.5*ln(2*pi) + del(x)</span>
+    <span class="s1">t = (</span><span class="s4">1.0 </span><span class="s1">/ b) ** </span><span class="s4">2</span>
+    <span class="s1">w = ((((c5 * s11 * t + c4 * s9) * t + c3 * s7) * t + c2 * s5) * t + c1 * s3) * t + c0</span>
+    <span class="s1">w = w * (c / b)</span>
+    <span class="s2"># Combine the results</span>
+    <span class="s1">u = d * lax.log1p(a / b)</span>
+    <span class="s1">v = a * (lax.log(b) - </span><span class="s4">1.0</span><span class="s1">)</span>
+    <span class="s0">return </span><span class="s1">jnp.where(u &lt;= v</span><span class="s0">, </span><span class="s1">(w - v) - u</span><span class="s0">, </span><span class="s1">(w - u) - v)</span>
+
+
+<span class="s0">def </span><span class="s1">betaln(a: ArrayLike</span><span class="s0">, </span><span class="s1">b: ArrayLike) -&gt; Array:</span>
+    <span class="s3">&quot;&quot;&quot;Compute the log of the beta function. 
+ 
+    Derived from scipy's implementation of `betaln`_. 
+ 
+    This implementation does not handle all branches of the scipy implementation, but is still much more accurate 
+    than just doing lgamma(a) + lgamma(b) - lgamma(a + b) when inputs are large (&gt; 1M or so). 
+ 
+    .. _betaln: 
+        https://github.com/scipy/scipy/blob/ef2dee592ba8fb900ff2308b9d1c79e4d6a0ad8b/scipy/special/cdflib/betaln.f 
+    &quot;&quot;&quot;</span>
+    <span class="s1">a</span><span class="s0">, </span><span class="s1">b = promote_args_inexact(</span><span class="s5">&quot;betaln&quot;</span><span class="s0">, </span><span class="s1">a</span><span class="s0">, </span><span class="s1">b)</span>
+    <span class="s1">a</span><span class="s0">, </span><span class="s1">b = jnp.minimum(a</span><span class="s0">, </span><span class="s1">b)</span><span class="s0">, </span><span class="s1">jnp.maximum(a</span><span class="s0">, </span><span class="s1">b)</span>
+    <span class="s1">small_b = lax.lgamma(a) + (lax.lgamma(b) - lax.lgamma(a + b))</span>
+    <span class="s1">large_b = lax.lgamma(a) + algdiv(a</span><span class="s0">, </span><span class="s1">b)</span>
+    <span class="s0">return </span><span class="s1">jnp.where(b &lt; </span><span class="s4">8</span><span class="s0">, </span><span class="s1">small_b</span><span class="s0">, </span><span class="s1">large_b)</span>
+</pre>
+</body>
+</html>

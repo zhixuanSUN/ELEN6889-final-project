@@ -1,0 +1,293 @@
+<html>
+<head>
+<title>compilation_cache.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #629755; font-style: italic;}
+.s4 { color: #6a8759;}
+.s5 { color: #a5c261;}
+.s6 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+compilation_cache.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2021 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s2">import </span><span class="s1">hashlib</span>
+<span class="s2">import </span><span class="s1">logging</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">List</span><span class="s2">, </span><span class="s1">Optional</span>
+
+<span class="s2">from </span><span class="s1">jax.experimental.compilation_cache.gfile_cache </span><span class="s2">import </span><span class="s1">GFileCache</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">path </span><span class="s2">as </span><span class="s1">pathlib</span>
+<span class="s2">from </span><span class="s1">jax._src.lib </span><span class="s2">import </span><span class="s1">xla_client</span>
+<span class="s2">from </span><span class="s1">jax._src.lib </span><span class="s2">import </span><span class="s1">version_str </span><span class="s2">as </span><span class="s1">jaxlib_version_str</span>
+
+<span class="s1">_cache = </span><span class="s2">None</span>
+
+<span class="s1">logger = logging.getLogger(__name__)</span>
+
+
+<span class="s2">def </span><span class="s1">initialize_cache(path):</span>
+  <span class="s3">&quot;&quot;&quot;Creates a global cache object. Should only be called once per process. 
+ 
+  Will throw an assertion error if called a second time with a different path. 
+ 
+  Args: 
+    path: path for the cache directory. 
+ 
+  &quot;&quot;&quot;</span>
+  <span class="s2">global </span><span class="s1">_cache</span>
+  <span class="s2">if </span><span class="s1">_cache </span><span class="s2">is not None and </span><span class="s1">_cache._path == pathlib.Path(path):</span>
+    <span class="s1">logger.warning(</span><span class="s4">&quot;Cache already previously initialized at %s&quot;</span><span class="s2">, </span><span class="s1">_cache._path)</span>
+    <span class="s2">return</span>
+
+  <span class="s2">assert </span><span class="s1">_cache == </span><span class="s2">None, </span><span class="s4">f&quot;The cache path has already been initialized to </span><span class="s2">{</span><span class="s1">_cache._path</span><span class="s2">}</span><span class="s4">&quot;</span>
+  <span class="s1">_cache = GFileCache(path)</span>
+  <span class="s1">logger.warning(</span><span class="s4">&quot;Initialized persistent compilation cache at %s&quot;</span><span class="s2">, </span><span class="s1">path)</span>
+
+
+<span class="s2">def </span><span class="s1">get_executable(xla_computation</span><span class="s2">, </span><span class="s1">compile_options</span><span class="s2">,</span>
+                   <span class="s1">backend) -&gt; Optional[xla_client.LoadedExecutable]:</span>
+  <span class="s3">&quot;&quot;&quot;Returns the cached executable if present, or None otherwise.&quot;&quot;&quot;</span>
+  <span class="s2">assert </span><span class="s1">_cache </span><span class="s2">is not None, </span><span class="s4">&quot;initialize_cache must be called before you can call get_executable()&quot;</span>
+  <span class="s1">cache_key = get_cache_key(xla_computation</span><span class="s2">, </span><span class="s1">compile_options</span><span class="s2">, </span><span class="s1">backend)</span>
+  <span class="s1">xla_executable_serialized = _cache.get(cache_key)</span>
+  <span class="s2">if not </span><span class="s1">xla_executable_serialized:</span>
+    <span class="s2">return None</span>
+  <span class="s1">xla_executable_deserialized = backend.deserialize_executable(</span>
+      <span class="s1">xla_executable_serialized</span><span class="s2">,</span>
+      <span class="s1">compile_options)</span>
+  <span class="s2">return </span><span class="s1">xla_executable_deserialized</span>
+
+<span class="s2">def </span><span class="s1">put_executable(module_name</span><span class="s2">, </span><span class="s1">xla_computation</span><span class="s2">, </span><span class="s1">compile_options</span><span class="s2">,</span>
+                   <span class="s1">executable: xla_client.LoadedExecutable</span><span class="s2">, </span><span class="s1">backend):</span>
+  <span class="s3">&quot;&quot;&quot;Adds 'executable' to the cache, possibly evicting older entries.&quot;&quot;&quot;</span>
+  <span class="s2">assert </span><span class="s1">_cache </span><span class="s2">is not None, </span><span class="s4">&quot;initialize_cache must be called before you can call put_executable()&quot;</span>
+  <span class="s1">cache_key = get_cache_key(xla_computation</span><span class="s2">, </span><span class="s1">compile_options</span><span class="s2">, </span><span class="s1">backend)</span>
+  <span class="s1">logger.info(</span><span class="s4">'Writing %s to persistent compilation cache with key %s.'</span><span class="s2">,</span>
+               <span class="s1">module_name</span><span class="s2">, </span><span class="s1">cache_key)</span>
+  <span class="s1">serialized_executable = backend.serialize_executable(executable)</span>
+  <span class="s1">_cache.put(cache_key</span><span class="s2">, </span><span class="s1">serialized_executable)</span>
+
+<span class="s2">def </span><span class="s1">_log_cache_key_hash(hash_obj</span><span class="s2">, </span><span class="s1">last_serialized: str</span><span class="s2">, </span><span class="s1">hashfn):</span>
+  <span class="s2">if </span><span class="s1">logger.isEnabledFor(logging.DEBUG):</span>
+    <span class="s0"># Log the hash of just this entry</span>
+    <span class="s1">fresh_hash_obj = hashlib.sha256()</span>
+    <span class="s1">hashfn(fresh_hash_obj)</span>
+    <span class="s1">logger.debug(</span><span class="s4">&quot;get_cache_key hash of serialized %s: %s&quot;</span><span class="s2">, </span><span class="s1">last_serialized</span><span class="s2">,</span>
+                 <span class="s1">fresh_hash_obj.digest().hex())</span>
+    <span class="s0"># Log the cumulative hash</span>
+    <span class="s1">logger.debug(</span><span class="s4">&quot;get_cache_key hash after serializing %s: %s&quot;</span><span class="s2">,</span>
+                 <span class="s1">last_serialized</span><span class="s2">, </span><span class="s1">hash_obj.digest().hex())</span>
+
+<span class="s2">def </span><span class="s1">get_cache_key(xla_computation</span><span class="s2">, </span><span class="s1">compile_options</span><span class="s2">, </span><span class="s1">backend) -&gt; str:</span>
+  <span class="s3">&quot;&quot;&quot;Creates a hashed string to use as a key to the compilation cache. 
+ 
+     get_cache_key takes in the xla_computation and compile_options of a program and hashes 
+     all the components into a uniuqe byte string. This byte string is returned as a regular 
+     string that is 256 characters long. 
+ 
+     Typical return value example: 
+      '14ac577cdb2ef6d986078b4054cc9893a9a14a16dbb0d8f37b89167c1f1aacdf' 
+  &quot;&quot;&quot;</span>
+  <span class="s1">entries = [</span>
+      <span class="s1">(</span><span class="s4">&quot;computation&quot;</span><span class="s2">,</span>
+       <span class="s2">lambda </span><span class="s1">hash_obj: _hash_computation(hash_obj</span><span class="s2">, </span><span class="s1">xla_computation))</span><span class="s2">,</span>
+      <span class="s1">(</span><span class="s4">&quot;compile_options&quot;</span><span class="s2">,</span>
+       <span class="s2">lambda </span><span class="s1">hash_obj: _hash_compile_options(hash_obj</span><span class="s2">, </span><span class="s1">compile_options))</span><span class="s2">,</span>
+      <span class="s1">(</span><span class="s4">&quot;jax_lib version&quot;</span><span class="s2">,</span>
+       <span class="s2">lambda </span><span class="s1">hash_obj: hash_obj.update(bytes(jaxlib_version_str.encode(</span><span class="s4">'utf-8'</span><span class="s1">))))</span><span class="s2">,</span>
+      <span class="s1">(</span><span class="s4">&quot;the backend&quot;</span><span class="s2">, lambda </span><span class="s1">hash_obj: _hash_platform(hash_obj</span><span class="s2">, </span><span class="s1">backend))</span><span class="s2">,</span>
+      <span class="s1">(</span><span class="s4">&quot;XLA flags&quot;</span><span class="s2">, </span><span class="s1">_hash_xla_flags)</span><span class="s2">,</span>
+  <span class="s1">]</span>
+
+  <span class="s1">hash_obj = hashlib.sha256()</span>
+  <span class="s2">for </span><span class="s1">name</span><span class="s2">, </span><span class="s1">hashfn </span><span class="s2">in </span><span class="s1">entries:</span>
+    <span class="s1">hashfn(hash_obj)</span>
+    <span class="s1">_log_cache_key_hash(hash_obj</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">hashfn)</span>
+  <span class="s2">return </span><span class="s1">hash_obj.digest().hex()</span>
+
+<span class="s2">def </span><span class="s1">_hash_computation(hash_obj</span><span class="s2">, </span><span class="s1">xla_computation):</span>
+  <span class="s0"># The HLO op_name metadata sometimes includes Python function pointers,</span>
+  <span class="s0"># which cause spurious cache misses. Scrub anything that looks like a</span>
+  <span class="s0"># function pointer. Example op_name metadata:</span>
+  <span class="s0">#  op_name=&quot;jit(s)/custom_jvp_call_jaxpr</span>
+  <span class="s0">#   [ jvp_jaxpr_thunk=&lt;function _memoize.&lt;locals&gt;.memoized at 0x7f3fa30f0940&gt;\n</span>
+  <span class="s0">#   num_consts=0 ]&quot;</span>
+  <span class="s0"># TODO(skye): in theory this could cause us to scrub meaningful binary proto</span>
+  <span class="s0"># data. Do something more robust.</span>
+  <span class="s2">if </span><span class="s1">isinstance(xla_computation</span><span class="s2">, </span><span class="s1">bytes):</span>
+    <span class="s1">serialized_hlo = xla_computation  </span><span class="s0"># MLIR module bytecode</span>
+  <span class="s2">elif </span><span class="s1">isinstance(xla_computation</span><span class="s2">, </span><span class="s1">str):</span>
+    <span class="s1">serialized_hlo = xla_computation.encode()  </span><span class="s0"># MLIR module text</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s4">f&quot;Unknown computation type </span><span class="s2">{</span><span class="s1">type(xla_computation)</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+  <span class="s1">scrubbed_hlo = re.sub(</span><span class="s5">b&quot; at 0x[a-f0-9]+&gt;&quot;</span><span class="s2">, </span><span class="s5">b&quot; at 0x...&gt;&quot;</span><span class="s2">, </span><span class="s1">serialized_hlo)</span>
+  <span class="s1">hash_obj.update(scrubbed_hlo)</span>
+
+<span class="s2">def </span><span class="s1">_hash_compile_options(hash_obj</span><span class="s2">, </span><span class="s1">compile_options_obj):</span>
+  <span class="s1">expected_num_compile_options = </span><span class="s6">11</span>
+  <span class="s0"># Ignore private and built-in methods. These can unexpectedly change and lead</span>
+  <span class="s0"># to false positives, e.g. when different Python versions include different</span>
+  <span class="s0"># built-ins.</span>
+  <span class="s1">num_actual_options = len(</span>
+      <span class="s1">[x </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">dir(compile_options_obj) </span><span class="s2">if not </span><span class="s1">x.startswith(</span><span class="s4">&quot;_&quot;</span><span class="s1">)])</span>
+  <span class="s2">assert </span><span class="s1">num_actual_options == expected_num_compile_options</span><span class="s2">, </span><span class="s1">(</span>
+      <span class="s4">&quot;Unexpected number of CompileOption fields: &quot;</span>
+      <span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">num_actual_options</span><span class="s2">}</span><span class="s4">. This likely: means that an extra &quot;</span>
+      <span class="s4">&quot;field was added, and this function needs to be updated.&quot;</span>
+  <span class="s1">)</span>
+
+  <span class="s2">if </span><span class="s1">compile_options_obj.argument_layouts </span><span class="s2">is not None</span><span class="s1">:</span>
+    <span class="s1">map(</span><span class="s2">lambda </span><span class="s1">shape: hash_obj.update(shape.to_serialized_proto())</span><span class="s2">,</span>
+        <span class="s1">compile_options_obj.argument_layouts)</span>
+  <span class="s1">_hash_int(hash_obj</span><span class="s2">, </span><span class="s1">compile_options_obj.parameter_is_tupled_arguments)</span>
+  <span class="s1">_hash_executable_build_options(hash_obj</span><span class="s2">, </span><span class="s1">compile_options_obj.executable_build_options)</span>
+  <span class="s1">_hash_bool(hash_obj</span><span class="s2">, </span><span class="s1">compile_options_obj.tuple_arguments)</span>
+  <span class="s1">_hash_int(hash_obj</span><span class="s2">, </span><span class="s1">compile_options_obj.num_replicas)</span>
+  <span class="s1">_hash_int(hash_obj</span><span class="s2">, </span><span class="s1">compile_options_obj.num_partitions)</span>
+  <span class="s1">_hash_int(hash_obj</span><span class="s2">, </span><span class="s1">compile_options_obj.profile_version)</span>
+  <span class="s2">if </span><span class="s1">compile_options_obj.device_assignment </span><span class="s2">is not None</span><span class="s1">:</span>
+    <span class="s1">hash_obj.update(compile_options_obj.device_assignment.serialize())</span>
+  <span class="s1">_hash_bool(hash_obj</span><span class="s2">, </span><span class="s1">compile_options_obj.compile_portable_executable)</span>
+
+<span class="s2">def </span><span class="s1">_hash_executable_build_options(hash_obj</span><span class="s2">, </span><span class="s1">executable_obj):</span>
+  <span class="s1">expected_options = </span><span class="s6">10</span>
+  <span class="s0"># Ignore private and built-in methods. These can unexpectedly change and lead</span>
+  <span class="s0"># to false positives, e.g. when different Python versions include different</span>
+  <span class="s0"># built-ins.</span>
+  <span class="s1">actual_options = len(</span>
+      <span class="s1">[x </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">dir(executable_obj) </span><span class="s2">if not </span><span class="s1">x.startswith(</span><span class="s4">'_'</span><span class="s1">)])</span>
+  <span class="s2">assert </span><span class="s1">actual_options == expected_options</span><span class="s2">, </span><span class="s1">(</span>
+        <span class="s4">f&quot;Unexpected number of executable_build_options fields: &quot;</span>
+        <span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">actual_options</span><span class="s2">}</span><span class="s4">, expected: </span><span class="s2">{</span><span class="s1">expected_options</span><span class="s2">}</span><span class="s4">. This likely means &quot;</span>
+        <span class="s4">&quot;that an extra field was added, and this function needs to be updated.&quot;</span><span class="s1">)</span>
+  <span class="s2">if </span><span class="s1">executable_obj.result_layout </span><span class="s2">is not None</span><span class="s1">:</span>
+    <span class="s1">hash_obj.update(executable_obj.result_layout.to_serialized_proto())</span>
+  <span class="s1">_hash_int(hash_obj</span><span class="s2">, </span><span class="s1">executable_obj.num_replicas)</span>
+  <span class="s1">_hash_int(hash_obj</span><span class="s2">, </span><span class="s1">executable_obj.num_partitions)</span>
+  <span class="s1">_hash_debug_options(hash_obj</span><span class="s2">, </span><span class="s1">executable_obj.debug_options)</span>
+  <span class="s2">if </span><span class="s1">executable_obj.device_assignment </span><span class="s2">is not None</span><span class="s1">:</span>
+    <span class="s1">hash_obj.update(executable_obj.device_assignment.serialize())</span>
+  <span class="s1">_hash_bool(hash_obj</span><span class="s2">, </span><span class="s1">executable_obj.use_spmd_partitioning)</span>
+  <span class="s1">_hash_bool(hash_obj</span><span class="s2">, </span><span class="s1">executable_obj.use_auto_spmd_partitioning)</span>
+  <span class="s2">if </span><span class="s1">executable_obj.use_auto_spmd_partitioning:</span>
+    <span class="s2">if </span><span class="s1">executable_obj.auto_spmd_partitioning_mesh_shape </span><span class="s2">is not None</span><span class="s1">:</span>
+      <span class="s1">_hash_int_list(hash_obj</span><span class="s2">, </span><span class="s1">executable_obj.auto_spmd_partitioning_mesh_shape)</span>
+    <span class="s2">if </span><span class="s1">executable_obj.auto_spmd_partitioning_mesh_ids </span><span class="s2">is not None</span><span class="s1">:</span>
+      <span class="s1">_hash_int_list(hash_obj</span><span class="s2">, </span><span class="s1">executable_obj.auto_spmd_partitioning_mesh_ids)</span>
+  <span class="s1">_hash_bool_list(hash_obj</span><span class="s2">,</span>
+                  <span class="s1">executable_obj.allow_spmd_sharding_propagation_to_output)</span>
+
+<span class="s2">def </span><span class="s1">_hash_debug_options(hash_obj</span><span class="s2">, </span><span class="s1">debug_obj):</span>
+  <span class="s1">_hash_bool(hash_obj</span><span class="s2">, </span><span class="s1">debug_obj.xla_cpu_enable_fast_math)</span>
+  <span class="s1">_hash_bool(hash_obj</span><span class="s2">, </span><span class="s1">debug_obj.xla_cpu_fast_math_honor_infs)</span>
+  <span class="s1">_hash_bool(hash_obj</span><span class="s2">, </span><span class="s1">debug_obj.xla_cpu_fast_math_honor_nans)</span>
+  <span class="s1">_hash_bool(hash_obj</span><span class="s2">, </span><span class="s1">debug_obj.xla_cpu_fast_math_honor_division)</span>
+  <span class="s1">_hash_bool(hash_obj</span><span class="s2">, </span><span class="s1">debug_obj.xla_cpu_fast_math_honor_functions)</span>
+  <span class="s1">_hash_bool(hash_obj</span><span class="s2">, </span><span class="s1">debug_obj.xla_gpu_enable_fast_min_max)</span>
+  <span class="s1">_hash_int(hash_obj</span><span class="s2">, </span><span class="s1">debug_obj.xla_backend_optimization_level)</span>
+  <span class="s1">_hash_bool(hash_obj</span><span class="s2">, </span><span class="s1">debug_obj.xla_cpu_enable_xprof_traceme)</span>
+  <span class="s1">_hash_bool(hash_obj</span><span class="s2">, </span><span class="s1">debug_obj.xla_llvm_disable_expensive_passes)</span>
+  <span class="s1">_hash_bool(hash_obj</span><span class="s2">, </span><span class="s1">debug_obj.xla_test_all_input_layouts)</span>
+
+<span class="s2">def </span><span class="s1">_hash_platform(hash_obj</span><span class="s2">, </span><span class="s1">backend):</span>
+  <span class="s1">_hash_string(hash_obj</span><span class="s2">, </span><span class="s1">backend.platform)</span>
+  <span class="s1">_hash_string(hash_obj</span><span class="s2">, </span><span class="s1">backend.platform_version)</span>
+  <span class="s1">_hash_string(hash_obj</span><span class="s2">, </span><span class="s1">backend.runtime_type)</span>
+
+<span class="s1">_xla_flags_to_exclude_from_cache_key = [</span>
+    <span class="s4">&quot;--xla_dump_compress_protos&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;--xla_dump_module_metadata&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;--xla_dump_max_hlo_modules&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;--xla_dump_include_timestamp&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;--xla_dump_hlo_pass_re&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;--xla_dump_hlo_module_re&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;--xla_dump_hlo_snapshots&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;--xla_dump_fusion_visualization&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;--xla_dump_hlo_as_url&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;--xla_dump_hlo_as_proto&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;--xla_dump_hlo_as_text&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;--xla_dump_to&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;--xla_force_host_platform_device_count&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;--xla_dump_disable_metadata&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;--xla_dump_hlo_pipeline_re&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;--xla_tpu_sdc_checker_streamz_metric&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;--xla_tpu_sdc_checker_enable_sdc_event_callbacks&quot;</span><span class="s2">,</span>
+<span class="s1">]</span>
+
+<span class="s1">extra_flag_prefixes_to_include_in_cache_key: List[str] = []</span>
+
+<span class="s2">def </span><span class="s1">_hash_xla_flags(hash_obj):</span>
+  <span class="s1">xla_flags = []</span>
+
+  <span class="s1">xla_flags_env_var = os.getenv(</span><span class="s4">&quot;XLA_FLAGS&quot;</span><span class="s1">)</span>
+  <span class="s2">if </span><span class="s1">xla_flags_env_var:</span>
+    <span class="s1">xla_flags.extend(xla_flags_env_var.split())</span>
+
+  <span class="s2">for </span><span class="s1">arg </span><span class="s2">in </span><span class="s1">sys.argv:</span>
+    <span class="s2">if </span><span class="s1">arg.startswith(</span><span class="s4">&quot;--xla&quot;</span><span class="s1">) </span><span class="s2">or </span><span class="s1">any(</span>
+        <span class="s1">arg.startswith(p) </span><span class="s2">for </span><span class="s1">p </span><span class="s2">in </span><span class="s1">extra_flag_prefixes_to_include_in_cache_key):</span>
+      <span class="s1">xla_flags.append(arg)</span>
+
+  <span class="s0"># N.B. all XLA flags that take an argument must use '=' and not a space</span>
+  <span class="s0"># (e.g. --xla_force_host_platform_device_count=8) (I think).</span>
+  <span class="s2">for </span><span class="s1">flag </span><span class="s2">in </span><span class="s1">xla_flags:</span>
+    <span class="s2">if </span><span class="s1">flag.split(</span><span class="s4">'='</span><span class="s1">)[</span><span class="s6">0</span><span class="s1">] </span><span class="s2">in </span><span class="s1">_xla_flags_to_exclude_from_cache_key:</span>
+      <span class="s1">logger.debug(</span><span class="s4">&quot;Not including XLA flag in cache key: %s&quot;</span><span class="s2">, </span><span class="s1">flag)</span>
+      <span class="s2">continue</span>
+    <span class="s1">logger.debug(</span><span class="s4">&quot;Including XLA flag in cache key: %s&quot;</span><span class="s2">, </span><span class="s1">flag)</span>
+    <span class="s1">_hash_string(hash_obj</span><span class="s2">, </span><span class="s1">flag)</span>
+
+<span class="s2">def </span><span class="s1">_hash_int(hash_obj</span><span class="s2">, </span><span class="s1">int_var):</span>
+  <span class="s1">hash_obj.update(int_var.to_bytes(</span><span class="s6">8</span><span class="s2">, </span><span class="s1">byteorder=</span><span class="s4">'big'</span><span class="s1">))</span>
+
+<span class="s2">def </span><span class="s1">_hash_bool(hash_obj</span><span class="s2">, </span><span class="s1">bool_var):</span>
+  <span class="s1">hash_obj.update(bool_var.to_bytes(</span><span class="s6">1</span><span class="s2">, </span><span class="s1">byteorder=</span><span class="s4">'big'</span><span class="s1">))</span>
+
+<span class="s2">def </span><span class="s1">_hash_string(hash_obj</span><span class="s2">, </span><span class="s1">str_var):</span>
+  <span class="s1">hash_obj.update(str_var.encode(</span><span class="s4">'utf-8'</span><span class="s1">).strip())</span>
+
+<span class="s2">def </span><span class="s1">_hash_bool_list(hash_obj</span><span class="s2">, </span><span class="s1">bool_list):</span>
+  <span class="s2">for </span><span class="s1">b </span><span class="s2">in </span><span class="s1">bool_list:</span>
+    <span class="s1">_hash_bool(hash_obj</span><span class="s2">, </span><span class="s1">b)</span>
+  <span class="s1">_hash_int(hash_obj</span><span class="s2">, </span><span class="s1">len(bool_list))</span>
+
+<span class="s2">def </span><span class="s1">_hash_int_list(hash_obj</span><span class="s2">, </span><span class="s1">int_list):</span>
+  <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">int_list:</span>
+    <span class="s1">_hash_int(hash_obj</span><span class="s2">, </span><span class="s1">i)</span>
+  <span class="s1">_hash_int(hash_obj</span><span class="s2">, </span><span class="s1">len(int_list))</span>
+
+<span class="s2">def </span><span class="s1">is_initialized():</span>
+  <span class="s2">return </span><span class="s1">_cache </span><span class="s2">is not None</span>
+
+<span class="s2">def </span><span class="s1">reset_cache():</span>
+  <span class="s2">global </span><span class="s1">_cache</span>
+  <span class="s2">assert </span><span class="s1">is_initialized()</span>
+  <span class="s1">logger.info(</span><span class="s4">&quot;Resetting cache at %s.&quot;</span><span class="s2">, </span><span class="s1">_cache._path)</span>
+  <span class="s1">_cache = </span><span class="s2">None</span>
+</pre>
+</body>
+</html>

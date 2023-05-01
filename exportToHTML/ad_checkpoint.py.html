@@ -1,0 +1,784 @@
+<html>
+<head>
+<title>ad_checkpoint.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #629755; font-style: italic;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+ad_checkpoint.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2021 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s2">from </span><span class="s1">functools </span><span class="s2">import </span><span class="s1">partial</span>
+<span class="s2">import </span><span class="s1">logging</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">(Any</span><span class="s2">, </span><span class="s1">Callable</span><span class="s2">, </span><span class="s1">FrozenSet</span><span class="s2">, </span><span class="s1">List</span><span class="s2">, </span><span class="s1">Optional</span><span class="s2">, </span><span class="s1">Sequence</span><span class="s2">, </span><span class="s1">Tuple</span><span class="s2">,</span>
+                    <span class="s1">Union)</span>
+<span class="s2">import </span><span class="s1">types</span>
+
+<span class="s2">import </span><span class="s1">numpy </span><span class="s2">as </span><span class="s1">np</span>
+
+<span class="s2">import </span><span class="s1">jax</span>
+<span class="s2">from </span><span class="s1">jax.tree_util </span><span class="s2">import </span><span class="s1">tree_flatten</span><span class="s2">, </span><span class="s1">tree_unflatten</span><span class="s2">, </span><span class="s1">tree_structure</span><span class="s2">, </span><span class="s1">keystr</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">ad_util</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">core</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">dispatch</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">linear_util </span><span class="s2">as </span><span class="s1">lu</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">effects</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">source_info_util</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">traceback_util</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">util</span>
+<span class="s2">from </span><span class="s1">jax._src.api_util </span><span class="s2">import </span><span class="s1">flatten_fun</span><span class="s2">, </span><span class="s1">shaped_abstractify</span>
+<span class="s2">from </span><span class="s1">jax._src.interpreters </span><span class="s2">import </span><span class="s1">ad</span>
+<span class="s2">from </span><span class="s1">jax._src.interpreters </span><span class="s2">import </span><span class="s1">batching</span>
+<span class="s2">from </span><span class="s1">jax._src.interpreters </span><span class="s2">import </span><span class="s1">mlir</span>
+<span class="s2">from </span><span class="s1">jax._src.interpreters </span><span class="s2">import </span><span class="s1">partial_eval </span><span class="s2">as </span><span class="s1">pe</span>
+<span class="s2">from </span><span class="s1">jax._src.lax </span><span class="s2">import </span><span class="s1">lax </span><span class="s2">as </span><span class="s1">lax_internal</span>
+<span class="s2">from </span><span class="s1">jax._src.lax </span><span class="s2">import </span><span class="s1">convolution </span><span class="s2">as </span><span class="s1">lax_convolution</span>
+<span class="s2">from </span><span class="s1">jax._src.lib.mlir.dialects </span><span class="s2">import </span><span class="s1">hlo</span>
+<span class="s2">from </span><span class="s1">jax._src.traceback_util </span><span class="s2">import </span><span class="s1">api_boundary</span>
+<span class="s2">from </span><span class="s1">jax._src.util </span><span class="s2">import </span><span class="s1">(unzip2</span><span class="s2">, </span><span class="s1">wraps</span><span class="s2">, </span><span class="s1">split_list</span><span class="s2">, </span><span class="s1">partition_list</span><span class="s2">, </span><span class="s1">safe_map</span><span class="s2">,</span>
+                           <span class="s1">safe_zip</span><span class="s2">, </span><span class="s1">merge_lists</span><span class="s2">, </span><span class="s1">weakref_lru_cache)</span>
+
+<span class="s1">source_info_util.register_exclusion(__file__)</span>
+<span class="s1">traceback_util.register_exclusion(__file__)</span>
+
+<span class="s1">map = safe_map</span>
+<span class="s1">zip = safe_zip</span>
+
+<span class="s1">logger = logging.getLogger(__name__)</span>
+
+<span class="s1">allowed_effects: effects.EffectTypeSet = effects.remat_allowed_effects</span>
+
+<span class="s0">### Policies</span>
+
+<span class="s2">def </span><span class="s1">everything_saveable(*_</span><span class="s2">, </span><span class="s1">**__) -&gt; bool:</span>
+  <span class="s0"># This is the effective policy without any use of jax.remat.</span>
+  <span class="s2">return True</span>
+
+<span class="s2">def </span><span class="s1">nothing_saveable(*_</span><span class="s2">, </span><span class="s1">**__) -&gt; bool:</span>
+  <span class="s0"># This is the effective policy when using jax.remat without explicit policy.</span>
+  <span class="s2">return False</span>
+
+<span class="s2">def </span><span class="s1">dots_saveable(prim</span><span class="s2">, </span><span class="s1">*_</span><span class="s2">, </span><span class="s1">**__) -&gt; bool:</span>
+  <span class="s0"># Matrix multiplies are expensive, so let's save them (and nothing else).</span>
+  <span class="s2">return </span><span class="s1">prim </span><span class="s2">in </span><span class="s1">{lax_internal.dot_general_p</span><span class="s2">,</span>
+                  <span class="s1">lax_convolution.conv_general_dilated_p}</span>
+<span class="s1">checkpoint_dots = dots_saveable</span>
+
+<span class="s2">def </span><span class="s1">dot_with_no_batch_dims_saveable(prim</span><span class="s2">, </span><span class="s1">*_</span><span class="s2">, </span><span class="s1">**params) -&gt; bool:</span>
+  <span class="s0"># This is a useful heuristic for transformers.</span>
+  <span class="s2">if </span><span class="s1">prim </span><span class="s2">is </span><span class="s1">lax_internal.dot_general_p:</span>
+    <span class="s1">(_</span><span class="s2">, </span><span class="s1">_)</span><span class="s2">, </span><span class="s1">(lhs_b</span><span class="s2">, </span><span class="s1">rhs_b) = params[</span><span class="s3">'dimension_numbers'</span><span class="s1">]</span>
+    <span class="s2">if not </span><span class="s1">lhs_b </span><span class="s2">and not </span><span class="s1">rhs_b:</span>
+      <span class="s2">return True</span>
+  <span class="s2">return False</span>
+
+<span class="s1">name_p = core.Primitive(</span><span class="s3">'name'</span><span class="s1">)</span>
+
+<span class="s2">def </span><span class="s1">save_anything_except_these_names(*names_not_to_save):</span>
+  <span class="s4">&quot;&quot;&quot;Save any values (not just named ones) excluding the names given.&quot;&quot;&quot;</span>
+  <span class="s1">names_not_to_save = frozenset(names_not_to_save)</span>
+  <span class="s2">def </span><span class="s1">policy(prim</span><span class="s2">, </span><span class="s1">*_</span><span class="s2">, </span><span class="s1">**params):</span>
+    <span class="s2">if </span><span class="s1">prim </span><span class="s2">is </span><span class="s1">name_p:</span>
+      <span class="s2">return </span><span class="s1">params[</span><span class="s3">'name'</span><span class="s1">] </span><span class="s2">not in </span><span class="s1">names_not_to_save</span>
+    <span class="s2">return True  </span><span class="s0"># allow saving anything which is not named</span>
+  <span class="s2">return </span><span class="s1">policy</span>
+
+<span class="s2">def </span><span class="s1">save_any_names_but_these(*names_not_to_save):</span>
+  <span class="s4">&quot;&quot;&quot;Save only named values, excluding the names given.&quot;&quot;&quot;</span>
+  <span class="s1">names_not_to_save = frozenset(names_not_to_save)</span>
+  <span class="s2">def </span><span class="s1">policy(prim</span><span class="s2">, </span><span class="s1">*_</span><span class="s2">, </span><span class="s1">**params):</span>
+    <span class="s2">if </span><span class="s1">prim </span><span class="s2">is </span><span class="s1">name_p:</span>
+      <span class="s2">return </span><span class="s1">params[</span><span class="s3">'name'</span><span class="s1">] </span><span class="s2">not in </span><span class="s1">names_not_to_save</span>
+    <span class="s2">return False  </span><span class="s0"># only allow saving named values</span>
+  <span class="s2">return </span><span class="s1">policy</span>
+
+<span class="s2">def </span><span class="s1">save_only_these_names(*names_which_can_be_saved):</span>
+  <span class="s4">&quot;&quot;&quot;Save only named values, and only among the names given.&quot;&quot;&quot;</span>
+  <span class="s1">names_which_can_be_saved = set(names_which_can_be_saved)</span>
+  <span class="s2">def </span><span class="s1">policy(prim</span><span class="s2">, </span><span class="s1">*_</span><span class="s2">, </span><span class="s1">**params):</span>
+    <span class="s2">if </span><span class="s1">prim </span><span class="s2">is </span><span class="s1">name_p:</span>
+      <span class="s2">return </span><span class="s1">params[</span><span class="s3">'name'</span><span class="s1">] </span><span class="s2">in </span><span class="s1">names_which_can_be_saved</span>
+    <span class="s2">return False  </span><span class="s0"># not saveable unless it's in the allow-list</span>
+  <span class="s2">return </span><span class="s1">policy</span>
+
+
+<span class="s2">def </span><span class="s1">save_from_both_policies(policy_1</span><span class="s2">, </span><span class="s1">policy_2):</span>
+
+  <span class="s2">def </span><span class="s1">policy(prim</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**params):</span>
+    <span class="s2">return </span><span class="s1">policy_1(prim</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**params) </span><span class="s2">or </span><span class="s1">policy_2(prim</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**params)</span>
+
+  <span class="s2">return </span><span class="s1">policy</span>
+
+
+<span class="s1">checkpoint_policies = types.SimpleNamespace(</span>
+    <span class="s1">everything_saveable=everything_saveable</span><span class="s2">,</span>
+    <span class="s1">nothing_saveable=nothing_saveable</span><span class="s2">,</span>
+    <span class="s1">dots_saveable=dots_saveable</span><span class="s2">,</span>
+    <span class="s1">checkpoint_dots=dots_saveable</span><span class="s2">,</span>
+    <span class="s1">dots_with_no_batch_dims_saveable=dot_with_no_batch_dims_saveable</span><span class="s2">,</span>
+    <span class="s1">checkpoint_dots_with_no_batch_dims=dot_with_no_batch_dims_saveable</span><span class="s2">,</span>
+    <span class="s1">save_anything_except_these_names=save_anything_except_these_names</span><span class="s2">,</span>
+    <span class="s1">save_any_names_but_these=save_any_names_but_these</span><span class="s2">,</span>
+    <span class="s1">save_only_these_names=save_only_these_names</span><span class="s2">,</span>
+    <span class="s1">save_from_both_policies=save_from_both_policies)</span>
+
+
+<span class="s0">### Main API</span>
+
+<span class="s1">@api_boundary</span>
+<span class="s2">def </span><span class="s1">checkpoint(fun: Callable</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">prevent_cse: bool = </span><span class="s2">True,</span>
+               <span class="s1">policy: Optional[Callable[...</span><span class="s2">, </span><span class="s1">bool]] = </span><span class="s2">None,</span>
+               <span class="s1">static_argnums: Union[int</span><span class="s2">, </span><span class="s1">Tuple[int</span><span class="s2">, </span><span class="s1">...]] = ()</span><span class="s2">,</span>
+               <span class="s1">) -&gt; Callable:</span>
+  <span class="s4">&quot;&quot;&quot;Make ``fun`` recompute internal linearization points when differentiated. 
+ 
+  The :func:`jax.checkpoint` decorator, aliased to :func:`jax.remat`, provides a 
+  way to trade off computation time and memory cost in the context of automatic 
+  differentiation, especially with reverse-mode autodiff like :func:`jax.grad` 
+  and :func:`jax.vjp` but also with :func:`jax.linearize`. 
+ 
+  When differentiating a function in reverse-mode, by default all the 
+  linearization points (e.g. inputs to elementwise nonlinear primitive 
+  operations) are stored when evaluating the forward pass so that they can be 
+  reused on the backward pass. This evaluation strategy can lead to a high 
+  memory cost, or even to poor performance on hardware accelerators where memory 
+  access is much more expensive than FLOPs. 
+ 
+  An alternative evaluation strategy is for some of the linearization points to 
+  be recomputed (i.e. rematerialized) rather than stored. This approach can 
+  reduce memory usage at the cost of increased computation. 
+ 
+  This function decorator produces a new version of ``fun`` which follows 
+  the rematerialization strategy rather than the default store-everything 
+  strategy. That is, it returns a new version of ``fun`` which, when 
+  differentiated, doesn't store any of its intermediate linearization points. 
+  Instead, these linearization points are recomputed from the function's saved 
+  inputs. 
+ 
+  See the examples below. 
+ 
+  Args: 
+    fun: Function for which the autodiff evaluation strategy is to be changed 
+      from the default of storing all intermediate linearization points to 
+      recomputing them. Its arguments and return value should be arrays, 
+      scalars, or (nested) standard Python containers (tuple/list/dict) thereof. 
+    prevent_cse: Optional, boolean keyword-only argument indicating whether to 
+      prevent common subexpression elimination (CSE) optimizations in the HLO 
+      generated from differentiation. This CSE prevention has costs because it 
+      can foil other optimizations, and because it can incur high overheads on 
+      some backends, especially GPU. The default is True because otherwise, 
+      under a :func:`~jax.jit` or :func:`~jax.pmap`, CSE can defeat the purpose 
+      of this decorator. 
+      But in some settings, like when used inside a :func:`~jax.lax.scan`, this 
+      CSE prevention mechanism is unnecessary, in which case ``prevent_cse`` can 
+      be set to False. 
+    static_argnums: Optional, int or sequence of ints, a keyword-only argument 
+      indicating which argument values on which to specialize for tracing and 
+      caching purposes. Specifying arguments as static can avoid 
+      ConcretizationTypeErrors when tracing, but at the cost of more retracing 
+      overheads. See the example below. 
+    policy: Optional, callable keyword-only argument. It should be one of the 
+      attributes of ``jax.checkpoint_policies``. The callable takes as input a 
+      type-level specification of a first-order primitive application and 
+      returns a boolean indicating whether the corresponding output value(s) can 
+      be saved as residuals (or instead must be recomputed in the (co)tangent 
+      computation if needed). 
+ 
+  Returns: 
+    A function (callable) with the same input/output behavior as ``fun`` but 
+    which, when differentiated using e.g. :func:`jax.grad`, :func:`jax.vjp`, or 
+    :func:`jax.linearize`, recomputes rather than stores intermediate 
+    linearization points, thus potentially saving memory at the cost of extra 
+    computation. 
+ 
+  Here is a simple example: 
+ 
+  &gt;&gt;&gt; import jax 
+  &gt;&gt;&gt; import jax.numpy as jnp 
+ 
+  &gt;&gt;&gt; @jax.checkpoint 
+  ... def g(x): 
+  ...   y = jnp.sin(x) 
+  ...   z = jnp.sin(y) 
+  ...   return z 
+  ... 
+  &gt;&gt;&gt; jax.value_and_grad(g)(2.0) 
+  (Array(0.78907233, dtype=float32, weak_type=True), Array(-0.2556391, dtype=float32, weak_type=True)) 
+ 
+  Here, the same value is produced whether or not the :func:`jax.checkpoint` 
+  decorator is present. When the decorator is not present, the values 
+  ``jnp.cos(2.0)`` and ``jnp.cos(jnp.sin(2.0))`` are computed on the forward 
+  pass and are stored for use in the backward pass, because they are needed 
+  on the backward pass and depend only on the primal inputs. When using 
+  :func:`jax.checkpoint`, the forward pass will compute only the primal outputs 
+  and only the primal inputs (``2.0``) will be stored for the backward pass. 
+  At that time, the value ``jnp.sin(2.0)`` is recomputed, along with the values 
+  ``jnp.cos(2.0)`` and ``jnp.cos(jnp.sin(2.0))``. 
+ 
+  While :func:`jax.checkpoint` controls what values are stored from the 
+  forward-pass to be used on the backward pass, the total amount of memory 
+  required to evaluate a function or its VJP depends on many additional internal 
+  details of that function. Those details include which numerical primitives are 
+  used, how they're composed, where jit and control flow primitives like scan 
+  are used, and other factors. 
+ 
+  The :func:`jax.checkpoint` decorator can be applied recursively to express 
+  sophisticated autodiff rematerialization strategies. For example: 
+ 
+  &gt;&gt;&gt; def recursive_checkpoint(funs): 
+  ...   if len(funs) == 1: 
+  ...     return funs[0] 
+  ...   elif len(funs) == 2: 
+  ...     f1, f2 = funs 
+  ...     return lambda x: f1(f2(x)) 
+  ...   else: 
+  ...     f1 = recursive_checkpoint(funs[:len(funs)//2]) 
+  ...     f2 = recursive_checkpoint(funs[len(funs)//2:]) 
+  ...     return lambda x: f1(jax.checkpoint(f2)(x)) 
+  ... 
+ 
+  If ``fun`` involves Python control flow that depends on argument values, 
+  it may be necessary to use the ``static_argnums`` parameter. For example, 
+  consider a boolean flag argument:: 
+ 
+    from functools import partial 
+ 
+    @partial(jax.checkpoint, static_argnums=(1,)) 
+    def foo(x, is_training): 
+      if is_training: 
+        ... 
+      else: 
+        ... 
+ 
+  Here, the use of ``static_argnums`` allows the ``if`` statement's condition 
+  to depends on the value of ``is_training``. The cost to using 
+  ``static_argnums`` is that it introduces re-tracing overheads across calls: 
+  in the example, ``foo`` is re-traced every time it is called with a new value 
+  of ``is_training``. In some situations, ``jax.ensure_compile_time_eval`` 
+  is needed as well:: 
+ 
+    @partial(jax.checkpoint, static_argnums=(1,)) 
+    def foo(x, y): 
+      with jax.ensure_compile_time_eval(): 
+        y_pos = y &gt; 0 
+      if y_pos: 
+        ... 
+      else: 
+        ... 
+ 
+  As an alternative to using ``static_argnums`` (and 
+  ``jax.ensure_compile_time_eval``), it may be easier to compute some values 
+  outside the :func:`jax.checkpoint`-decorated function and then close over them. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">@wraps(fun)</span>
+  <span class="s1">@api_boundary</span>
+  <span class="s2">def </span><span class="s1">fun_remat(*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+    <span class="s1">fun_</span><span class="s2">, </span><span class="s1">args = _remat_static_argnums(fun</span><span class="s2">, </span><span class="s1">static_argnums</span><span class="s2">, </span><span class="s1">args)</span>
+    <span class="s1">args_flat</span><span class="s2">, </span><span class="s1">in_tree = tree_flatten((args</span><span class="s2">, </span><span class="s1">kwargs))</span>
+    <span class="s1">in_avals = [shaped_abstractify(x) </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">args_flat]</span>
+    <span class="s1">jaxpr</span><span class="s2">, </span><span class="s1">consts</span><span class="s2">, </span><span class="s1">out_tree = _trace_to_jaxpr(fun_</span><span class="s2">, </span><span class="s1">in_tree</span><span class="s2">, </span><span class="s1">tuple(in_avals))</span>
+    <span class="s1">out_flat = remat_p.bind(</span>
+        <span class="s1">*consts</span><span class="s2">, </span><span class="s1">*args_flat</span><span class="s2">, </span><span class="s1">jaxpr=jaxpr</span><span class="s2">, </span><span class="s1">prevent_cse=prevent_cse</span><span class="s2">,</span>
+        <span class="s1">differentiated=</span><span class="s2">False, </span><span class="s1">policy=policy)</span>
+    <span class="s2">return </span><span class="s1">tree_unflatten(out_tree</span><span class="s2">, </span><span class="s1">out_flat)</span>
+  <span class="s2">return </span><span class="s1">fun_remat</span>
+
+<span class="s1">remat = checkpoint  </span><span class="s0"># alias</span>
+
+<span class="s0"># This function is similar to api_util.argnums_partial, except the error</span>
+<span class="s0"># messages are specific to jax.remat (and thus more actionable), the</span>
+<span class="s0"># hashing/caching behavior is slightly different, and this function accepts a</span>
+<span class="s0"># boolean for static_argnums. Perhaps the two could be de-duplicated.</span>
+<span class="s2">def </span><span class="s1">_remat_static_argnums(fun</span><span class="s2">, </span><span class="s1">static_argnums</span><span class="s2">, </span><span class="s1">args):</span>
+  <span class="s2">if </span><span class="s1">type(static_argnums) </span><span class="s2">is </span><span class="s1">int:</span>
+    <span class="s1">static_argnums = (static_argnums</span><span class="s2">,</span><span class="s1">)</span>
+  <span class="s2">elif not </span><span class="s1">(type(static_argnums) </span><span class="s2">is </span><span class="s1">tuple </span><span class="s2">and</span>
+            <span class="s1">all(type(d) </span><span class="s2">is </span><span class="s1">int </span><span class="s2">for </span><span class="s1">d </span><span class="s2">in </span><span class="s1">static_argnums)):</span>
+    <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;the `static_argnums` argument to `jax.checkpoint` / &quot;</span>
+                    <span class="s3">&quot;`jax.remat` must be an int, tuple of ints or, bool, but &quot;</span>
+                    <span class="s3">f&quot;got value </span><span class="s2">{</span><span class="s1">static_argnums</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+
+  <span class="s2">if not </span><span class="s1">all(-len(args) &lt;= d &lt; len(args) </span><span class="s2">for </span><span class="s1">d </span><span class="s2">in </span><span class="s1">static_argnums):</span>
+    <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;the `static_argnums` argument to `jax.checkpoint` / &quot;</span>
+                     <span class="s3">&quot;`jax.remat` can only take integer values greater than or &quot;</span>
+                     <span class="s3">&quot;equal to `-len(args)` and less than `len(args)`, but got &quot;</span>
+                     <span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">static_argnums</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+
+  <span class="s2">if not </span><span class="s1">static_argnums:</span>
+    <span class="s2">return </span><span class="s1">fun</span><span class="s2">, </span><span class="s1">args</span>
+  <span class="s1">nargs = len(args)</span>
+  <span class="s1">static_argnums_ = frozenset(d % len(args) </span><span class="s2">for </span><span class="s1">d </span><span class="s2">in </span><span class="s1">static_argnums)</span>
+  <span class="s1">dyn_args</span><span class="s2">, </span><span class="s1">static_args = []</span><span class="s2">, </span><span class="s1">[]</span>
+  <span class="s2">for </span><span class="s1">i</span><span class="s2">, </span><span class="s1">x </span><span class="s2">in </span><span class="s1">enumerate(args):</span>
+    <span class="s2">if </span><span class="s1">i </span><span class="s2">in </span><span class="s1">static_argnums_: static_args.append(WrapHashably(x))</span>
+    <span class="s2">else</span><span class="s1">: dyn_args.append(x)</span>
+  <span class="s1">new_fun = _dyn_args_fun(fun</span><span class="s2">, </span><span class="s1">static_argnums_</span><span class="s2">, </span><span class="s1">tuple(static_args)</span><span class="s2">, </span><span class="s1">nargs)</span>
+  <span class="s2">return </span><span class="s1">new_fun</span><span class="s2">, </span><span class="s1">dyn_args</span>
+
+<span class="s2">class </span><span class="s1">WrapHashably:</span>
+  <span class="s1">val: Any</span>
+  <span class="s1">hash: int</span>
+  <span class="s1">hashable: bool</span>
+
+  <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">val):</span>
+    <span class="s1">self.val = val</span>
+    <span class="s2">try</span><span class="s1">:</span>
+      <span class="s1">self.hash = hash(val)</span>
+      <span class="s1">self.hashable = </span><span class="s2">True</span>
+    <span class="s2">except</span><span class="s1">:</span>
+      <span class="s1">self.hash = id(val)</span>
+      <span class="s1">self.hashable = </span><span class="s2">False</span>
+  <span class="s2">def </span><span class="s1">__hash__(self):</span>
+    <span class="s2">return </span><span class="s1">self.hash</span>
+  <span class="s2">def </span><span class="s1">__eq__(self</span><span class="s2">, </span><span class="s1">other):</span>
+    <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">WrapHashably):</span>
+      <span class="s2">if </span><span class="s1">self.hashable </span><span class="s2">and </span><span class="s1">other.hashable:</span>
+        <span class="s2">return </span><span class="s1">self.val == other.val</span>
+      <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">self.val </span><span class="s2">is </span><span class="s1">other.val</span>
+    <span class="s2">return False</span>
+
+<span class="s0"># This caching is useful to avoid retracing even when static_argnums is used.</span>
+<span class="s0"># See api_benchmark.py:bench_remat_eager_retracing_overheads_static_argnums.</span>
+<span class="s0"># On that benchmark, including this caching makes a ~10x difference (which can</span>
+<span class="s0"># be made arbitrary large by involving larger functions to be traced).</span>
+<span class="s1">@weakref_lru_cache</span>
+<span class="s2">def </span><span class="s1">_dyn_args_fun(fun: Callable</span><span class="s2">, </span><span class="s1">static_argnums: FrozenSet[int]</span><span class="s2">,</span>
+                  <span class="s1">static_args: Tuple[WrapHashably</span><span class="s2">, </span><span class="s1">...]</span><span class="s2">, </span><span class="s1">nargs: int):</span>
+  <span class="s2">def </span><span class="s1">new_fun(*dyn_args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+    <span class="s1">static_args_</span><span class="s2">, </span><span class="s1">dyn_args_ = iter(static_args)</span><span class="s2">, </span><span class="s1">iter(dyn_args)</span>
+    <span class="s1">full_args = [next(static_args_).val </span><span class="s2">if </span><span class="s1">i </span><span class="s2">in </span><span class="s1">static_argnums</span>
+                 <span class="s2">else </span><span class="s1">next(dyn_args_) </span><span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range(nargs)]</span>
+    <span class="s2">return </span><span class="s1">fun(*full_args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+  <span class="s2">return </span><span class="s1">new_fun</span>
+
+<span class="s0"># This helper is similar to those in control_flow/common.py, but with</span>
+<span class="s0"># remat-specific errors.</span>
+<span class="s1">@weakref_lru_cache</span>
+<span class="s2">def </span><span class="s1">_trace_to_jaxpr(fun</span><span class="s2">, </span><span class="s1">in_tree</span><span class="s2">, </span><span class="s1">in_avals):</span>
+  <span class="s1">flat_fun</span><span class="s2">, </span><span class="s1">out_tree = flatten_fun(lu.wrap_init(fun)</span><span class="s2">, </span><span class="s1">in_tree)</span>
+  <span class="s1">debug = pe.debug_info(fun</span><span class="s2">, </span><span class="s1">in_tree</span><span class="s2">, </span><span class="s1">out_tree</span><span class="s2">, True, </span><span class="s3">&quot;checkpoint&quot;</span><span class="s1">)</span>
+  <span class="s2">try</span><span class="s1">:</span>
+    <span class="s1">jaxpr</span><span class="s2">, </span><span class="s1">_</span><span class="s2">, </span><span class="s1">consts = pe.trace_to_jaxpr_dynamic(flat_fun</span><span class="s2">, </span><span class="s1">in_avals</span><span class="s2">, </span><span class="s1">debug)</span>
+  <span class="s2">except </span><span class="s1">core.ConcretizationTypeError </span><span class="s2">as </span><span class="s1">e:</span>
+    <span class="s1">msg</span><span class="s2">, </span><span class="s1">= e.args</span>
+    <span class="s2">if </span><span class="s3">'for checkpoint' </span><span class="s2">not in </span><span class="s1">msg:</span>
+      <span class="s2">raise</span>
+    <span class="s1">new_msg = msg + </span><span class="s3">&quot;</span><span class="s2">\n\n</span><span class="s3">&quot; </span><span class="s1">+ (</span>
+        <span class="s3">&quot;Consider using the `static_argnums` parameter for `jax.remat` or &quot;</span>
+        <span class="s3">&quot;`jax.checkpoint`. See the `jax.checkpoint` docstring and its example &quot;</span>
+        <span class="s3">&quot;involving `static_argnums`:</span><span class="s2">\n</span><span class="s3">&quot;</span>
+        <span class="s3">&quot;https://jax.readthedocs.io/en/latest/_autosummary/jax.checkpoint.html&quot;</span>
+        <span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">&quot;</span><span class="s1">)</span>
+    <span class="s1">new_e = core.ConcretizationTypeError.__new__(core.ConcretizationTypeError)</span>
+    <span class="s1">new_e.args = (new_msg</span><span class="s2">,</span><span class="s1">)</span>
+    <span class="s2">raise </span><span class="s1">new_e </span><span class="s2">from None</span>
+  <span class="s2">return </span><span class="s1">pe.convert_constvars_jaxpr(jaxpr)</span><span class="s2">, </span><span class="s1">consts</span><span class="s2">, </span><span class="s1">out_tree()</span>
+
+
+<span class="s0">### Utilities</span>
+
+<span class="s2">def </span><span class="s1">saved_residuals(f</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs) -&gt; List[Tuple[core.AbstractValue</span><span class="s2">, </span><span class="s1">str]]:</span>
+  <span class="s1">in_leaves</span><span class="s2">, </span><span class="s1">in_tree = tree_flatten((args</span><span class="s2">, </span><span class="s1">kwargs))</span>
+
+  <span class="s2">def </span><span class="s1">f_(*args):</span>
+    <span class="s1">args</span><span class="s2">, </span><span class="s1">kwargs = tree_unflatten(in_tree</span><span class="s2">, </span><span class="s1">args)</span>
+    <span class="s2">return </span><span class="s1">f(*args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+
+  <span class="s1">out = jax.make_jaxpr(</span><span class="s2">lambda </span><span class="s1">*args: jax.linearize(f_</span><span class="s2">, </span><span class="s1">*args)[</span><span class="s5">1</span><span class="s1">]</span><span class="s2">,</span>
+                       <span class="s1">return_shape=</span><span class="s2">True</span><span class="s1">)(*in_leaves)</span>
+  <span class="s2">assert </span><span class="s1">isinstance(out</span><span class="s2">, </span><span class="s1">tuple)</span>
+  <span class="s1">jaxpr_</span><span class="s2">, </span><span class="s1">out_shape = out</span>
+  <span class="s1">jaxpr = jaxpr_.jaxpr</span>
+  <span class="s1">out_tree = </span><span class="s2">lambda</span><span class="s1">: tree_structure(out_shape)</span>
+  <span class="s2">assert </span><span class="s1">len(jaxpr.invars) == len(in_leaves)</span>
+  <span class="s1">dbg = pe.debug_info(f</span><span class="s2">, </span><span class="s1">in_tree</span><span class="s2">, </span><span class="s1">out_tree</span><span class="s2">, True, </span><span class="s3">&quot;saved_residuals&quot;</span><span class="s1">)</span>
+  <span class="s1">arg_info = pe.arg_info_all(dbg)</span>
+  <span class="s2">return </span><span class="s1">_saved_residuals(jaxpr</span><span class="s2">, </span><span class="s1">arg_info)</span>
+
+<span class="s2">def </span><span class="s1">_saved_residuals(jaxpr</span><span class="s2">, </span><span class="s1">arg_info) -&gt; List[Tuple[core.AbstractValue</span><span class="s2">, </span><span class="s1">str]]:</span>
+  <span class="s1">res_lits = [x </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">jaxpr.outvars </span><span class="s2">if     </span><span class="s1">isinstance(x</span><span class="s2">, </span><span class="s1">core.Literal)]</span>
+  <span class="s1">res_vars = {x </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">jaxpr.outvars </span><span class="s2">if not </span><span class="s1">isinstance(x</span><span class="s2">, </span><span class="s1">core.Literal)}</span>
+
+  <span class="s1">results = []</span>
+
+  <span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">res_lits:</span>
+    <span class="s1">results.append((x.aval</span><span class="s2">, </span><span class="s3">'from a literal'</span><span class="s1">))</span>
+
+  <span class="s2">for </span><span class="s1">v </span><span class="s2">in </span><span class="s1">jaxpr.constvars:</span>
+    <span class="s2">if </span><span class="s1">v </span><span class="s2">in </span><span class="s1">res_vars:</span>
+      <span class="s1">results.append((v.aval</span><span class="s2">, </span><span class="s3">'from a constant'</span><span class="s1">))</span>
+
+  <span class="s2">for </span><span class="s1">i</span><span class="s2">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">enumerate(jaxpr.invars):</span>
+    <span class="s2">if </span><span class="s1">v </span><span class="s2">in </span><span class="s1">res_vars:</span>
+      <span class="s2">if </span><span class="s1">arg_info </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s1">arg_name</span><span class="s2">, </span><span class="s1">arg_path = arg_info[i]</span>
+        <span class="s1">src = </span><span class="s3">f'from the argument </span><span class="s2">{</span><span class="s1">arg_name</span><span class="s2">}{</span><span class="s1">keystr(arg_path)</span><span class="s2">}</span><span class="s3">'</span>
+      <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">src = </span><span class="s3">'from the argument at flattened index {i}'</span>
+      <span class="s1">results.append((v.aval</span><span class="s2">, </span><span class="s1">src))</span>
+
+  <span class="s2">for </span><span class="s1">eqn </span><span class="s2">in </span><span class="s1">jaxpr.eqns:</span>
+    <span class="s1">src = source_info_util.summarize(eqn.source_info)</span>
+    <span class="s2">for </span><span class="s1">v </span><span class="s2">in </span><span class="s1">eqn.outvars:</span>
+      <span class="s2">if </span><span class="s1">v </span><span class="s2">in </span><span class="s1">res_vars:</span>
+        <span class="s2">if </span><span class="s1">eqn.primitive </span><span class="s2">is </span><span class="s1">name_p:</span>
+          <span class="s1">results.append((v.aval</span><span class="s2">, </span><span class="s3">f&quot;named '</span><span class="s2">{</span><span class="s1">eqn.params[</span><span class="s3">'name'</span><span class="s1">]</span><span class="s2">}</span><span class="s3">' from </span><span class="s2">{</span><span class="s1">src</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">))</span>
+        <span class="s2">elif </span><span class="s1">str(eqn.primitive) == </span><span class="s3">'xla_call'</span><span class="s1">:</span>
+          <span class="s1">results.append((v.aval</span><span class="s2">,</span>
+                          <span class="s3">f&quot;output of jitted function '</span><span class="s2">{</span><span class="s1">eqn.params[</span><span class="s3">'name'</span><span class="s1">]</span><span class="s2">}</span><span class="s3">' &quot;</span>
+                          <span class="s3">f&quot;from </span><span class="s2">{</span><span class="s1">src</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">))</span>
+        <span class="s2">else</span><span class="s1">:</span>
+          <span class="s1">results.append((v.aval</span><span class="s2">, </span><span class="s3">f'output of </span><span class="s2">{</span><span class="s1">eqn.primitive.name</span><span class="s2">} </span><span class="s3">from </span><span class="s2">{</span><span class="s1">src</span><span class="s2">}</span><span class="s3">'</span><span class="s1">))</span>
+
+  <span class="s2">assert </span><span class="s1">len(results) == len(jaxpr.outvars)</span>
+  <span class="s2">return </span><span class="s1">results</span>
+
+<span class="s2">def </span><span class="s1">print_saved_residuals(f</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+  <span class="s2">for </span><span class="s1">aval</span><span class="s2">, </span><span class="s1">src </span><span class="s2">in </span><span class="s1">saved_residuals(f</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+    <span class="s1">print(</span><span class="s3">f'</span><span class="s2">{</span><span class="s1">aval.str_short(short_dtypes=</span><span class="s2">True</span><span class="s1">)</span><span class="s2">} {</span><span class="s1">src</span><span class="s2">}</span><span class="s3">'</span><span class="s1">)</span>
+
+
+<span class="s0">### Implementation</span>
+
+<span class="s1">remat_p = core.Primitive(</span><span class="s3">'remat2'</span><span class="s1">)</span>
+<span class="s1">remat_p.multiple_results = </span><span class="s2">True</span>
+
+<span class="s1">@remat_p.def_impl</span>
+<span class="s2">def </span><span class="s1">remat_impl(*args</span><span class="s2">, </span><span class="s1">jaxpr</span><span class="s2">, </span><span class="s1">prevent_cse</span><span class="s2">, </span><span class="s1">differentiated</span><span class="s2">, </span><span class="s1">policy):</span>
+  <span class="s2">del </span><span class="s1">prevent_cse</span><span class="s2">, </span><span class="s1">differentiated</span><span class="s2">, </span><span class="s1">policy  </span><span class="s0"># Unused.</span>
+  <span class="s2">return </span><span class="s1">core.eval_jaxpr(jaxpr</span><span class="s2">, </span><span class="s1">()</span><span class="s2">, </span><span class="s1">*args)</span>
+
+<span class="s1">@remat_p.def_effectful_abstract_eval</span>
+<span class="s2">def </span><span class="s1">remat_abstract_eval(*args</span><span class="s2">, </span><span class="s1">jaxpr</span><span class="s2">, </span><span class="s1">prevent_cse</span><span class="s2">, </span><span class="s1">differentiated</span><span class="s2">, </span><span class="s1">policy):</span>
+  <span class="s2">del </span><span class="s1">args</span><span class="s2">, </span><span class="s1">prevent_cse</span><span class="s2">, </span><span class="s1">differentiated</span><span class="s2">, </span><span class="s1">policy  </span><span class="s0"># Unused.</span>
+  <span class="s2">return </span><span class="s1">[v.aval </span><span class="s2">for </span><span class="s1">v </span><span class="s2">in </span><span class="s1">jaxpr.outvars]</span><span class="s2">, </span><span class="s1">jaxpr.effects</span>
+
+<span class="s2">def </span><span class="s1">remat_jvp(primals</span><span class="s2">, </span><span class="s1">tangents</span><span class="s2">, </span><span class="s1">jaxpr</span><span class="s2">, </span><span class="s1">prevent_cse</span><span class="s2">, </span><span class="s1">differentiated</span><span class="s2">, </span><span class="s1">policy):</span>
+  <span class="s2">assert not </span><span class="s1">jaxpr.constvars</span>
+  <span class="s1">in_nonzeros = [type(t) </span><span class="s2">is not </span><span class="s1">ad_util.Zero </span><span class="s2">for </span><span class="s1">t </span><span class="s2">in </span><span class="s1">tangents]</span>
+  <span class="s1">jaxpr_jvp_</span><span class="s2">, </span><span class="s1">out_nz = ad.jvp_jaxpr(pe.close_jaxpr(jaxpr)</span><span class="s2">, </span><span class="s1">in_nonzeros</span><span class="s2">, False</span><span class="s1">)</span>
+  <span class="s1">nonzero_tangents = [t </span><span class="s2">for </span><span class="s1">t </span><span class="s2">in </span><span class="s1">tangents </span><span class="s2">if </span><span class="s1">type(t) </span><span class="s2">is not </span><span class="s1">ad_util.Zero]</span>
+  <span class="s1">jaxpr_jvp = pe.convert_constvars_jaxpr(jaxpr_jvp_.jaxpr)</span>
+  <span class="s1">outs = remat_p.bind(</span>
+      <span class="s1">*jaxpr_jvp_.consts</span><span class="s2">, </span><span class="s1">*primals</span><span class="s2">, </span><span class="s1">*nonzero_tangents</span><span class="s2">, </span><span class="s1">jaxpr=jaxpr_jvp</span><span class="s2">,</span>
+      <span class="s1">prevent_cse=prevent_cse</span><span class="s2">, </span><span class="s1">differentiated=differentiated</span><span class="s2">, </span><span class="s1">policy=policy)</span>
+  <span class="s1">out_primals</span><span class="s2">, </span><span class="s1">out_tangents_ = split_list(outs</span><span class="s2">, </span><span class="s1">[len(jaxpr.outvars)])</span>
+  <span class="s1">out_tangents_ = iter(out_tangents_)</span>
+  <span class="s1">out_tangents = [next(out_tangents_) </span><span class="s2">if </span><span class="s1">nz </span><span class="s2">else </span><span class="s1">ad_util.Zero.from_value(p)</span>
+                  <span class="s2">for </span><span class="s1">p</span><span class="s2">, </span><span class="s1">nz </span><span class="s2">in </span><span class="s1">zip(out_primals</span><span class="s2">, </span><span class="s1">out_nz)]</span>
+  <span class="s2">return </span><span class="s1">out_primals</span><span class="s2">, </span><span class="s1">out_tangents</span>
+<span class="s1">ad.primitive_jvps[remat_p] = remat_jvp</span>
+
+<span class="s1">allowed_effects.add_type(lax_internal.InOutFeedEffect)</span>
+
+<span class="s2">def </span><span class="s1">remat_partial_eval(trace</span><span class="s2">, </span><span class="s1">*tracers</span><span class="s2">, </span><span class="s1">jaxpr</span><span class="s2">, </span><span class="s1">**params):</span>
+  <span class="s2">assert not </span><span class="s1">jaxpr.constvars</span>
+  <span class="s1">disallowed_effects = allowed_effects.filter_not_in(jaxpr.effects)</span>
+  <span class="s2">if </span><span class="s1">disallowed_effects:</span>
+    <span class="s2">raise </span><span class="s1">NotImplementedError(</span>
+        <span class="s3">'Effects not supported in partial-eval of `checkpoint`/`remat`: '</span>
+        <span class="s3">f'</span><span class="s2">{</span><span class="s1">disallowed_effects</span><span class="s2">}</span><span class="s3">'</span><span class="s1">)</span>
+  <span class="s1">policy = params[</span><span class="s3">'policy'</span><span class="s1">] </span><span class="s2">or </span><span class="s1">nothing_saveable</span>
+  <span class="s1">in_unknowns = [</span><span class="s2">not </span><span class="s1">t.is_known() </span><span class="s2">for </span><span class="s1">t </span><span class="s2">in </span><span class="s1">tracers]</span>
+  <span class="s1">jaxpr_known</span><span class="s2">, </span><span class="s1">jaxpr_staged</span><span class="s2">, </span><span class="s1">out_unknowns</span><span class="s2">, </span><span class="s1">out_inst</span><span class="s2">, </span><span class="s1">num_res = \</span>
+      <span class="s1">pe.partial_eval_jaxpr_custom(</span>
+          <span class="s1">jaxpr</span><span class="s2">, </span><span class="s1">in_unknowns</span><span class="s2">, </span><span class="s1">[</span><span class="s2">True</span><span class="s1">] * len(in_unknowns)</span><span class="s2">, False, False, </span><span class="s1">policy)</span>
+
+  <span class="s0"># DCE jaxpr_staged, keeping only instantiated outputs which are unknown</span>
+  <span class="s1">_</span><span class="s2">, </span><span class="s1">out_inst_unknown = partition_list(out_inst</span><span class="s2">, </span><span class="s1">out_unknowns)</span>
+  <span class="s1">jaxpr_unknown</span><span class="s2">, </span><span class="s1">in_used_staged = pe.dce_jaxpr(jaxpr_staged</span><span class="s2">, </span><span class="s1">out_inst_unknown)</span>
+  <span class="s1">used_res</span><span class="s2">, </span><span class="s1">in_used_staged = split_list(in_used_staged</span><span class="s2">, </span><span class="s1">[num_res])</span>
+
+  <span class="s0"># DCE jaxpr_known, keeping all known outputs but discarding dce'd res</span>
+  <span class="s1">out_used_known = [</span><span class="s2">True</span><span class="s1">] * (len(out_unknowns) - sum(out_unknowns)) + used_res</span>
+  <span class="s1">jaxpr_known</span><span class="s2">, </span><span class="s1">in_used_known = pe.dce_jaxpr(jaxpr_known</span><span class="s2">, </span><span class="s1">out_used_known)</span>
+  <span class="s1">num_res = sum(used_res)</span>
+
+  <span class="s0"># compute known outputs and residuals (hoisted out of remat primitive)</span>
+  <span class="s1">_</span><span class="s2">, </span><span class="s1">in_consts_ = unzip2(t.pval </span><span class="s2">for </span><span class="s1">t </span><span class="s2">in </span><span class="s1">tracers </span><span class="s2">if </span><span class="s1">t.pval.is_known())</span>
+  <span class="s1">_</span><span class="s2">, </span><span class="s1">in_consts = partition_list(in_used_known</span><span class="s2">, </span><span class="s1">in_consts_)</span>
+  <span class="s1">out_consts = core.eval_jaxpr(jaxpr_known</span><span class="s2">, </span><span class="s1">()</span><span class="s2">, </span><span class="s1">*in_consts)</span>
+  <span class="s1">out_knowns</span><span class="s2">, </span><span class="s1">residuals = split_list(out_consts</span><span class="s2">, </span><span class="s1">[len(out_consts)-num_res])</span>
+
+  <span class="s0"># set up unknown outputs with a recipe to call remat</span>
+  <span class="s1">res_tracers = map(trace.new_instantiated_const</span><span class="s2">, </span><span class="s1">residuals)</span>
+  <span class="s1">_</span><span class="s2">, </span><span class="s1">tracers_staged = partition_list(in_used_staged</span><span class="s2">, </span><span class="s1">tracers)</span>
+  <span class="s1">in_jaxpr_tracers = res_tracers + map(trace.instantiate_const</span><span class="s2">, </span><span class="s1">tracers_staged)</span>
+  <span class="s1">out_jaxpr_tracers = [pe.JaxprTracer(trace</span><span class="s2">, </span><span class="s1">pe.PartialVal.unknown(x.aval)</span><span class="s2">, None</span><span class="s1">)</span>
+                       <span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">jaxpr_unknown.outvars]</span>
+  <span class="s1">new_params = dict(params</span><span class="s2">, </span><span class="s1">jaxpr=jaxpr_unknown</span><span class="s2">, </span><span class="s1">differentiated=</span><span class="s2">True</span><span class="s1">)</span>
+  <span class="s1">recipe = pe.new_eqn_recipe(in_jaxpr_tracers</span><span class="s2">, </span><span class="s1">out_jaxpr_tracers</span><span class="s2">, </span><span class="s1">remat_p</span><span class="s2">,</span>
+                             <span class="s1">new_params</span><span class="s2">, </span><span class="s1">jaxpr_unknown.effects</span><span class="s2">,</span>
+                             <span class="s1">source_info_util.current())</span>
+
+  <span class="s0"># log info about saved residuals</span>
+  <span class="s2">try</span><span class="s1">:</span>
+    <span class="s1">_</span><span class="s2">, </span><span class="s1">staged_unk = partition_list(in_used_staged</span><span class="s2">, </span><span class="s1">in_unknowns)</span>
+    <span class="s1">res_invars</span><span class="s2">, </span><span class="s1">_ = partition_list(staged_unk</span><span class="s2">, </span><span class="s1">jaxpr_unknown.invars[num_res:])</span>
+    <span class="s1">res_outvars = jaxpr_known.outvars[len(jaxpr_known.outvars) - num_res:]</span>
+    <span class="s1">body_res = _saved_residuals(jaxpr_known.replace(outvars=res_outvars)</span><span class="s2">, None</span><span class="s1">)</span>
+    <span class="s1">logger.log(logging.WARNING </span><span class="s2">if </span><span class="s1">jax.config.jax_log_checkpoint_residuals</span>
+               <span class="s2">else </span><span class="s1">logging.DEBUG</span><span class="s2">,</span>
+               <span class="s3">'remat-decorated function ' </span><span class="s1">+</span>
+               <span class="s3">'saving inputs with shapes:</span><span class="s2">\n</span><span class="s3">' </span><span class="s1">* bool(res_invars) +</span>
+               <span class="s3">'  %s</span><span class="s2">\n</span><span class="s3">' </span><span class="s1">* len(res_invars) +</span>
+               <span class="s3">'and ' </span><span class="s1">* bool(res_invars) * bool(body_res) +</span>
+               <span class="s3">'saving these intermediates:</span><span class="s2">\n</span><span class="s3">' </span><span class="s1">* bool(body_res) +</span>
+               <span class="s3">'  %s from %s</span><span class="s2">\n</span><span class="s3">' </span><span class="s1">* len(body_res)</span><span class="s2">,</span>
+               <span class="s1">*[v.aval.str_short() </span><span class="s2">for </span><span class="s1">v </span><span class="s2">in </span><span class="s1">res_invars]</span><span class="s2">,</span>
+               <span class="s1">*[elt </span><span class="s2">for </span><span class="s1">(a</span><span class="s2">, </span><span class="s1">s) </span><span class="s2">in </span><span class="s1">body_res </span><span class="s2">for </span><span class="s1">elt </span><span class="s2">in </span><span class="s1">[a.str_short()</span><span class="s2">, </span><span class="s1">s]])</span>
+  <span class="s2">except</span><span class="s1">:</span>
+    <span class="s2">pass  </span><span class="s0"># just don't log anything on failure</span>
+
+  <span class="s2">for </span><span class="s1">t </span><span class="s2">in </span><span class="s1">out_jaxpr_tracers: t.recipe = recipe</span>
+
+  <span class="s0"># zip together known and unknown outputs</span>
+  <span class="s2">return </span><span class="s1">merge_lists(out_unknowns</span><span class="s2">, </span><span class="s1">out_knowns</span><span class="s2">, </span><span class="s1">out_jaxpr_tracers)</span>
+<span class="s1">pe.custom_partial_eval_rules[remat_p] = remat_partial_eval</span>
+
+<span class="s2">def </span><span class="s1">remat_partial_eval_custom_params_updater(*args):</span>
+  <span class="s1">*_</span><span class="s2">, </span><span class="s1">params_known</span><span class="s2">, </span><span class="s1">params_staged = args</span>
+  <span class="s2">return </span><span class="s1">params_known</span><span class="s2">, </span><span class="s1">dict(params_staged</span><span class="s2">, </span><span class="s1">differentiated=</span><span class="s2">True</span><span class="s1">)</span>
+<span class="s1">pe.partial_eval_jaxpr_custom_rules[remat_p] = \</span>
+    <span class="s1">partial(pe.call_partial_eval_custom_rule</span><span class="s2">, </span><span class="s3">'jaxpr'</span><span class="s2">,</span>
+            <span class="s1">remat_partial_eval_custom_params_updater)</span>
+
+<span class="s2">def </span><span class="s1">remat_transpose(reduce_axes</span><span class="s2">, </span><span class="s1">out_cts</span><span class="s2">, </span><span class="s1">*in_primals</span><span class="s2">, </span><span class="s1">jaxpr</span><span class="s2">, </span><span class="s1">**params):</span>
+  <span class="s2">assert not </span><span class="s1">jaxpr.constvars</span>
+  <span class="s1">in_linear = [ad.is_undefined_primal(x) </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">in_primals]</span>
+  <span class="s1">out_zeros = [type(ct) </span><span class="s2">is </span><span class="s1">ad_util.Zero </span><span class="s2">for </span><span class="s1">ct </span><span class="s2">in </span><span class="s1">out_cts]</span>
+  <span class="s1">transposed_jaxpr_</span><span class="s2">, </span><span class="s1">in_zeros = transpose_jaxpr(</span>
+      <span class="s1">pe.close_jaxpr(jaxpr)</span><span class="s2">, </span><span class="s1">in_linear</span><span class="s2">, </span><span class="s1">out_zeros</span><span class="s2">, </span><span class="s1">reduce_axes)</span>
+  <span class="s1">transposed_jaxpr</span><span class="s2">, </span><span class="s1">consts = transposed_jaxpr_.jaxpr</span><span class="s2">, </span><span class="s1">transposed_jaxpr_.consts</span>
+  <span class="s1">transposed_jaxpr = pe.convert_constvars_jaxpr(transposed_jaxpr)</span>
+  <span class="s1">args</span><span class="s2">, </span><span class="s1">_ = tree_flatten((in_primals</span><span class="s2">, </span><span class="s1">out_cts))</span>
+  <span class="s1">in_cts_nz = remat_p.bind(*consts</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">jaxpr=transposed_jaxpr</span><span class="s2">, </span><span class="s1">**params)</span>
+  <span class="s1">in_cts_nz_</span><span class="s2">, </span><span class="s1">in_zeros_ = iter(in_cts_nz)</span><span class="s2">, </span><span class="s1">iter(in_zeros)</span>
+  <span class="s1">in_cts = [</span><span class="s2">None if not </span><span class="s1">ad.is_undefined_primal(x) </span><span class="s2">else</span>
+            <span class="s1">ad_util.Zero(x.aval) </span><span class="s2">if </span><span class="s1">next(in_zeros_) </span><span class="s2">else </span><span class="s1">next(in_cts_nz_)</span>
+            <span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">in_primals]</span>
+  <span class="s2">assert </span><span class="s1">next(in_cts_nz_</span><span class="s2">, None</span><span class="s1">) </span><span class="s2">is </span><span class="s1">next(in_zeros_</span><span class="s2">, None</span><span class="s1">) </span><span class="s2">is None</span>
+  <span class="s2">return </span><span class="s1">in_cts</span>
+<span class="s1">ad.reducing_transposes[remat_p] = remat_transpose</span>
+
+<span class="s0"># TODO(mattjj): move this to ad.py</span>
+<span class="s2">def </span><span class="s1">transpose_jaxpr(jaxpr: core.ClosedJaxpr</span><span class="s2">, </span><span class="s1">in_linear: Union[bool</span><span class="s2">, </span><span class="s1">Sequence[bool]]</span><span class="s2">,</span>
+                    <span class="s1">out_zeros: Union[bool</span><span class="s2">, </span><span class="s1">Sequence[bool]]</span><span class="s2">,</span>
+                    <span class="s1">reduce_axes: Sequence[core.AxisName]</span><span class="s2">,</span>
+                    <span class="s1">) -&gt; Tuple[core.ClosedJaxpr</span><span class="s2">, </span><span class="s1">List[bool]]:</span>
+  <span class="s2">if </span><span class="s1">type(in_linear) </span><span class="s2">is </span><span class="s1">bool:</span>
+    <span class="s1">in_linear = (in_linear</span><span class="s2">,</span><span class="s1">) * len(jaxpr.in_avals)</span>
+  <span class="s2">if </span><span class="s1">type(out_zeros) </span><span class="s2">is </span><span class="s1">bool:</span>
+    <span class="s1">out_zeros = (out_zeros</span><span class="s2">,</span><span class="s1">) * len(jaxpr.out_avals)</span>
+  <span class="s2">return </span><span class="s1">_transpose_jaxpr(jaxpr</span><span class="s2">, </span><span class="s1">tuple(in_linear)</span><span class="s2">, </span><span class="s1">tuple(out_zeros)</span><span class="s2">,</span>
+                          <span class="s1">tuple(reduce_axes))</span>
+
+<span class="s1">@weakref_lru_cache</span>
+<span class="s2">def </span><span class="s1">_transpose_jaxpr(jaxpr</span><span class="s2">, </span><span class="s1">in_lin</span><span class="s2">, </span><span class="s1">out_zeros</span><span class="s2">, </span><span class="s1">reduce_axes):</span>
+  <span class="s1">in_avals = ([a </span><span class="s2">for </span><span class="s1">a</span><span class="s2">,  </span><span class="s1">lin </span><span class="s2">in </span><span class="s1">zip(jaxpr.in_avals</span><span class="s2">,  </span><span class="s1">in_lin   ) </span><span class="s2">if not </span><span class="s1">lin] +</span>
+              <span class="s1">[a </span><span class="s2">for </span><span class="s1">a</span><span class="s2">, </span><span class="s1">zero </span><span class="s2">in </span><span class="s1">zip(jaxpr.out_avals</span><span class="s2">, </span><span class="s1">out_zeros) </span><span class="s2">if not </span><span class="s1">zero])</span>
+  <span class="s1">cell = </span><span class="s2">lambda</span><span class="s1">: </span><span class="s2">None</span>
+
+  <span class="s1">@lu.wrap_init</span>
+  <span class="s2">def </span><span class="s1">transposed(*args_flat):</span>
+    <span class="s1">ins_flat</span><span class="s2">, </span><span class="s1">out_cts_flat = split_list(args_flat</span><span class="s2">, </span><span class="s1">[len(in_lin) - sum(in_lin)])</span>
+
+    <span class="s0"># Evaluate nonlinear parts using partial evaluation to get a linear jaxpr.</span>
+    <span class="s1">ins_iter = iter(ins_flat)</span>
+    <span class="s1">in_pvals = [pe.PartialVal.unknown(aval) </span><span class="s2">if </span><span class="s1">lin </span><span class="s2">else</span>
+                <span class="s1">pe.PartialVal.known(next(ins_iter))</span>
+                <span class="s2">for </span><span class="s1">aval</span><span class="s2">, </span><span class="s1">lin </span><span class="s2">in </span><span class="s1">zip(jaxpr.in_avals</span><span class="s2">, </span><span class="s1">in_lin)]</span>
+    <span class="s2">assert </span><span class="s1">next(ins_iter</span><span class="s2">, None</span><span class="s1">) </span><span class="s2">is None</span>
+    <span class="s1">lin_jaxpr</span><span class="s2">, </span><span class="s1">_</span><span class="s2">, </span><span class="s1">consts = pe.trace_to_jaxpr_nounits(</span>
+        <span class="s1">lu.wrap_init(core.jaxpr_as_fun(jaxpr))</span><span class="s2">, </span><span class="s1">in_pvals</span><span class="s2">, False</span><span class="s1">)</span>
+
+    <span class="s0"># Transpose the linear jaxpr (which only has linear inputs).</span>
+    <span class="s1">out_cts_iter = iter(out_cts_flat)</span>
+    <span class="s1">out_cts = [ad_util.Zero(aval) </span><span class="s2">if </span><span class="s1">zero </span><span class="s2">else </span><span class="s1">next(out_cts_iter)</span>
+               <span class="s2">for </span><span class="s1">aval</span><span class="s2">, </span><span class="s1">zero </span><span class="s2">in </span><span class="s1">zip(jaxpr.out_avals</span><span class="s2">, </span><span class="s1">out_zeros)]</span>
+    <span class="s2">assert </span><span class="s1">next(out_cts_iter</span><span class="s2">, None</span><span class="s1">) </span><span class="s2">is None</span>
+    <span class="s1">dummy_args = [ad.UndefinedPrimal(v.aval) </span><span class="s2">for </span><span class="s1">v </span><span class="s2">in </span><span class="s1">lin_jaxpr.invars]</span>
+    <span class="s1">in_cts = ad.backward_pass(lin_jaxpr</span><span class="s2">, </span><span class="s1">reduce_axes</span><span class="s2">, False, </span><span class="s1">consts</span><span class="s2">, </span><span class="s1">dummy_args</span><span class="s2">,</span>
+                              <span class="s1">out_cts)</span>
+
+    <span class="s0"># Identify symbolic zeros in the resulting cotangents, and return nonzeros.</span>
+    <span class="s1">in_zeros = cell.in_cts_zero = [type(ct) </span><span class="s2">is </span><span class="s1">ad_util.Zero </span><span class="s2">for </span><span class="s1">ct </span><span class="s2">in </span><span class="s1">in_cts]</span>
+    <span class="s1">in_cts_nz</span><span class="s2">, </span><span class="s1">_ = partition_list(in_zeros</span><span class="s2">, </span><span class="s1">in_cts)</span>
+    <span class="s2">return </span><span class="s1">in_cts_nz</span>
+
+  <span class="s1">transposed_jaxpr_</span><span class="s2">, </span><span class="s1">_</span><span class="s2">, </span><span class="s1">consts = pe.trace_to_jaxpr_dynamic(transposed</span><span class="s2">, </span><span class="s1">in_avals)</span>
+  <span class="s1">transposed_jaxpr = core.ClosedJaxpr(transposed_jaxpr_</span><span class="s2">, </span><span class="s1">consts)</span>
+  <span class="s2">return </span><span class="s1">transposed_jaxpr</span><span class="s2">, </span><span class="s1">cell.in_cts_zero  </span><span class="s0"># type: ignore</span>
+
+<span class="s2">def </span><span class="s1">remat_vmap(spmd_axis_name</span><span class="s2">, </span><span class="s1">axis_size</span><span class="s2">, </span><span class="s1">axis_name</span><span class="s2">, </span><span class="s1">main_type</span><span class="s2">, </span><span class="s1">args</span><span class="s2">, </span><span class="s1">dims</span><span class="s2">, </span><span class="s1">*</span><span class="s2">,</span>
+               <span class="s1">jaxpr</span><span class="s2">, </span><span class="s1">**params):</span>
+  <span class="s2">assert not </span><span class="s1">jaxpr.constvars</span>
+  <span class="s1">jaxpr_batched_</span><span class="s2">, </span><span class="s1">out_batched = batching.batch_jaxpr_axes(</span>
+      <span class="s1">pe.close_jaxpr(jaxpr)</span><span class="s2">, </span><span class="s1">axis_size</span><span class="s2">, </span><span class="s1">dims</span><span class="s2">,</span>
+      <span class="s1">[batching.zero_if_mapped] * len(jaxpr.outvars)</span><span class="s2">,</span>
+      <span class="s1">axis_name=axis_name</span><span class="s2">, </span><span class="s1">spmd_axis_name=spmd_axis_name</span><span class="s2">, </span><span class="s1">main_type=main_type)</span>
+  <span class="s1">jaxpr_batched</span><span class="s2">, </span><span class="s1">consts = jaxpr_batched_.jaxpr</span><span class="s2">, </span><span class="s1">jaxpr_batched_.consts</span>
+  <span class="s2">if </span><span class="s1">consts:</span>
+    <span class="s1">jaxpr_batched = pe.convert_constvars_jaxpr(jaxpr_batched)</span>
+  <span class="s1">out_dims = [</span><span class="s5">0 </span><span class="s2">if </span><span class="s1">b </span><span class="s2">else None for </span><span class="s1">b </span><span class="s2">in </span><span class="s1">out_batched]</span>
+  <span class="s2">return </span><span class="s1">remat_p.bind(*consts</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">jaxpr=jaxpr_batched</span><span class="s2">, </span><span class="s1">**params)</span><span class="s2">, </span><span class="s1">out_dims</span>
+<span class="s1">batching.axis_primitive_batchers[remat_p] = partial(remat_vmap</span><span class="s2">, None</span><span class="s1">)</span>
+<span class="s1">batching.spmd_axis_primitive_batchers[remat_p] = remat_vmap</span>
+
+<span class="s0"># TODO(mattjj,sharadmv): de-duplicate with pe.dce_jaxpr_call_rule</span>
+<span class="s2">def </span><span class="s1">remat_dce(used_outputs: List[bool]</span><span class="s2">, </span><span class="s1">eqn: core.JaxprEqn</span>
+              <span class="s1">) -&gt; Tuple[List[bool]</span><span class="s2">, </span><span class="s1">Optional[core.JaxprEqn]]:</span>
+  <span class="s1">new_jaxpr</span><span class="s2">, </span><span class="s1">used_inputs = pe.dce_jaxpr(eqn.params[</span><span class="s3">'jaxpr'</span><span class="s1">]</span><span class="s2">, </span><span class="s1">used_outputs)</span>
+  <span class="s1">new_params = dict(eqn.params</span><span class="s2">, </span><span class="s1">jaxpr=new_jaxpr)</span>
+  <span class="s2">if not </span><span class="s1">any(used_inputs) </span><span class="s2">and not </span><span class="s1">any(used_outputs) </span><span class="s2">and not </span><span class="s1">new_jaxpr.effects:</span>
+    <span class="s2">return </span><span class="s1">used_inputs</span><span class="s2">, None</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s1">new_eqn = pe.new_jaxpr_eqn(</span>
+        <span class="s1">[v </span><span class="s2">for </span><span class="s1">v</span><span class="s2">, </span><span class="s1">used </span><span class="s2">in </span><span class="s1">zip(eqn.invars</span><span class="s2">, </span><span class="s1">used_inputs) </span><span class="s2">if </span><span class="s1">used]</span><span class="s2">,</span>
+        <span class="s1">[v </span><span class="s2">for </span><span class="s1">v</span><span class="s2">, </span><span class="s1">used </span><span class="s2">in </span><span class="s1">zip(eqn.outvars</span><span class="s2">, </span><span class="s1">used_outputs) </span><span class="s2">if </span><span class="s1">used]</span><span class="s2">,</span>
+        <span class="s1">eqn.primitive</span><span class="s2">, </span><span class="s1">new_params</span><span class="s2">, </span><span class="s1">new_jaxpr.effects</span><span class="s2">, </span><span class="s1">eqn.source_info)</span>
+    <span class="s2">return </span><span class="s1">used_inputs</span><span class="s2">, </span><span class="s1">new_eqn</span>
+<span class="s1">pe.dce_rules[remat_p] = remat_dce</span>
+
+
+<span class="s2">def </span><span class="s1">remat_lowering(*args</span><span class="s2">, </span><span class="s1">jaxpr: core.Jaxpr</span><span class="s2">, </span><span class="s1">prevent_cse: bool</span><span class="s2">,</span>
+                   <span class="s1">differentiated: bool</span><span class="s2">, </span><span class="s1">is_gpu_platform: bool = </span><span class="s2">False,</span>
+                   <span class="s1">**_):</span>
+  <span class="s2">assert not </span><span class="s1">jaxpr.constvars</span>
+
+  <span class="s2">if </span><span class="s1">differentiated </span><span class="s2">and </span><span class="s1">prevent_cse:</span>
+    <span class="s2">if </span><span class="s1">jax.config.jax_remat_opt_barrier:</span>
+      <span class="s1">translation_rule = _remat_translation_using_opt_barrier</span>
+    <span class="s2">elif </span><span class="s1">is_gpu_platform:</span>
+      <span class="s1">translation_rule = _remat_translation_using_while</span>
+    <span class="s2">else</span><span class="s1">:</span>
+      <span class="s1">translation_rule = _remat_translation_using_cond</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s1">translation_rule = </span><span class="s2">lambda </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">jaxpr: core.eval_jaxpr(jaxpr</span><span class="s2">, </span><span class="s1">()</span><span class="s2">, </span><span class="s1">*args)</span>
+
+  <span class="s2">return </span><span class="s1">jax.named_call(translation_rule</span><span class="s2">, </span><span class="s1">name=</span><span class="s3">&quot;remat&quot;</span><span class="s1">)(*args</span><span class="s2">, </span><span class="s1">jaxpr=jaxpr)</span>
+
+<span class="s2">def </span><span class="s1">_remat_translation_using_opt_barrier(*args</span><span class="s2">, </span><span class="s1">jaxpr: core.Jaxpr):</span>
+  <span class="s1">args = _optimization_barrier(args)</span>
+  <span class="s2">return </span><span class="s1">core.eval_jaxpr(jaxpr</span><span class="s2">, </span><span class="s1">()</span><span class="s2">, </span><span class="s1">*args)</span>
+
+<span class="s0"># TODO(mattjj): add core utility for 'create dummy value for this type'?</span>
+<span class="s2">def </span><span class="s1">_dummy_like(aval: core.AbstractValue) -&gt; Any:</span>
+  <span class="s2">if </span><span class="s1">aval </span><span class="s2">is </span><span class="s1">core.abstract_token:</span>
+    <span class="s2">return </span><span class="s1">jax.lax.create_token()</span>
+  <span class="s2">elif </span><span class="s1">isinstance(aval</span><span class="s2">, </span><span class="s1">(core.ShapedArray</span><span class="s2">, </span><span class="s1">core.DShapedArray)):</span>
+    <span class="s2">return </span><span class="s1">jax.lax.broadcast(lax_internal.empty(aval.dtype)</span><span class="s2">, </span><span class="s1">aval.shape)  </span><span class="s0"># type: ignore</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s2">raise </span><span class="s1">ValueError(aval)</span>
+
+<span class="s2">def </span><span class="s1">_remat_translation_using_while(*args</span><span class="s2">, </span><span class="s1">jaxpr: core.Jaxpr):</span>
+  <span class="s0"># Implements:</span>
+  <span class="s0">#  for(counter=0, result=0; counter &lt; rng(1, 2); counter ++) {</span>
+  <span class="s0">#     result = eval_jaxpr(*args)</span>
+  <span class="s0">#  }</span>
+  <span class="s0"># The loop carry is a tuple: (counter, result, args)</span>
+  <span class="s1">avals_out = tuple(v.aval </span><span class="s2">for </span><span class="s1">v </span><span class="s2">in </span><span class="s1">jaxpr.outvars)</span>
+  <span class="s1">carry_init = (np.int32(</span><span class="s5">0</span><span class="s1">)</span><span class="s2">, </span><span class="s1">tuple(map(_dummy_like</span><span class="s2">, </span><span class="s1">avals_out))</span><span class="s2">, </span><span class="s1">args)</span>
+  <span class="s2">def </span><span class="s1">cond(carry):</span>
+    <span class="s1">counter</span><span class="s2">, </span><span class="s1">_</span><span class="s2">, </span><span class="s1">_ = carry</span>
+    <span class="s1">unif = jax.lax.rng_uniform(np.int32(</span><span class="s5">1</span><span class="s1">)</span><span class="s2">, </span><span class="s1">np.int32(</span><span class="s5">2</span><span class="s1">)</span><span class="s2">, </span><span class="s1">shape=())</span>
+    <span class="s2">return </span><span class="s1">counter &lt; unif</span>
+
+  <span class="s2">def </span><span class="s1">body(carry):</span>
+    <span class="s1">counter</span><span class="s2">, </span><span class="s1">_</span><span class="s2">, </span><span class="s1">args = carry</span>
+    <span class="s1">results = core.eval_jaxpr(jaxpr</span><span class="s2">, </span><span class="s1">()</span><span class="s2">, </span><span class="s1">*args)</span>
+    <span class="s2">return </span><span class="s1">(counter + </span><span class="s5">1</span><span class="s2">, </span><span class="s1">tuple(results)</span><span class="s2">, </span><span class="s1">args)</span>
+
+  <span class="s1">carry_res = jax.lax.while_loop(cond</span><span class="s2">, </span><span class="s1">body</span><span class="s2">, </span><span class="s1">carry_init)</span>
+  <span class="s2">return </span><span class="s1">carry_res[</span><span class="s5">1</span><span class="s1">]</span>
+
+<span class="s2">def </span><span class="s1">_remat_translation_using_cond(*args</span><span class="s2">, </span><span class="s1">jaxpr: core.Jaxpr):</span>
+  <span class="s0"># Implements:</span>
+  <span class="s0">#  if(rng(0, 1) &lt; 2)</span>
+  <span class="s0">#    return eval_jaxpr(*args)</span>
+  <span class="s0">#  else:</span>
+  <span class="s0">#    return 0</span>
+  <span class="s1">avals_out = tuple(v.aval </span><span class="s2">for </span><span class="s1">v </span><span class="s2">in </span><span class="s1">jaxpr.outvars)</span>
+
+  <span class="s2">def </span><span class="s1">remat_comp(*args):</span>
+    <span class="s2">return </span><span class="s1">tuple(core.eval_jaxpr(jaxpr</span><span class="s2">, </span><span class="s1">()</span><span class="s2">, </span><span class="s1">*args))</span>
+  <span class="s2">def </span><span class="s1">dummy_comp(*args):</span>
+    <span class="s2">return </span><span class="s1">tuple(map(_dummy_like</span><span class="s2">, </span><span class="s1">avals_out))</span>
+
+  <span class="s1">unif = jax.lax.rng_uniform(np.float32(</span><span class="s5">0</span><span class="s1">)</span><span class="s2">, </span><span class="s1">np.float32(</span><span class="s5">1</span><span class="s1">)</span><span class="s2">, </span><span class="s1">shape=())</span>
+  <span class="s2">return </span><span class="s1">jax.lax.cond(unif &lt; np.float32(</span><span class="s5">2</span><span class="s1">)</span><span class="s2">, </span><span class="s1">remat_comp</span><span class="s2">, </span><span class="s1">dummy_comp</span><span class="s2">, </span><span class="s1">*args)</span>
+
+<span class="s1">mlir.register_lowering(</span>
+    <span class="s1">remat_p</span><span class="s2">, </span><span class="s1">mlir.lower_fun(remat_lowering</span><span class="s2">, </span><span class="s1">multiple_results=</span><span class="s2">True</span><span class="s1">))</span>
+<span class="s1">mlir.register_lowering(</span>
+    <span class="s1">remat_p</span><span class="s2">,</span>
+    <span class="s1">mlir.lower_fun(partial(remat_lowering</span><span class="s2">, </span><span class="s1">is_gpu_platform=</span><span class="s2">True</span><span class="s1">)</span><span class="s2">,</span>
+                   <span class="s1">multiple_results=</span><span class="s2">True</span><span class="s1">)</span><span class="s2">,</span>
+    <span class="s1">platform=</span><span class="s3">&quot;gpu&quot;</span><span class="s1">)</span>
+
+<span class="s2">def </span><span class="s1">_optimization_barrier_abstract_eval(*args):</span>
+  <span class="s2">return </span><span class="s1">args</span>
+
+<span class="s2">def </span><span class="s1">_optimization_barrier_lowering_rule(ctx</span><span class="s2">, </span><span class="s1">*args):</span>
+  <span class="s1">barrier_types = map(mlir.aval_to_ir_types</span><span class="s2">, </span><span class="s1">ctx.avals_in)</span>
+  <span class="s1">flat_args = mlir.flatten_lowering_ir_args(args)</span>
+  <span class="s1">barrier_op = hlo.OptimizationBarrierOp(flat_args)</span>
+  <span class="s2">return </span><span class="s1">util.unflatten(barrier_op.results</span><span class="s2">, </span><span class="s1">map(len</span><span class="s2">, </span><span class="s1">barrier_types))</span>
+
+<span class="s2">def </span><span class="s1">_optimization_barrier(arg):</span>
+  <span class="s1">flat_args</span><span class="s2">, </span><span class="s1">treedef = tree_flatten(arg)</span>
+  <span class="s2">return </span><span class="s1">tree_unflatten(treedef</span><span class="s2">, </span><span class="s1">optimization_barrier_p.bind(*flat_args))</span>
+
+<span class="s1">optimization_barrier_p = core.Primitive(</span><span class="s3">'optimization_barrier'</span><span class="s1">)</span>
+<span class="s1">optimization_barrier_p.multiple_results = </span><span class="s2">True</span>
+<span class="s1">optimization_barrier_p.def_impl(</span>
+    <span class="s1">partial(dispatch.apply_primitive</span><span class="s2">, </span><span class="s1">optimization_barrier_p))</span>
+<span class="s1">optimization_barrier_p.def_abstract_eval(_optimization_barrier_abstract_eval)</span>
+<span class="s1">mlir.register_lowering(optimization_barrier_p</span><span class="s2">,</span>
+                       <span class="s1">_optimization_barrier_lowering_rule)</span>
+
+
+<span class="s2">def </span><span class="s1">checkpoint_name(x</span><span class="s2">, </span><span class="s1">name):</span>
+  <span class="s2">return </span><span class="s1">name_p.bind(x</span><span class="s2">, </span><span class="s1">name=name)</span>
+
+<span class="s1">name_p.def_impl(</span><span class="s2">lambda </span><span class="s1">x</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">name: x)</span>
+<span class="s1">name_p.def_abstract_eval(</span><span class="s2">lambda </span><span class="s1">x</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">name: x)</span>
+
+<span class="s2">def </span><span class="s1">name_jvp(primals</span><span class="s2">, </span><span class="s1">tangents</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">name):</span>
+  <span class="s1">(x</span><span class="s2">,</span><span class="s1">)</span><span class="s2">, </span><span class="s1">(xdot</span><span class="s2">,</span><span class="s1">) = primals</span><span class="s2">, </span><span class="s1">tangents</span>
+  <span class="s2">return </span><span class="s1">name_p.bind(x</span><span class="s2">, </span><span class="s1">name=name)</span><span class="s2">, </span><span class="s1">xdot  </span><span class="s0"># don't name the tangent value</span>
+<span class="s1">ad.primitive_jvps[name_p] = name_jvp</span>
+
+<span class="s1">mlir.register_lowering(name_p</span><span class="s2">, lambda </span><span class="s1">ctx</span><span class="s2">, </span><span class="s1">x</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">name: [x])</span>
+
+<span class="s2">def </span><span class="s1">name_batcher(args</span><span class="s2">, </span><span class="s1">dims</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">name):</span>
+  <span class="s1">(x</span><span class="s2">,</span><span class="s1">)</span><span class="s2">, </span><span class="s1">(d</span><span class="s2">,</span><span class="s1">) = args</span><span class="s2">, </span><span class="s1">dims</span>
+  <span class="s2">return </span><span class="s1">name_p.bind(x</span><span class="s2">, </span><span class="s1">name=name)</span><span class="s2">, </span><span class="s1">d</span>
+<span class="s1">batching.primitive_batchers[name_p] = name_batcher</span>
+</pre>
+</body>
+</html>

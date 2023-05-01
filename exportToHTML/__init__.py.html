@@ -1,0 +1,43 @@
+<html>
+<head>
+<title>__init__.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+__init__.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># -*- coding: utf-8 -*-</span>
+<span class="s0">#</span>
+<span class="s0"># Copyright (C) 2012-2022 Vinay Sajip.</span>
+<span class="s0"># Licensed to the Python Software Foundation under a contributor agreement.</span>
+<span class="s0"># See LICENSE.txt and CONTRIBUTORS.txt.</span>
+<span class="s0">#</span>
+<span class="s2">import </span><span class="s1">logging</span>
+
+<span class="s1">__version__ = </span><span class="s3">'0.3.6'</span>
+
+<span class="s2">class </span><span class="s1">DistlibException(Exception):</span>
+    <span class="s2">pass</span>
+
+<span class="s2">try</span><span class="s1">:</span>
+    <span class="s2">from </span><span class="s1">logging </span><span class="s2">import </span><span class="s1">NullHandler</span>
+<span class="s2">except </span><span class="s1">ImportError: </span><span class="s0"># pragma: no cover</span>
+    <span class="s2">class </span><span class="s1">NullHandler(logging.Handler):</span>
+        <span class="s2">def </span><span class="s1">handle(self</span><span class="s2">, </span><span class="s1">record): </span><span class="s2">pass</span>
+        <span class="s2">def </span><span class="s1">emit(self</span><span class="s2">, </span><span class="s1">record): </span><span class="s2">pass</span>
+        <span class="s2">def </span><span class="s1">createLock(self): self.lock = </span><span class="s2">None</span>
+
+<span class="s1">logger = logging.getLogger(__name__)</span>
+<span class="s1">logger.addHandler(NullHandler())</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,251 @@
+<html>
+<head>
+<title>custom_transpose.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #629755; font-style: italic;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+custom_transpose.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2022 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s2">import </span><span class="s1">functools</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Any</span><span class="s2">, </span><span class="s1">Callable</span><span class="s2">, </span><span class="s1">Optional</span><span class="s2">, </span><span class="s1">Tuple</span>
+
+<span class="s2">from </span><span class="s1">jax.tree_util </span><span class="s2">import </span><span class="s1">(tree_flatten</span><span class="s2">, </span><span class="s1">tree_leaves</span><span class="s2">, </span><span class="s1">tree_map</span><span class="s2">,</span>
+                           <span class="s1">tree_structure</span><span class="s2">, </span><span class="s1">treedef_tuple</span><span class="s2">, </span><span class="s1">tree_unflatten)</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">ad_util</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">api_util</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">core</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">custom_api_util</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">linear_util </span><span class="s2">as </span><span class="s1">lu</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">source_info_util</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">traceback_util</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">util</span>
+<span class="s2">from </span><span class="s1">jax._src.interpreters </span><span class="s2">import </span><span class="s1">ad</span>
+<span class="s2">from </span><span class="s1">jax._src.interpreters </span><span class="s2">import </span><span class="s1">mlir</span>
+<span class="s2">from </span><span class="s1">jax._src.interpreters </span><span class="s2">import </span><span class="s1">partial_eval </span><span class="s2">as </span><span class="s1">pe</span>
+<span class="s2">from </span><span class="s1">jax._src.interpreters </span><span class="s2">import </span><span class="s1">xla</span>
+
+
+<span class="s1">source_info_util.register_exclusion(__file__)</span>
+<span class="s1">traceback_util.register_exclusion(__file__)</span>
+
+
+<span class="s1">map</span><span class="s2">, </span><span class="s1">unsafe_map = util.safe_map</span><span class="s2">, </span><span class="s1">map</span>
+<span class="s1">zip</span><span class="s2">, </span><span class="s1">unsafe_zip = util.safe_zip</span><span class="s2">, </span><span class="s1">zip</span>
+
+
+<span class="s0">### bespoke linear_util and api_util deviations</span>
+
+<span class="s2">class </span><span class="s1">StoreEqual(lu.Store):</span>
+  <span class="s3">&quot;&quot;&quot;Stores an unchanging value. Checks empty reads and unequal overwrites.&quot;&quot;&quot;</span>
+  <span class="s2">def </span><span class="s1">store(self</span><span class="s2">, </span><span class="s1">val):</span>
+    <span class="s2">if </span><span class="s1">self._val </span><span class="s2">is not </span><span class="s1">lu._EMPTY_STORE_VALUE </span><span class="s2">and </span><span class="s1">val != self._val:</span>
+      <span class="s2">raise </span><span class="s1">lu.StoreException(</span>
+          <span class="s4">f&quot;Store assignment mismatch, from </span><span class="s2">{</span><span class="s1">self._val</span><span class="s2">} </span><span class="s4">to </span><span class="s2">{</span><span class="s1">val</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+    <span class="s1">self._val = val</span>
+
+<span class="s1">@util.curry</span>
+<span class="s2">def </span><span class="s1">transformation_with_aux(</span>
+    <span class="s1">gen</span><span class="s2">, </span><span class="s1">fun: lu.WrappedFun</span><span class="s2">, </span><span class="s1">*gen_static_args) -&gt; Tuple[lu.WrappedFun</span><span class="s2">, </span><span class="s1">Any]:</span>
+  <span class="s1">out_store = StoreEqual()</span>
+  <span class="s1">out_thunk = </span><span class="s2">lambda</span><span class="s1">: out_store.val</span>
+  <span class="s2">return </span><span class="s1">fun.wrap(gen</span><span class="s2">, </span><span class="s1">gen_static_args</span><span class="s2">, </span><span class="s1">out_store)</span><span class="s2">, </span><span class="s1">out_thunk</span>
+
+<span class="s1">flatten_fun_nokwargs = transformation_with_aux(</span>
+    <span class="s1">api_util.flatten_fun_nokwargs.args[</span><span class="s5">0</span><span class="s1">])  </span><span class="s0"># type: ignore[has-type]</span>
+
+
+<span class="s0">### api</span>
+
+<span class="s1">@custom_api_util.register_custom_decorator_type</span>
+<span class="s2">class </span><span class="s1">custom_transpose:</span>
+  <span class="s1">fun: Callable</span>
+  <span class="s1">transpose: Optional[Callable] = </span><span class="s2">None</span>
+
+  <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">fun: Callable):</span>
+    <span class="s1">functools.update_wrapper(self</span><span class="s2">, </span><span class="s1">fun)</span>
+    <span class="s1">self.fun = fun  </span><span class="s0"># type: ignore[assignment]</span>
+
+  <span class="s1">__getattr__ = custom_api_util.forward_attr</span>
+
+  <span class="s2">def </span><span class="s1">def_transpose(self</span><span class="s2">, </span><span class="s1">transpose: Callable):</span>
+    <span class="s1">self.transpose = transpose</span>
+    <span class="s2">return </span><span class="s1">transpose</span>
+
+  <span class="s1">@traceback_util.api_boundary</span>
+  <span class="s2">def </span><span class="s1">__call__(self</span><span class="s2">, </span><span class="s1">out_types</span><span class="s2">, </span><span class="s1">res_arg</span><span class="s2">, </span><span class="s1">lin_arg):</span>
+    <span class="s1">_</span><span class="s2">, </span><span class="s1">res_tree = tree_flatten(res_arg)</span>
+    <span class="s1">_</span><span class="s2">, </span><span class="s1">lin_tree = tree_flatten(lin_arg)</span>
+    <span class="s1">args_flat</span><span class="s2">, </span><span class="s1">in_tree = tree_flatten((res_arg</span><span class="s2">, </span><span class="s1">lin_arg))</span>
+
+    <span class="s0"># TODO(frostig,mattjj): check that out_trees match</span>
+    <span class="s0"># TODO(frostig,mattjj): could, and should, we avoid flattening</span>
+    <span class="s0"># self.fun at this point?</span>
+
+    <span class="s1">flat_fun</span><span class="s2">, </span><span class="s1">out_tree2 = flatten_fun_nokwargs(lu.wrap_init(self.fun)</span><span class="s2">, </span><span class="s1">in_tree)</span>
+    <span class="s1">out_types_flat</span><span class="s2">, </span><span class="s1">out_tree = tree_flatten(out_types)</span>
+    <span class="s1">out_flat = custom_transpose_p.bind(flat_fun</span><span class="s2">, </span><span class="s1">*args_flat</span><span class="s2">,</span>
+                                       <span class="s1">transpose=self.transpose</span><span class="s2">,</span>
+                                       <span class="s1">out_types=out_types_flat</span><span class="s2">,</span>
+                                       <span class="s1">lin_tree=lin_tree</span><span class="s2">,</span>
+                                       <span class="s1">res_tree=res_tree</span><span class="s2">,</span>
+                                       <span class="s1">out_tree=out_tree)</span>
+    <span class="s2">return </span><span class="s1">tree_unflatten(out_tree</span><span class="s2">, </span><span class="s1">out_flat)</span>
+
+
+<span class="s0">### utils</span>
+
+<span class="s2">def </span><span class="s1">tree_fill(x</span><span class="s2">, </span><span class="s1">treedef):</span>
+  <span class="s2">return </span><span class="s1">tree_unflatten(treedef</span><span class="s2">, </span><span class="s1">[x] * treedef.num_leaves)</span>
+
+<span class="s2">def </span><span class="s1">tree_fill_like(x</span><span class="s2">, </span><span class="s1">tree):</span>
+  <span class="s2">return </span><span class="s1">tree_fill(x</span><span class="s2">, </span><span class="s1">tree_structure(tree))</span>
+
+<span class="s2">def </span><span class="s1">tree_broadcast(full_treedef</span><span class="s2">, </span><span class="s1">tree</span><span class="s2">, </span><span class="s1">is_leaf=</span><span class="s2">None</span><span class="s1">):</span>
+  <span class="s1">full_tree = tree_fill(</span><span class="s5">0</span><span class="s2">, </span><span class="s1">full_treedef)</span>
+  <span class="s2">return </span><span class="s1">tree_map(tree_fill_like</span><span class="s2">, </span><span class="s1">tree</span><span class="s2">, </span><span class="s1">full_tree</span><span class="s2">, </span><span class="s1">is_leaf=is_leaf)</span>
+
+<span class="s2">def </span><span class="s1">is_treedef_prefix(entire</span><span class="s2">, </span><span class="s1">prefix):</span>
+  <span class="s1">entire = tree_fill(</span><span class="s5">0</span><span class="s2">, </span><span class="s1">entire)</span>
+  <span class="s1">prefix = tree_fill(</span><span class="s5">0</span><span class="s2">, </span><span class="s1">prefix)</span>
+  <span class="s2">try</span><span class="s1">:</span>
+    <span class="s1">tree_map(</span><span class="s2">lambda </span><span class="s1">x</span><span class="s2">, </span><span class="s1">y: x</span><span class="s2">, </span><span class="s1">prefix</span><span class="s2">, </span><span class="s1">entire)</span>
+  <span class="s2">except </span><span class="s1">ValueError:</span>
+    <span class="s2">return False</span>
+  <span class="s2">return True</span>
+
+<span class="s2">def </span><span class="s1">rule_name(rule):</span>
+  <span class="s2">return </span><span class="s1">getattr(rule</span><span class="s2">, </span><span class="s4">'__name__'</span><span class="s2">, </span><span class="s4">'&lt;unnamed transpose rule&gt;'</span><span class="s1">)</span>
+
+<span class="s2">def </span><span class="s1">check_transpose_rule_trees(rule</span><span class="s2">, </span><span class="s1">lin_tree</span><span class="s2">, </span><span class="s1">rule_out_tree):</span>
+  <span class="s2">if not </span><span class="s1">is_treedef_prefix(lin_tree</span><span class="s2">, </span><span class="s1">rule_out_tree):</span>
+    <span class="s2">if </span><span class="s1">hasattr(rule</span><span class="s2">, </span><span class="s4">'_transpose_type_error'</span><span class="s1">):</span>
+      <span class="s2">raise </span><span class="s1">rule._transpose_type_error(lin_tree</span><span class="s2">, </span><span class="s1">rule_out_tree)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+      <span class="s2">raise </span><span class="s1">TypeError(</span>
+          <span class="s4">'structure of custom transpose rule</span><span class="s2">\'</span><span class="s4">s output does not prefix-match '</span>
+          <span class="s4">'structure of primal function</span><span class="s2">\'</span><span class="s4">s linear inputs under '</span>
+          <span class="s4">f'custom transpose rule (</span><span class="s2">{</span><span class="s1">rule_name(rule)</span><span class="s2">}</span><span class="s4">).</span><span class="s2">\n</span><span class="s4">'</span>
+          <span class="s4">f'Transpose rule output: </span><span class="s2">{</span><span class="s1">rule_out_tree</span><span class="s2">}\n</span><span class="s4">'</span>
+          <span class="s4">f'Linear primal inputs: </span><span class="s2">{</span><span class="s1">lin_tree</span><span class="s2">}</span><span class="s4">'</span><span class="s1">)</span>
+
+<span class="s2">def </span><span class="s1">make_transpose_from_thunk(thunk</span><span class="s2">, </span><span class="s1">lin_tree):</span>
+  <span class="s1">transpose_jaxpr</span><span class="s2">, </span><span class="s1">transpose_consts = thunk()</span>
+  <span class="s1">transpose_jaxpr = core.ClosedJaxpr(</span>
+      <span class="s1">pe.convert_constvars_jaxpr(transpose_jaxpr)</span><span class="s2">, </span><span class="s1">())</span>
+  <span class="s2">def </span><span class="s1">transpose(res_arg</span><span class="s2">, </span><span class="s1">ct_out):</span>
+    <span class="s1">args_flat = tree_leaves((res_arg</span><span class="s2">, </span><span class="s1">ct_out))</span>
+    <span class="s1">ct_ins = core.jaxpr_as_fun(transpose_jaxpr)(*transpose_consts</span><span class="s2">, </span><span class="s1">*args_flat)</span>
+    <span class="s2">return </span><span class="s1">tree_unflatten(lin_tree</span><span class="s2">, </span><span class="s1">ct_ins)</span>
+  <span class="s2">return </span><span class="s1">transpose</span>
+
+
+<span class="s0">### custom_transpose primitive and rules</span>
+
+<span class="s2">class </span><span class="s1">CustomTransposePrimitive(core.Primitive):</span>
+  <span class="s1">call_primitive = </span><span class="s2">False</span>
+  <span class="s1">map_primitive = </span><span class="s2">False</span>
+  <span class="s1">multiple_results = </span><span class="s2">True</span>
+
+  <span class="s2">def </span><span class="s1">bind(self</span><span class="s2">, </span><span class="s1">call</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**params):</span>
+    <span class="s0"># TODO(frostig,mattjj): This doesn't handle closures yet, which is</span>
+    <span class="s0"># a bit involved. Closures are complicated by us binding `call`</span>
+    <span class="s0"># twice in the JVP rule for custom transpose. The `env_trace_todo`</span>
+    <span class="s0"># output by `process_env_traces` due to one of those two bindings</span>
+    <span class="s0"># should be passable to the other, and need to be passed onward</span>
+    <span class="s0"># since the second bind is deferred by partial eval (since it</span>
+    <span class="s0"># typically receives unknowns)</span>
+    <span class="s1">top_trace = core.find_top_trace(args)</span>
+    <span class="s1">tracers = map(top_trace.full_raise</span><span class="s2">, </span><span class="s1">args)</span>
+    <span class="s1">outs = top_trace.process_custom_transpose(self</span><span class="s2">, </span><span class="s1">call</span><span class="s2">, </span><span class="s1">tracers</span><span class="s2">, </span><span class="s1">**params)</span>
+    <span class="s2">return </span><span class="s1">outs</span>
+
+  <span class="s0"># TODO(frostig,mattjj): consider keeping `call` as a named parameter</span>
+  <span class="s0"># instead of following this &quot;call primitive&quot; convention.</span>
+  <span class="s2">def </span><span class="s1">get_bind_params(self</span><span class="s2">, </span><span class="s1">params):</span>
+    <span class="s2">assert </span><span class="s4">'call_jaxpr' </span><span class="s2">in </span><span class="s1">params</span>
+    <span class="s2">assert </span><span class="s4">'transpose_jaxpr_thunk' </span><span class="s2">in </span><span class="s1">params</span>
+    <span class="s1">new_params = dict(params)</span>
+    <span class="s1">new_params[</span><span class="s4">'transpose'</span><span class="s1">] = make_transpose_from_thunk(</span>
+        <span class="s1">new_params.pop(</span><span class="s4">'transpose_jaxpr_thunk'</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">new_params[</span><span class="s4">'lin_tree'</span><span class="s1">])</span>
+    <span class="s1">call = lu.wrap_init(core.jaxpr_as_fun(new_params.pop(</span><span class="s4">'call_jaxpr'</span><span class="s1">)))</span>
+    <span class="s2">return </span><span class="s1">[call]</span><span class="s2">, </span><span class="s1">new_params</span>
+
+
+<span class="s0"># TODO(frostig,mattjj): reinstate checks</span>
+<span class="s2">def </span><span class="s1">custom_transpose_typecheck(_</span><span class="s2">, </span><span class="s1">*in_atoms</span><span class="s2">, </span><span class="s1">out_types</span><span class="s2">, </span><span class="s1">**params):</span>
+  <span class="s2">del </span><span class="s1">in_atoms</span><span class="s2">, </span><span class="s1">params</span>
+  <span class="s2">return </span><span class="s1">out_types</span><span class="s2">, </span><span class="s1">core.no_effects</span>
+
+
+<span class="s2">def </span><span class="s1">custom_transpose_transpose_rule(</span>
+    <span class="s1">cts</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">out_types</span><span class="s2">, </span><span class="s1">res_tree</span><span class="s2">, </span><span class="s1">lin_tree</span><span class="s2">, </span><span class="s1">out_tree</span><span class="s2">, </span><span class="s1">**params):</span>
+
+  <span class="s2">if </span><span class="s4">'transpose_jaxpr_thunk' </span><span class="s2">in </span><span class="s1">params:</span>
+    <span class="s2">assert </span><span class="s4">'call_jaxpr' </span><span class="s2">in </span><span class="s1">params</span>
+    <span class="s1">transpose = make_transpose_from_thunk(</span>
+        <span class="s1">params[</span><span class="s4">'transpose_jaxpr_thunk'</span><span class="s1">]</span><span class="s2">, </span><span class="s1">lin_tree)</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s2">assert </span><span class="s4">'call' </span><span class="s2">in </span><span class="s1">params</span>
+    <span class="s1">transpose = params[</span><span class="s4">'transpose'</span><span class="s1">]</span>
+
+  <span class="s1">call_in_tree = treedef_tuple((res_tree</span><span class="s2">, </span><span class="s1">lin_tree))</span>
+
+  <span class="s0"># TODO(frostig,mattjj): `lin_arg` indicates the inputs with respect</span>
+  <span class="s0"># to which we are transposing (via `ad.is_undefined_primal`).</span>
+  <span class="s0"># Consider passing this information to the custom transpose rule?</span>
+
+  <span class="s1">res_arg</span><span class="s2">, </span><span class="s1">lin_arg = tree_unflatten(call_in_tree</span><span class="s2">, </span><span class="s1">args)</span>
+  <span class="s2">del </span><span class="s1">lin_arg</span>
+  <span class="s2">assert </span><span class="s1">all(</span><span class="s2">not </span><span class="s1">ad.is_undefined_primal(x) </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">tree_leaves(res_arg))</span>
+
+  <span class="s1">cts = [ad_util.zeros_like_aval(ct.aval) </span><span class="s2">if </span><span class="s1">type(ct) </span><span class="s2">is </span><span class="s1">ad_util.Zero </span><span class="s2">else </span><span class="s1">ct</span>
+         <span class="s2">for </span><span class="s1">ct </span><span class="s2">in </span><span class="s1">cts]</span>
+  <span class="s1">ct_out = tree_unflatten(out_tree</span><span class="s2">, </span><span class="s1">cts)</span>
+  <span class="s1">ct_lin = transpose(res_arg</span><span class="s2">, </span><span class="s1">ct_out)</span>
+  <span class="s1">check_transpose_rule_trees(transpose</span><span class="s2">, </span><span class="s1">lin_tree</span><span class="s2">, </span><span class="s1">tree_structure(ct_lin))</span>
+  <span class="s1">ct_lin_flat</span><span class="s2">, </span><span class="s1">_ = tree_flatten(</span>
+      <span class="s1">tree_broadcast(lin_tree</span><span class="s2">, </span><span class="s1">ct_lin</span><span class="s2">, </span><span class="s1">is_leaf=</span><span class="s2">lambda </span><span class="s1">x: x </span><span class="s2">is None</span><span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">is_leaf=</span><span class="s2">lambda </span><span class="s1">x: x </span><span class="s2">is None</span><span class="s1">)</span>
+  <span class="s2">return </span><span class="s1">[</span><span class="s2">None</span><span class="s1">] * len(tree_leaves(res_arg)) + ct_lin_flat</span>
+
+
+<span class="s2">def </span><span class="s1">custom_transpose_lowering(*args</span><span class="s2">, </span><span class="s1">call_jaxpr</span><span class="s2">, </span><span class="s1">**params):</span>
+  <span class="s2">return </span><span class="s1">core.jaxpr_as_fun(call_jaxpr)(*args)</span>
+
+
+<span class="s1">custom_transpose_p = CustomTransposePrimitive(</span><span class="s4">'custom_transpose_call'</span><span class="s1">)</span>
+<span class="s1">core.custom_typechecks[custom_transpose_p] = custom_transpose_typecheck</span>
+<span class="s1">ad.primitive_transposes[custom_transpose_p] = custom_transpose_transpose_rule</span>
+<span class="s1">mlir.register_lowering(</span>
+    <span class="s1">custom_transpose_p</span><span class="s2">,</span>
+    <span class="s1">mlir.lower_fun(custom_transpose_lowering</span><span class="s2">, </span><span class="s1">multiple_results=</span><span class="s2">True</span><span class="s1">))</span>
+<span class="s1">xla.register_initial_style_primitive(custom_transpose_p)</span>
+</pre>
+</body>
+</html>

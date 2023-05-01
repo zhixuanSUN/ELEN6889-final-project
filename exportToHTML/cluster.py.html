@@ -1,0 +1,131 @@
+<html>
+<head>
+<title>cluster.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #629755; font-style: italic;}
+.s4 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+cluster.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2022 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s2">import </span><span class="s1">logging</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">List</span><span class="s2">, </span><span class="s1">Optional</span><span class="s2">, </span><span class="s1">Type</span><span class="s2">, </span><span class="s1">Sequence</span><span class="s2">, </span><span class="s1">Tuple</span>
+<span class="s2">from </span><span class="s1">jax._src.cloud_tpu_init </span><span class="s2">import </span><span class="s1">running_in_cloud_tpu_vm</span>
+
+<span class="s1">logger = logging.getLogger(__name__)</span>
+
+<span class="s2">class </span><span class="s1">ClusterEnv:</span>
+  <span class="s3">&quot;&quot;&quot;Interface for defining a cluster environment. 
+ 
+  To enable auto bootrapping (aka :func:`jax.distributed.initialize()`), 
+  cluster environments need to derive from :class:`ClusterEnv` and implement 
+  :func:`is_env_present`, :func:`get_coordinator_address`, 
+  :func:`get_process_count`, and :func:`get_process_id`. 
+  :class:`ClusterEnv` subclasses are automatically detected when imported. 
+  &quot;&quot;&quot;</span>
+
+  <span class="s1">_cluster_types: List[Type[</span><span class="s4">'ClusterEnv'</span><span class="s1">]] = []</span>
+
+  <span class="s2">def </span><span class="s1">__init_subclass__(cls</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+    <span class="s1">super().__init_subclass__(**kwargs)</span>
+    <span class="s1">cls._cluster_types.append(cls)</span>
+
+  <span class="s1">@classmethod</span>
+  <span class="s0"># pytype: disable=bad-return-type</span>
+  <span class="s2">def </span><span class="s1">auto_detect_unset_distributed_params(cls</span><span class="s2">,</span>
+                                           <span class="s1">coordinator_address: Optional[str]</span><span class="s2">,</span>
+                                           <span class="s1">num_processes: Optional[int]</span><span class="s2">,</span>
+                                           <span class="s1">process_id: Optional[int]</span><span class="s2">,</span>
+                                           <span class="s1">local_device_ids: Optional[Sequence[int]]</span>
+                                          <span class="s1">) -&gt; Tuple[Optional[str]</span><span class="s2">, </span><span class="s1">Optional[int]</span><span class="s2">, </span><span class="s1">Optional[int]</span><span class="s2">,</span>
+                                                     <span class="s1">Optional[Sequence[int]]]:</span>
+    <span class="s2">if </span><span class="s1">all(p </span><span class="s2">is not None for </span><span class="s1">p </span><span class="s2">in </span><span class="s1">(coordinator_address</span><span class="s2">, </span><span class="s1">num_processes</span><span class="s2">,</span>
+      <span class="s1">process_id</span><span class="s2">, </span><span class="s1">local_device_ids)):</span>
+      <span class="s2">return </span><span class="s1">(coordinator_address</span><span class="s2">, </span><span class="s1">num_processes</span><span class="s2">, </span><span class="s1">process_id</span><span class="s2">,</span>
+              <span class="s1">local_device_ids)</span>
+    <span class="s1">env = next((env </span><span class="s2">for </span><span class="s1">env </span><span class="s2">in </span><span class="s1">cls._cluster_types </span><span class="s2">if </span><span class="s1">env.is_env_present())</span><span class="s2">, None</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">env:</span>
+      <span class="s1">logger.debug(</span><span class="s4">'Initializing distributed JAX environment via %s'</span><span class="s2">, </span><span class="s1">env.__name__)</span>
+      <span class="s2">if </span><span class="s1">coordinator_address </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s1">coordinator_address = env.get_coordinator_address()</span>
+      <span class="s2">if </span><span class="s1">num_processes </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s1">num_processes = env.get_process_count()</span>
+      <span class="s2">if </span><span class="s1">process_id </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s1">process_id = env.get_process_id()</span>
+      <span class="s0"># Never automatically set local_device_ids on TPUs</span>
+      <span class="s0"># Defaults to single process per device if local_process_id is available.</span>
+      <span class="s0"># This only runs if we're in a managed distributed environment.</span>
+      <span class="s0"># Otherwise local_device_ids will remain unset,</span>
+      <span class="s0"># which will default to all devices being visible.</span>
+      <span class="s2">if </span><span class="s1">(local_device_ids </span><span class="s2">is None and not </span><span class="s1">running_in_cloud_tpu_vm </span><span class="s2">and</span>
+          <span class="s1">env.get_local_process_id() </span><span class="s2">is not None</span><span class="s1">):</span>
+        <span class="s1">local_device_ids = [env.get_local_process_id()] </span><span class="s0"># type: ignore[list-item]</span>
+    <span class="s2">else</span><span class="s1">:</span>
+      <span class="s1">logger.debug(</span><span class="s4">'Could not find a known environment for initializing distributed JAX. '</span>
+        <span class="s4">'Known environments: %s'</span><span class="s2">, </span><span class="s4">', '</span><span class="s1">.join(e.__name__ </span><span class="s2">for </span><span class="s1">e </span><span class="s2">in </span><span class="s1">cls._cluster_types))</span>
+    <span class="s2">return </span><span class="s1">(coordinator_address</span><span class="s2">, </span><span class="s1">num_processes</span><span class="s2">, </span><span class="s1">process_id</span><span class="s2">, </span><span class="s1">local_device_ids)</span>
+  <span class="s0"># pytype: enable=bad-return-type</span>
+
+  <span class="s1">@classmethod</span>
+  <span class="s2">def </span><span class="s1">is_env_present(cls) -&gt; bool:</span>
+    <span class="s3">&quot;&quot;&quot;Returns True if process is running in this cluster environment. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">raise </span><span class="s1">NotImplementedError(</span><span class="s4">&quot;ClusterEnv subclasses must implement is_env_present&quot;</span><span class="s1">)</span>
+
+  <span class="s1">@classmethod</span>
+  <span class="s2">def </span><span class="s1">get_coordinator_address(cls) -&gt; str:</span>
+    <span class="s3">&quot;&quot;&quot;Returns address and port used by JAX to bootstrap. 
+ 
+    Process id 0 will open a tcp socket at &quot;hostname:port&quot; where 
+    all the proccesses will connect to initialize the distributed JAX service. 
+    The selected port needs to be free. 
+    :func:`get_coordinator_address` needs to return the same hostname and port on all the processes. 
+ 
+    Returns: 
+      &quot;hostname:port&quot; 
+    &quot;&quot;&quot;</span>
+    <span class="s2">raise </span><span class="s1">NotImplementedError(</span><span class="s4">&quot;ClusterEnv subclasses must implement get_coordinator_address&quot;</span><span class="s1">)</span>
+
+  <span class="s1">@classmethod</span>
+  <span class="s2">def </span><span class="s1">get_process_count(cls) -&gt; int:</span>
+    <span class="s2">raise </span><span class="s1">NotImplementedError(</span><span class="s4">&quot;ClusterEnv subclasses must implement get_process_count&quot;</span><span class="s1">)</span>
+
+  <span class="s1">@classmethod</span>
+  <span class="s2">def </span><span class="s1">get_process_id(cls) -&gt; int:</span>
+    <span class="s2">raise </span><span class="s1">NotImplementedError(</span><span class="s4">&quot;ClusterEnv subclasses must implement get_process_id&quot;</span><span class="s1">)</span>
+
+  <span class="s1">@classmethod</span>
+  <span class="s2">def </span><span class="s1">get_local_process_id(cls) -&gt; Optional[int]:</span>
+    <span class="s3">&quot;&quot;&quot; Get index of current process inside a host. 
+ 
+    The method is only useful to support single device per process. 
+    In that case, each process will see a local device whose ID is 
+    the same as its local process ID. 
+    If None, JAX will not restrict the visible devices. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">return None</span>
+</pre>
+</body>
+</html>

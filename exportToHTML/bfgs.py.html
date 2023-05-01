@@ -1,0 +1,201 @@
+<html>
+<head>
+<title>bfgs.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6897bb;}
+.s5 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+bfgs.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2020 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+<span class="s2">&quot;&quot;&quot;The Broyden-Fletcher-Goldfarb-Shanno minimization algorithm.&quot;&quot;&quot;</span>
+<span class="s3">from </span><span class="s1">functools </span><span class="s3">import </span><span class="s1">partial</span>
+<span class="s3">from </span><span class="s1">typing </span><span class="s3">import </span><span class="s1">Callable</span><span class="s3">, </span><span class="s1">NamedTuple</span><span class="s3">, </span><span class="s1">Optional</span><span class="s3">, </span><span class="s1">Union</span>
+
+<span class="s3">import </span><span class="s1">jax</span>
+<span class="s3">import </span><span class="s1">jax.numpy </span><span class="s3">as </span><span class="s1">jnp</span>
+<span class="s3">from </span><span class="s1">jax </span><span class="s3">import </span><span class="s1">lax</span>
+<span class="s3">from </span><span class="s1">jax._src.scipy.optimize.line_search </span><span class="s3">import </span><span class="s1">line_search</span>
+
+
+<span class="s3">class </span><span class="s1">_BFGSResults(NamedTuple):</span>
+  <span class="s2">&quot;&quot;&quot;Results from BFGS optimization. 
+ 
+  Parameters: 
+    converged: True if minimization converged. 
+    failed: True if line search failed. 
+    k: integer the number of iterations of the BFGS update. 
+    nfev: integer total number of objective evaluations performed. 
+    ngev: integer total number of jacobian evaluations 
+    nhev: integer total number of hessian evaluations 
+    x_k: array containing the last argument value found during the search. If 
+      the search converged, then this value is the argmin of the objective 
+      function. 
+    f_k: array containing the value of the objective function at `x_k`. If the 
+      search converged, then this is the (local) minimum of the objective 
+      function. 
+    g_k: array containing the gradient of the objective function at `x_k`. If 
+      the search converged the l2-norm of this tensor should be below the 
+      tolerance. 
+    H_k: array containing the inverse of the estimated Hessian. 
+    status: int describing end state. 
+    line_search_status: int describing line search end state (only means 
+      something if line search fails). 
+  &quot;&quot;&quot;</span>
+  <span class="s1">converged: Union[bool</span><span class="s3">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">failed: Union[bool</span><span class="s3">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">k: Union[int</span><span class="s3">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">nfev: Union[int</span><span class="s3">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">ngev: Union[int</span><span class="s3">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">nhev: Union[int</span><span class="s3">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">x_k: jax.Array</span>
+  <span class="s1">f_k: jax.Array</span>
+  <span class="s1">g_k: jax.Array</span>
+  <span class="s1">H_k: jax.Array</span>
+  <span class="s1">old_old_fval: jax.Array</span>
+  <span class="s1">status: Union[int</span><span class="s3">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">line_search_status: Union[int</span><span class="s3">, </span><span class="s1">jax.Array]</span>
+
+
+<span class="s1">_dot = partial(jnp.dot</span><span class="s3">, </span><span class="s1">precision=lax.Precision.HIGHEST)</span>
+<span class="s1">_einsum = partial(jnp.einsum</span><span class="s3">, </span><span class="s1">precision=lax.Precision.HIGHEST)</span>
+
+
+<span class="s3">def </span><span class="s1">minimize_bfgs(</span>
+    <span class="s1">fun: Callable</span><span class="s3">,</span>
+    <span class="s1">x0: jax.Array</span><span class="s3">,</span>
+    <span class="s1">maxiter: Optional[int] = </span><span class="s3">None,</span>
+    <span class="s1">norm=jnp.inf</span><span class="s3">,</span>
+    <span class="s1">gtol: float = </span><span class="s4">1e-5</span><span class="s3">,</span>
+    <span class="s1">line_search_maxiter: int = </span><span class="s4">10</span><span class="s3">,</span>
+<span class="s1">) -&gt; _BFGSResults:</span>
+  <span class="s2">&quot;&quot;&quot;Minimize a function using BFGS. 
+ 
+  Implements the BFGS algorithm from 
+    Algorithm 6.1 from Wright and Nocedal, 'Numerical Optimization', 1999, pg. 
+    136-143. 
+ 
+  Args: 
+    fun: function of the form f(x) where x is a flat ndarray and returns a real 
+      scalar. The function should be composed of operations with vjp defined. 
+    x0: initial guess. 
+    maxiter: maximum number of iterations. 
+    norm: order of norm for convergence check. Default inf. 
+    gtol: terminates minimization when |grad|_norm &lt; g_tol. 
+    line_search_maxiter: maximum number of linesearch iterations. 
+ 
+  Returns: 
+    Optimization result. 
+  &quot;&quot;&quot;</span>
+
+  <span class="s3">if </span><span class="s1">maxiter </span><span class="s3">is None</span><span class="s1">:</span>
+    <span class="s1">maxiter = jnp.size(x0) * </span><span class="s4">200</span>
+
+  <span class="s1">d = x0.shape[</span><span class="s4">0</span><span class="s1">]</span>
+
+  <span class="s1">initial_H = jnp.eye(d</span><span class="s3">, </span><span class="s1">dtype=x0.dtype)</span>
+  <span class="s1">f_0</span><span class="s3">, </span><span class="s1">g_0 = jax.value_and_grad(fun)(x0)</span>
+  <span class="s1">state = _BFGSResults(</span>
+      <span class="s1">converged=jnp.linalg.norm(g_0</span><span class="s3">, </span><span class="s1">ord=norm) &lt; gtol</span><span class="s3">,</span>
+      <span class="s1">failed=</span><span class="s3">False,</span>
+      <span class="s1">k=</span><span class="s4">0</span><span class="s3">,</span>
+      <span class="s1">nfev=</span><span class="s4">1</span><span class="s3">,</span>
+      <span class="s1">ngev=</span><span class="s4">1</span><span class="s3">,</span>
+      <span class="s1">nhev=</span><span class="s4">0</span><span class="s3">,</span>
+      <span class="s1">x_k=x0</span><span class="s3">,</span>
+      <span class="s1">f_k=f_0</span><span class="s3">,</span>
+      <span class="s1">g_k=g_0</span><span class="s3">,</span>
+      <span class="s1">H_k=initial_H</span><span class="s3">,</span>
+      <span class="s1">old_old_fval=f_0 + jnp.linalg.norm(g_0) / </span><span class="s4">2</span><span class="s3">,</span>
+      <span class="s1">status=</span><span class="s4">0</span><span class="s3">,</span>
+      <span class="s1">line_search_status=</span><span class="s4">0</span><span class="s3">,</span>
+  <span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">cond_fun(state):</span>
+    <span class="s3">return </span><span class="s1">(jnp.logical_not(state.converged)</span>
+            <span class="s1">&amp; jnp.logical_not(state.failed)</span>
+            <span class="s1">&amp; (state.k &lt; maxiter))</span>
+
+  <span class="s3">def </span><span class="s1">body_fun(state):</span>
+    <span class="s1">p_k = -_dot(state.H_k</span><span class="s3">, </span><span class="s1">state.g_k)</span>
+    <span class="s1">line_search_results = line_search(</span>
+        <span class="s1">fun</span><span class="s3">,</span>
+        <span class="s1">state.x_k</span><span class="s3">,</span>
+        <span class="s1">p_k</span><span class="s3">,</span>
+        <span class="s1">old_fval=state.f_k</span><span class="s3">,</span>
+        <span class="s1">old_old_fval=state.old_old_fval</span><span class="s3">,</span>
+        <span class="s1">gfk=state.g_k</span><span class="s3">,</span>
+        <span class="s1">maxiter=line_search_maxiter</span><span class="s3">,</span>
+    <span class="s1">)</span>
+    <span class="s1">state = state._replace(</span>
+        <span class="s1">nfev=state.nfev + line_search_results.nfev</span><span class="s3">,</span>
+        <span class="s1">ngev=state.ngev + line_search_results.ngev</span><span class="s3">,</span>
+        <span class="s1">failed=line_search_results.failed</span><span class="s3">,</span>
+        <span class="s1">line_search_status=line_search_results.status</span><span class="s3">,</span>
+    <span class="s1">)</span>
+    <span class="s1">s_k = line_search_results.a_k * p_k</span>
+    <span class="s1">x_kp1 = state.x_k + s_k</span>
+    <span class="s1">f_kp1 = line_search_results.f_k</span>
+    <span class="s1">g_kp1 = line_search_results.g_k</span>
+    <span class="s1">y_k = g_kp1 - state.g_k</span>
+    <span class="s1">rho_k = jnp.reciprocal(_dot(y_k</span><span class="s3">, </span><span class="s1">s_k))</span>
+
+    <span class="s1">sy_k = s_k[:</span><span class="s3">, </span><span class="s1">jnp.newaxis] * y_k[jnp.newaxis</span><span class="s3">, </span><span class="s1">:]</span>
+    <span class="s1">w = jnp.eye(d</span><span class="s3">, </span><span class="s1">dtype=rho_k.dtype) - rho_k * sy_k</span>
+    <span class="s1">H_kp1 = (_einsum(</span><span class="s5">'ij,jk,lk'</span><span class="s3">, </span><span class="s1">w</span><span class="s3">, </span><span class="s1">state.H_k</span><span class="s3">, </span><span class="s1">w)</span>
+             <span class="s1">+ rho_k * s_k[:</span><span class="s3">, </span><span class="s1">jnp.newaxis] * s_k[jnp.newaxis</span><span class="s3">, </span><span class="s1">:])</span>
+    <span class="s1">H_kp1 = jnp.where(jnp.isfinite(rho_k)</span><span class="s3">, </span><span class="s1">H_kp1</span><span class="s3">, </span><span class="s1">state.H_k)</span>
+    <span class="s1">converged = jnp.linalg.norm(g_kp1</span><span class="s3">, </span><span class="s1">ord=norm) &lt; gtol</span>
+
+    <span class="s1">state = state._replace(</span>
+        <span class="s1">converged=converged</span><span class="s3">,</span>
+        <span class="s1">k=state.k + </span><span class="s4">1</span><span class="s3">,</span>
+        <span class="s1">x_k=x_kp1</span><span class="s3">,</span>
+        <span class="s1">f_k=f_kp1</span><span class="s3">,</span>
+        <span class="s1">g_k=g_kp1</span><span class="s3">,</span>
+        <span class="s1">H_k=H_kp1</span><span class="s3">,</span>
+        <span class="s1">old_old_fval=state.f_k</span><span class="s3">,</span>
+    <span class="s1">)</span>
+    <span class="s3">return </span><span class="s1">state</span>
+
+  <span class="s1">state = lax.while_loop(cond_fun</span><span class="s3">, </span><span class="s1">body_fun</span><span class="s3">, </span><span class="s1">state)</span>
+  <span class="s1">status = jnp.where(</span>
+      <span class="s1">state.converged</span><span class="s3">,</span>
+      <span class="s4">0</span><span class="s3">,  </span><span class="s0"># converged</span>
+      <span class="s1">jnp.where(</span>
+          <span class="s1">state.k == maxiter</span><span class="s3">,</span>
+          <span class="s4">1</span><span class="s3">,  </span><span class="s0"># max iters reached</span>
+          <span class="s1">jnp.where(</span>
+              <span class="s1">state.failed</span><span class="s3">,</span>
+              <span class="s4">2 </span><span class="s1">+ state.line_search_status</span><span class="s3">, </span><span class="s0"># ls failed (+ reason)</span>
+              <span class="s1">-</span><span class="s4">1</span><span class="s3">,  </span><span class="s0"># undefined</span>
+          <span class="s1">)</span>
+      <span class="s1">)</span>
+  <span class="s1">)</span>
+  <span class="s1">state = state._replace(status=status)</span>
+  <span class="s3">return </span><span class="s1">state</span>
+</pre>
+</body>
+</html>

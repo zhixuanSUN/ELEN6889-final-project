@@ -1,0 +1,643 @@
+<html>
+<head>
+<title>initializers.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6897bb;}
+.s5 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+initializers.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2019 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s2">&quot;&quot;&quot; 
+Common neural network layer initializers, consistent with definitions 
+used in Keras and Sonnet. 
+&quot;&quot;&quot;</span>
+
+<span class="s3">import </span><span class="s1">math</span>
+<span class="s3">from </span><span class="s1">typing </span><span class="s3">import </span><span class="s1">Any</span><span class="s3">, </span><span class="s1">Literal</span><span class="s3">, </span><span class="s1">Protocol</span><span class="s3">, </span><span class="s1">Sequence</span><span class="s3">, </span><span class="s1">Tuple</span><span class="s3">, </span><span class="s1">Union</span>
+
+<span class="s3">import </span><span class="s1">numpy </span><span class="s3">as </span><span class="s1">np</span>
+
+<span class="s3">import </span><span class="s1">jax.numpy </span><span class="s3">as </span><span class="s1">jnp</span>
+<span class="s3">from </span><span class="s1">jax </span><span class="s3">import </span><span class="s1">lax</span>
+<span class="s3">from </span><span class="s1">jax </span><span class="s3">import </span><span class="s1">random</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">core</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">dtypes</span>
+
+<span class="s1">KeyArray = random.KeyArray</span>
+<span class="s1">Array = Any</span>
+<span class="s0"># TODO: Import or define these to match</span>
+<span class="s0"># https://github.com/numpy/numpy/blob/main/numpy/typing/_dtype_like.py.</span>
+<span class="s1">DTypeLikeFloat = Any</span>
+<span class="s1">DTypeLikeComplex = Any</span>
+<span class="s1">DTypeLikeInexact = Any  </span><span class="s0"># DTypeLikeFloat | DTypeLikeComplex</span>
+<span class="s1">RealNumeric = Any  </span><span class="s0"># Scalar jnp array or float</span>
+
+<span class="s3">class </span><span class="s1">Initializer(Protocol):</span>
+  <span class="s1">@staticmethod</span>
+  <span class="s3">def </span><span class="s1">__call__(key: KeyArray</span><span class="s3">,</span>
+               <span class="s1">shape: core.Shape</span><span class="s3">,</span>
+               <span class="s1">dtype: DTypeLikeInexact = jnp.float_) -&gt; Array:</span>
+    <span class="s1">...</span>
+
+<span class="s3">def </span><span class="s1">zeros(key: KeyArray</span><span class="s3">,</span>
+          <span class="s1">shape: core.Shape</span><span class="s3">,</span>
+          <span class="s1">dtype: DTypeLikeInexact = jnp.float_) -&gt; Array:</span>
+  <span class="s2">&quot;&quot;&quot;An initializer that returns a constant array full of zeros. 
+ 
+  The ``key`` argument is ignored. 
+ 
+  &gt;&gt;&gt; import jax, jax.numpy as jnp 
+  &gt;&gt;&gt; jax.nn.initializers.zeros(jax.random.PRNGKey(42), (2, 3), jnp.float32) 
+  Array([[0., 0., 0.], 
+         [0., 0., 0.]], dtype=float32) 
+  &quot;&quot;&quot;</span>
+  <span class="s3">return </span><span class="s1">jnp.zeros(shape</span><span class="s3">, </span><span class="s1">dtypes.canonicalize_dtype(dtype))</span>
+
+<span class="s3">def </span><span class="s1">ones(key: KeyArray</span><span class="s3">,</span>
+         <span class="s1">shape: core.Shape</span><span class="s3">,</span>
+         <span class="s1">dtype: DTypeLikeInexact = jnp.float_) -&gt; Array:</span>
+  <span class="s2">&quot;&quot;&quot;An initializer that returns a constant array full of ones. 
+ 
+  The ``key`` argument is ignored. 
+ 
+  &gt;&gt;&gt; import jax, jax.numpy as jnp 
+  &gt;&gt;&gt; jax.nn.initializers.ones(jax.random.PRNGKey(42), (3, 2), jnp.float32) 
+  Array([[1., 1.], 
+         [1., 1.], 
+         [1., 1.]], dtype=float32) 
+  &quot;&quot;&quot;</span>
+  <span class="s3">return </span><span class="s1">jnp.ones(shape</span><span class="s3">, </span><span class="s1">dtypes.canonicalize_dtype(dtype))</span>
+
+<span class="s3">def </span><span class="s1">constant(value: Array</span><span class="s3">,</span>
+             <span class="s1">dtype: DTypeLikeInexact = jnp.float_</span>
+             <span class="s1">) -&gt; Initializer:</span>
+  <span class="s2">&quot;&quot;&quot;Builds an initializer that returns arrays full of a constant ``value``. 
+ 
+  Args: 
+    value: the constant value with which to fill the initializer. 
+    dtype: optional; the initializer's default dtype. 
+ 
+  &gt;&gt;&gt; import jax, jax.numpy as jnp 
+  &gt;&gt;&gt; initializer = jax.nn.initializers.constant(-7) 
+  &gt;&gt;&gt; initializer(jax.random.PRNGKey(42), (2, 3), jnp.float32) 
+  Array([[-7., -7., -7.], 
+         [-7., -7., -7.]], dtype=float32) 
+  &quot;&quot;&quot;</span>
+  <span class="s3">def </span><span class="s1">init(key: KeyArray</span><span class="s3">,</span>
+           <span class="s1">shape: core.Shape</span><span class="s3">,</span>
+           <span class="s1">dtype: DTypeLikeInexact = dtype) -&gt; Array:</span>
+    <span class="s1">dtype = dtypes.canonicalize_dtype(dtype)</span>
+    <span class="s3">return </span><span class="s1">jnp.full(shape</span><span class="s3">, </span><span class="s1">value</span><span class="s3">, </span><span class="s1">dtype=dtype)</span>
+  <span class="s3">return </span><span class="s1">init</span>
+
+<span class="s3">def </span><span class="s1">uniform(scale: RealNumeric = </span><span class="s4">1e-2</span><span class="s3">,</span>
+            <span class="s1">dtype: DTypeLikeInexact = jnp.float_) -&gt; Initializer:</span>
+  <span class="s2">&quot;&quot;&quot;Builds an initializer that returns real uniformly-distributed random arrays. 
+ 
+  Args: 
+    scale: optional; the upper bound of the random distribution. 
+    dtype: optional; the initializer's default dtype. 
+ 
+  Returns: 
+    An initializer that returns arrays whose values are uniformly distributed in 
+    the range ``[0, scale)``. 
+ 
+  &gt;&gt;&gt; import jax, jax.numpy as jnp 
+  &gt;&gt;&gt; initializer = jax.nn.initializers.uniform(10.0) 
+  &gt;&gt;&gt; initializer(jax.random.PRNGKey(42), (2, 3), jnp.float32)  # doctest: +SKIP 
+  Array([[7.298188 , 8.691938 , 8.7230015], 
+         [2.0818567, 1.8662417, 5.5022564]], dtype=float32) 
+  &quot;&quot;&quot;</span>
+  <span class="s3">def </span><span class="s1">init(key: KeyArray</span><span class="s3">,</span>
+           <span class="s1">shape: core.Shape</span><span class="s3">,</span>
+           <span class="s1">dtype: DTypeLikeInexact = dtype) -&gt; Array:</span>
+    <span class="s1">dtype = dtypes.canonicalize_dtype(dtype)</span>
+    <span class="s3">return </span><span class="s1">random.uniform(key</span><span class="s3">, </span><span class="s1">shape</span><span class="s3">, </span><span class="s1">dtype) * scale</span>
+  <span class="s3">return </span><span class="s1">init</span>
+
+<span class="s3">def </span><span class="s1">normal(stddev: RealNumeric = </span><span class="s4">1e-2</span><span class="s3">,</span>
+           <span class="s1">dtype: DTypeLikeInexact = jnp.float_) -&gt; Initializer:</span>
+  <span class="s2">&quot;&quot;&quot;Builds an initializer that returns real normally-distributed random arrays. 
+ 
+  Args: 
+    stddev: optional; the standard deviation of the distribution. 
+    dtype: optional; the initializer's default dtype. 
+ 
+  Returns: 
+    An initializer that returns arrays whose values are normally distributed 
+    with mean ``0`` and standard deviation ``stddev``. 
+ 
+  &gt;&gt;&gt; import jax, jax.numpy as jnp 
+  &gt;&gt;&gt; initializer = jax.nn.initializers.normal(5.0) 
+  &gt;&gt;&gt; initializer(jax.random.PRNGKey(42), (2, 3), jnp.float32)  # doctest: +SKIP 
+  Array([[ 3.0613258 ,  5.6129413 ,  5.6866574 ], 
+         [-4.063663  , -4.4520254 ,  0.63115686]], dtype=float32) 
+   &quot;&quot;&quot;</span>
+  <span class="s3">def </span><span class="s1">init(key: KeyArray</span><span class="s3">,</span>
+           <span class="s1">shape: core.Shape</span><span class="s3">,</span>
+           <span class="s1">dtype: DTypeLikeInexact = dtype) -&gt; Array:</span>
+    <span class="s1">dtype = dtypes.canonicalize_dtype(dtype)</span>
+    <span class="s3">return </span><span class="s1">random.normal(key</span><span class="s3">, </span><span class="s1">shape</span><span class="s3">, </span><span class="s1">dtype) * stddev</span>
+  <span class="s3">return </span><span class="s1">init</span>
+
+<span class="s3">def </span><span class="s1">_compute_fans(shape: core.NamedShape</span><span class="s3">,</span>
+                  <span class="s1">in_axis: Union[int</span><span class="s3">, </span><span class="s1">Sequence[int]] = -</span><span class="s4">2</span><span class="s3">,</span>
+                  <span class="s1">out_axis: Union[int</span><span class="s3">, </span><span class="s1">Sequence[int]] = -</span><span class="s4">1</span><span class="s3">,</span>
+                  <span class="s1">batch_axis: Union[int</span><span class="s3">, </span><span class="s1">Sequence[int]] = ()</span>
+                  <span class="s1">) -&gt; Tuple[Array</span><span class="s3">, </span><span class="s1">Array]:</span>
+  <span class="s2">&quot;&quot;&quot; 
+  Compute effective input and output sizes for a linear or convolutional layer. 
+ 
+  Axes not in in_axis, out_axis, or batch_axis are assumed to constitute the 
+  &quot;receptive field&quot; of a convolution (kernel spatial dimensions). 
+  &quot;&quot;&quot;</span>
+  <span class="s3">if </span><span class="s1">shape.rank &lt;= </span><span class="s4">1</span><span class="s1">:</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s5">f&quot;Can't compute input and output sizes of a </span><span class="s3">{</span><span class="s1">shape.rank</span><span class="s3">}</span><span class="s5">&quot;</span>
+                     <span class="s5">&quot;-dimensional weights tensor. Must be at least 2D.&quot;</span><span class="s1">)</span>
+
+  <span class="s3">if </span><span class="s1">isinstance(in_axis</span><span class="s3">, </span><span class="s1">int):</span>
+    <span class="s1">in_size = shape[in_axis]</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s1">in_size = int(np.prod([shape[i] </span><span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">in_axis]))</span>
+  <span class="s3">if </span><span class="s1">isinstance(out_axis</span><span class="s3">, </span><span class="s1">int):</span>
+    <span class="s1">out_size = shape[out_axis]</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s1">out_size = int(np.prod([shape[i] </span><span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">out_axis]))</span>
+  <span class="s3">if </span><span class="s1">isinstance(batch_axis</span><span class="s3">, </span><span class="s1">int):</span>
+    <span class="s1">batch_size = shape[batch_axis]</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s1">batch_size = int(np.prod([shape[i] </span><span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">batch_axis]))</span>
+  <span class="s1">receptive_field_size = shape.total / in_size / out_size / batch_size</span>
+  <span class="s1">fan_in = in_size * receptive_field_size</span>
+  <span class="s1">fan_out = out_size * receptive_field_size</span>
+  <span class="s3">return </span><span class="s1">fan_in</span><span class="s3">, </span><span class="s1">fan_out</span>
+
+<span class="s3">def </span><span class="s1">_complex_uniform(key: KeyArray</span><span class="s3">,</span>
+                     <span class="s1">shape: Union[Sequence[int]</span><span class="s3">, </span><span class="s1">core.NamedShape]</span><span class="s3">,</span>
+                     <span class="s1">dtype: DTypeLikeInexact) -&gt; Array:</span>
+  <span class="s2">&quot;&quot;&quot; 
+  Sample uniform random values within a disk on the complex plane, 
+  with zero mean and unit variance. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">key_r</span><span class="s3">, </span><span class="s1">key_theta = random.split(key)</span>
+  <span class="s1">real_dtype = np.array(</span><span class="s4">0</span><span class="s3">, </span><span class="s1">dtype).real.dtype</span>
+  <span class="s1">dtype = dtypes.to_complex_dtype(real_dtype)</span>
+  <span class="s1">r = jnp.sqrt(</span><span class="s4">2 </span><span class="s1">* random.uniform(key_r</span><span class="s3">, </span><span class="s1">shape</span><span class="s3">, </span><span class="s1">real_dtype)).astype(dtype)</span>
+  <span class="s1">theta = </span><span class="s4">2 </span><span class="s1">* jnp.pi * random.uniform(key_theta</span><span class="s3">, </span><span class="s1">shape</span><span class="s3">, </span><span class="s1">real_dtype).astype(dtype)</span>
+  <span class="s3">return </span><span class="s1">r * jnp.exp(</span><span class="s4">1j </span><span class="s1">* theta)</span>
+
+<span class="s3">def </span><span class="s1">_complex_truncated_normal(key: KeyArray</span><span class="s3">, </span><span class="s1">upper: Array</span><span class="s3">,</span>
+                              <span class="s1">shape: Union[Sequence[int]</span><span class="s3">, </span><span class="s1">core.NamedShape]</span><span class="s3">,</span>
+                              <span class="s1">dtype: DTypeLikeInexact) -&gt; Array:</span>
+  <span class="s2">&quot;&quot;&quot; 
+  Sample random values from a centered normal distribution on the complex plane, 
+  whose modulus is truncated to `upper`, and the variance before the truncation 
+  is one. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">key_r</span><span class="s3">, </span><span class="s1">key_theta = random.split(key)</span>
+  <span class="s1">real_dtype = np.array(</span><span class="s4">0</span><span class="s3">, </span><span class="s1">dtype).real.dtype</span>
+  <span class="s1">dtype = dtypes.to_complex_dtype(real_dtype)</span>
+  <span class="s1">t = ((</span><span class="s4">1 </span><span class="s1">- jnp.exp(jnp.array(-(upper ** </span><span class="s4">2</span><span class="s1">)</span><span class="s3">, </span><span class="s1">dtype)))</span>
+       <span class="s1">* random.uniform(key_r</span><span class="s3">, </span><span class="s1">shape</span><span class="s3">, </span><span class="s1">real_dtype).astype(dtype))</span>
+  <span class="s1">r = jnp.sqrt(-jnp.log(</span><span class="s4">1 </span><span class="s1">- t))</span>
+  <span class="s1">theta = </span><span class="s4">2 </span><span class="s1">* jnp.pi * random.uniform(key_theta</span><span class="s3">, </span><span class="s1">shape</span><span class="s3">, </span><span class="s1">real_dtype).astype(dtype)</span>
+  <span class="s3">return </span><span class="s1">r * jnp.exp(</span><span class="s4">1j </span><span class="s1">* theta)</span>
+
+<span class="s3">def </span><span class="s1">variance_scaling(</span>
+  <span class="s1">scale: RealNumeric</span><span class="s3">,</span>
+  <span class="s1">mode: Union[Literal[</span><span class="s5">&quot;fan_in&quot;</span><span class="s1">]</span><span class="s3">, </span><span class="s1">Literal[</span><span class="s5">&quot;fan_out&quot;</span><span class="s1">]</span><span class="s3">, </span><span class="s1">Literal[</span><span class="s5">&quot;fan_avg&quot;</span><span class="s1">]]</span><span class="s3">,</span>
+  <span class="s1">distribution: Union[Literal[</span><span class="s5">&quot;truncated_normal&quot;</span><span class="s1">]</span><span class="s3">, </span><span class="s1">Literal[</span><span class="s5">&quot;normal&quot;</span><span class="s1">]</span><span class="s3">,</span>
+                      <span class="s1">Literal[</span><span class="s5">&quot;uniform&quot;</span><span class="s1">]]</span><span class="s3">,</span>
+  <span class="s1">in_axis: Union[int</span><span class="s3">, </span><span class="s1">Sequence[int]] = -</span><span class="s4">2</span><span class="s3">,</span>
+  <span class="s1">out_axis: Union[int</span><span class="s3">, </span><span class="s1">Sequence[int]] = -</span><span class="s4">1</span><span class="s3">,</span>
+  <span class="s1">batch_axis: Sequence[int] = ()</span><span class="s3">,</span>
+  <span class="s1">dtype: DTypeLikeInexact = jnp.float_</span>
+<span class="s1">) -&gt; Initializer:</span>
+  <span class="s2">r&quot;&quot;&quot; 
+  Initializer that adapts its scale to the shape of the weights tensor. 
+ 
+  With ``distribution=&quot;truncated_normal&quot;`` or ``distribution=&quot;normal&quot;``, samples 
+  are drawn from a (truncated) normal distribution with a mean of zero 
+  and a standard deviation (after truncation, if applicable) of 
+  :math:`\sqrt{\frac{scale}{n}}`, where `n` is: 
+ 
+  * the number of input units in the weights tensor, if ``mode=&quot;fan_in&quot;``, 
+  * the number of output units, if ``mode=&quot;fan_out&quot;``, or 
+  * the average of the numbers of input and output units, if ``mode=&quot;fan_avg&quot;``. 
+ 
+  This initializer can be configured with ``in_axis``, ``out_axis``, and 
+  ``batch_axis`` to work with general convolutional or dense layers; axes that 
+  are not in any of those arguments are assumed to be the &quot;receptive field&quot; 
+  (convolution kernel spatial axes). 
+ 
+  With ``distribution=&quot;truncated_normal&quot;``, the absolute values of the samples 
+  are truncated at 2 standard deviations before scaling. 
+ 
+  With ``distribution=&quot;uniform&quot;``, samples are drawn from: 
+ 
+  * a uniform interval, if `dtype` is real, or 
+  * a uniform disk, if `dtype` is complex, 
+ 
+  with a mean of zero and a standard deviation of :math:`\sqrt{\frac{scale}{n}}` 
+  where `n` is defined above. 
+ 
+  Args: 
+    scale: scaling factor (positive float). 
+    mode: one of ``&quot;fan_in&quot;``, ``&quot;fan_out&quot;``, and ``&quot;fan_avg&quot;``. 
+    distribution: random distribution to use. One of ``&quot;truncated_normal&quot;``, 
+      ``&quot;normal&quot;`` and ``&quot;uniform&quot;``. 
+    in_axis: axis or sequence of axes of the input dimension in the weights 
+      array. 
+    out_axis: axis or sequence of axes of the output dimension in the weights 
+      array. 
+    batch_axis: axis or sequence of axes in the weight array that should be 
+      ignored. 
+    dtype: the dtype of the weights. 
+  &quot;&quot;&quot;</span>
+
+  <span class="s3">def </span><span class="s1">init(key: KeyArray</span><span class="s3">,</span>
+           <span class="s1">shape: core.Shape</span><span class="s3">,</span>
+           <span class="s1">dtype: DTypeLikeInexact = dtype) -&gt; Array:</span>
+    <span class="s1">dtype = dtypes.canonicalize_dtype(dtype)</span>
+    <span class="s1">named_shape = core.as_named_shape(shape)</span>
+    <span class="s1">fan_in</span><span class="s3">, </span><span class="s1">fan_out = _compute_fans(named_shape</span><span class="s3">, </span><span class="s1">in_axis</span><span class="s3">, </span><span class="s1">out_axis</span><span class="s3">, </span><span class="s1">batch_axis)</span>
+    <span class="s3">if </span><span class="s1">mode == </span><span class="s5">&quot;fan_in&quot;</span><span class="s1">: denominator = fan_in</span>
+    <span class="s3">elif </span><span class="s1">mode == </span><span class="s5">&quot;fan_out&quot;</span><span class="s1">: denominator = fan_out</span>
+    <span class="s3">elif </span><span class="s1">mode == </span><span class="s5">&quot;fan_avg&quot;</span><span class="s1">: denominator = (fan_in + fan_out) / </span><span class="s4">2</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span>
+        <span class="s5">f&quot;invalid mode for variance scaling initializer: </span><span class="s3">{</span><span class="s1">mode</span><span class="s3">}</span><span class="s5">&quot;</span><span class="s1">)</span>
+    <span class="s1">variance = jnp.array(scale / denominator</span><span class="s3">, </span><span class="s1">dtype=dtype)</span>
+
+    <span class="s3">if </span><span class="s1">distribution == </span><span class="s5">&quot;truncated_normal&quot;</span><span class="s1">:</span>
+      <span class="s3">if </span><span class="s1">jnp.issubdtype(dtype</span><span class="s3">, </span><span class="s1">jnp.floating):</span>
+        <span class="s0"># constant is stddev of standard normal truncated to (-2, 2)</span>
+        <span class="s1">stddev = jnp.sqrt(variance) / jnp.array(</span><span class="s4">.87962566103423978</span><span class="s3">, </span><span class="s1">dtype)</span>
+        <span class="s3">return </span><span class="s1">random.truncated_normal(key</span><span class="s3">, </span><span class="s1">-</span><span class="s4">2</span><span class="s3">, </span><span class="s4">2</span><span class="s3">, </span><span class="s1">named_shape</span><span class="s3">, </span><span class="s1">dtype) * stddev</span>
+      <span class="s3">else</span><span class="s1">:</span>
+        <span class="s0"># constant is stddev of complex standard normal truncated to 2</span>
+        <span class="s1">stddev = jnp.sqrt(variance) / jnp.array(</span><span class="s4">.95311164380491208</span><span class="s3">, </span><span class="s1">dtype)</span>
+        <span class="s3">return </span><span class="s1">_complex_truncated_normal(key</span><span class="s3">, </span><span class="s4">2</span><span class="s3">, </span><span class="s1">named_shape</span><span class="s3">, </span><span class="s1">dtype) * stddev</span>
+    <span class="s3">elif </span><span class="s1">distribution == </span><span class="s5">&quot;normal&quot;</span><span class="s1">:</span>
+      <span class="s3">return </span><span class="s1">random.normal(key</span><span class="s3">, </span><span class="s1">named_shape</span><span class="s3">, </span><span class="s1">dtype) * jnp.sqrt(variance)</span>
+    <span class="s3">elif </span><span class="s1">distribution == </span><span class="s5">&quot;uniform&quot;</span><span class="s1">:</span>
+      <span class="s3">if </span><span class="s1">jnp.issubdtype(dtype</span><span class="s3">, </span><span class="s1">jnp.floating):</span>
+        <span class="s3">return </span><span class="s1">random.uniform(key</span><span class="s3">, </span><span class="s1">named_shape</span><span class="s3">, </span><span class="s1">dtype</span><span class="s3">, </span><span class="s1">-</span><span class="s4">1</span><span class="s1">) * jnp.sqrt(</span><span class="s4">3 </span><span class="s1">* variance)</span>
+      <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">return </span><span class="s1">_complex_uniform(key</span><span class="s3">, </span><span class="s1">named_shape</span><span class="s3">, </span><span class="s1">dtype) * jnp.sqrt(variance)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s5">f&quot;invalid distribution for variance scaling initializer: </span><span class="s3">{</span><span class="s1">distribution</span><span class="s3">}</span><span class="s5">&quot;</span><span class="s1">)</span>
+
+  <span class="s3">return </span><span class="s1">init</span>
+
+<span class="s3">def </span><span class="s1">glorot_uniform(in_axis: Union[int</span><span class="s3">, </span><span class="s1">Sequence[int]] = -</span><span class="s4">2</span><span class="s3">,</span>
+                   <span class="s1">out_axis: Union[int</span><span class="s3">, </span><span class="s1">Sequence[int]] = -</span><span class="s4">1</span><span class="s3">,</span>
+                   <span class="s1">batch_axis: Sequence[int] = ()</span><span class="s3">,</span>
+                   <span class="s1">dtype: DTypeLikeInexact = jnp.float_) -&gt; Initializer:</span>
+  <span class="s2">&quot;&quot;&quot;Builds a Glorot uniform initializer (aka Xavier uniform initializer). 
+ 
+  A `Glorot uniform initializer`_ is a specialization of 
+  :func:`jax.nn.initializers.variance_scaling` where ``scale = 1.0``, 
+  ``mode=&quot;fan_avg&quot;``, and ``distribution=&quot;uniform&quot;``. 
+ 
+  Args: 
+    in_axis: axis or sequence of axes of the input dimension in the weights 
+      array. 
+    out_axis: axis or sequence of axes of the output dimension in the weights 
+      array. 
+    batch_axis: axis or sequence of axes in the weight array that should be 
+      ignored. 
+    dtype: the dtype of the weights. 
+ 
+  Returns: 
+    An initializer. 
+ 
+  Example: 
+ 
+  &gt;&gt;&gt; import jax, jax.numpy as jnp 
+  &gt;&gt;&gt; initializer = jax.nn.initializers.glorot_uniform() 
+  &gt;&gt;&gt; initializer(jax.random.PRNGKey(42), (2, 3), jnp.float32)  # doctest: +SKIP 
+  Array([[ 0.50350785,  0.8088631 ,  0.81566876], 
+         [-0.6393332 , -0.6865721 ,  0.11003882]], dtype=float32) 
+ 
+  .. _Glorot uniform initializer: http://proceedings.mlr.press/v9/glorot10a.html 
+  &quot;&quot;&quot;</span>
+  <span class="s3">return </span><span class="s1">variance_scaling(</span><span class="s4">1.0</span><span class="s3">, </span><span class="s5">&quot;fan_avg&quot;</span><span class="s3">, </span><span class="s5">&quot;uniform&quot;</span><span class="s3">, </span><span class="s1">in_axis=in_axis</span><span class="s3">,</span>
+                          <span class="s1">out_axis=out_axis</span><span class="s3">, </span><span class="s1">batch_axis=batch_axis</span><span class="s3">, </span><span class="s1">dtype=dtype)</span>
+
+<span class="s1">xavier_uniform = glorot_uniform</span>
+
+
+<span class="s3">def </span><span class="s1">glorot_normal(in_axis: Union[int</span><span class="s3">, </span><span class="s1">Sequence[int]] = -</span><span class="s4">2</span><span class="s3">,</span>
+                  <span class="s1">out_axis: Union[int</span><span class="s3">, </span><span class="s1">Sequence[int]] = -</span><span class="s4">1</span><span class="s3">,</span>
+                  <span class="s1">batch_axis: Sequence[int] = ()</span><span class="s3">,</span>
+                  <span class="s1">dtype: DTypeLikeInexact = jnp.float_) -&gt; Initializer:</span>
+  <span class="s2">&quot;&quot;&quot;Builds a Glorot normal initializer (aka Xavier normal initializer). 
+ 
+  A `Glorot normal initializer`_ is a specialization of 
+  :func:`jax.nn.initializers.variance_scaling` where ``scale = 1.0``, 
+  ``mode=&quot;fan_avg&quot;``, and ``distribution=&quot;truncated_normal&quot;``. 
+ 
+  Args: 
+    in_axis: axis or sequence of axes of the input dimension in the weights 
+      array. 
+    out_axis: axis or sequence of axes of the output dimension in the weights 
+      array. 
+    batch_axis: axis or sequence of axes in the weight array that should be 
+      ignored. 
+    dtype: the dtype of the weights. 
+ 
+  Returns: 
+    An initializer. 
+ 
+  Example: 
+ 
+  &gt;&gt;&gt; import jax, jax.numpy as jnp 
+  &gt;&gt;&gt; initializer = jax.nn.initializers.glorot_normal() 
+  &gt;&gt;&gt; initializer(jax.random.PRNGKey(42), (2, 3), jnp.float32)  # doctest: +SKIP 
+  Array([[ 0.41770416,  0.75262755,  0.7619329 ], 
+         [-0.5516644 , -0.6028657 ,  0.08661086]], dtype=float32) 
+ 
+  .. _Glorot normal initializer: http://proceedings.mlr.press/v9/glorot10a.html 
+  &quot;&quot;&quot;</span>
+  <span class="s3">return </span><span class="s1">variance_scaling(</span><span class="s4">1.0</span><span class="s3">, </span><span class="s5">&quot;fan_avg&quot;</span><span class="s3">, </span><span class="s5">&quot;truncated_normal&quot;</span><span class="s3">, </span><span class="s1">in_axis=in_axis</span><span class="s3">,</span>
+                          <span class="s1">out_axis=out_axis</span><span class="s3">, </span><span class="s1">batch_axis=batch_axis</span><span class="s3">, </span><span class="s1">dtype=dtype)</span>
+
+<span class="s1">xavier_normal = glorot_normal</span>
+
+<span class="s3">def </span><span class="s1">lecun_uniform(in_axis: Union[int</span><span class="s3">, </span><span class="s1">Sequence[int]] = -</span><span class="s4">2</span><span class="s3">,</span>
+                  <span class="s1">out_axis: Union[int</span><span class="s3">, </span><span class="s1">Sequence[int]] = -</span><span class="s4">1</span><span class="s3">,</span>
+                  <span class="s1">batch_axis: Sequence[int] = ()</span><span class="s3">,</span>
+                  <span class="s1">dtype: DTypeLikeInexact = jnp.float_) -&gt; Initializer:</span>
+  <span class="s2">&quot;&quot;&quot;Builds a Lecun uniform initializer. 
+ 
+  A `Lecun uniform initializer`_ is a specialization of 
+  :func:`jax.nn.initializers.variance_scaling` where ``scale = 1.0``, 
+  ``mode=&quot;fan_in&quot;``, and ``distribution=&quot;uniform&quot;``. 
+ 
+  Args: 
+    in_axis: axis or sequence of axes of the input dimension in the weights 
+      array. 
+    out_axis: axis or sequence of axes of the output dimension in the weights 
+      array. 
+    batch_axis: axis or sequence of axes in the weight array that should be 
+      ignored. 
+    dtype: the dtype of the weights. 
+ 
+  Returns: 
+    An initializer. 
+ 
+  Example: 
+ 
+  &gt;&gt;&gt; import jax, jax.numpy as jnp 
+  &gt;&gt;&gt; initializer = jax.nn.initializers.lecun_uniform() 
+  &gt;&gt;&gt; initializer(jax.random.PRNGKey(42), (2, 3), jnp.float32)  # doctest: +SKIP 
+  Array([[ 0.56293887,  0.90433645,  0.9119454 ], 
+         [-0.71479625, -0.7676109 ,  0.12302713]], dtype=float32) 
+ 
+  .. _Lecun uniform initializer: https://arxiv.org/abs/1706.02515 
+  &quot;&quot;&quot;</span>
+  <span class="s3">return </span><span class="s1">variance_scaling(</span><span class="s4">1.0</span><span class="s3">, </span><span class="s5">&quot;fan_in&quot;</span><span class="s3">, </span><span class="s5">&quot;uniform&quot;</span><span class="s3">, </span><span class="s1">in_axis=in_axis</span><span class="s3">,</span>
+                          <span class="s1">out_axis=out_axis</span><span class="s3">, </span><span class="s1">batch_axis=batch_axis</span><span class="s3">, </span><span class="s1">dtype=dtype)</span>
+
+<span class="s3">def </span><span class="s1">lecun_normal(in_axis: Union[int</span><span class="s3">, </span><span class="s1">Sequence[int]] = -</span><span class="s4">2</span><span class="s3">,</span>
+                 <span class="s1">out_axis: Union[int</span><span class="s3">, </span><span class="s1">Sequence[int]] = -</span><span class="s4">1</span><span class="s3">,</span>
+                 <span class="s1">batch_axis: Sequence[int] = ()</span><span class="s3">,</span>
+                 <span class="s1">dtype: DTypeLikeInexact = jnp.float_) -&gt; Initializer:</span>
+  <span class="s2">&quot;&quot;&quot;Builds a Lecun normal initializer. 
+ 
+  A `Lecun normal initializer`_ is a specialization of 
+  :func:`jax.nn.initializers.variance_scaling` where ``scale = 1.0``, 
+  ``mode=&quot;fan_in&quot;``, and ``distribution=&quot;truncated_normal&quot;``. 
+ 
+  Args: 
+    in_axis: axis or sequence of axes of the input dimension in the weights 
+      array. 
+    out_axis: axis or sequence of axes of the output dimension in the weights 
+      array. 
+    batch_axis: axis or sequence of axes in the weight array that should be 
+      ignored. 
+    dtype: the dtype of the weights. 
+ 
+  Returns: 
+    An initializer. 
+ 
+  Example: 
+ 
+  &gt;&gt;&gt; import jax, jax.numpy as jnp 
+  &gt;&gt;&gt; initializer = jax.nn.initializers.lecun_normal() 
+  &gt;&gt;&gt; initializer(jax.random.PRNGKey(42), (2, 3), jnp.float32)  # doctest: +SKIP 
+  Array([[ 0.46700746,  0.8414632 ,  0.8518669 ], 
+         [-0.61677957, -0.67402434,  0.09683388]], dtype=float32) 
+ 
+  .. _Lecun normal initializer: https://arxiv.org/abs/1706.02515 
+  &quot;&quot;&quot;</span>
+  <span class="s3">return </span><span class="s1">variance_scaling(</span><span class="s4">1.0</span><span class="s3">, </span><span class="s5">&quot;fan_in&quot;</span><span class="s3">, </span><span class="s5">&quot;truncated_normal&quot;</span><span class="s3">, </span><span class="s1">in_axis=in_axis</span><span class="s3">,</span>
+                          <span class="s1">out_axis=out_axis</span><span class="s3">, </span><span class="s1">batch_axis=batch_axis</span><span class="s3">, </span><span class="s1">dtype=dtype)</span>
+
+
+<span class="s3">def </span><span class="s1">he_uniform(in_axis: Union[int</span><span class="s3">, </span><span class="s1">Sequence[int]] = -</span><span class="s4">2</span><span class="s3">,</span>
+               <span class="s1">out_axis: Union[int</span><span class="s3">, </span><span class="s1">Sequence[int]] = -</span><span class="s4">1</span><span class="s3">,</span>
+               <span class="s1">batch_axis: Sequence[int] = ()</span><span class="s3">,</span>
+               <span class="s1">dtype: DTypeLikeInexact = jnp.float_) -&gt; Initializer:</span>
+  <span class="s2">&quot;&quot;&quot;Builds a He uniform initializer (aka Kaiming uniform initializer). 
+ 
+  A `He uniform initializer`_ is a specialization of 
+  :func:`jax.nn.initializers.variance_scaling` where ``scale = 2.0``, 
+  ``mode=&quot;fan_in&quot;``, and ``distribution=&quot;uniform&quot;``. 
+ 
+  Args: 
+    in_axis: axis or sequence of axes of the input dimension in the weights 
+      array. 
+    out_axis: axis or sequence of axes of the output dimension in the weights 
+      array. 
+    batch_axis: axis or sequence of axes in the weight array that should be 
+      ignored. 
+    dtype: the dtype of the weights. 
+ 
+  Returns: 
+    An initializer. 
+ 
+  Example: 
+ 
+  &gt;&gt;&gt; import jax, jax.numpy as jnp 
+  &gt;&gt;&gt; initializer = jax.nn.initializers.kaiming_uniform() 
+  &gt;&gt;&gt; initializer(jax.random.PRNGKey(42), (2, 3), jnp.float32)  # doctest: +SKIP 
+  Array([[ 0.79611576,  1.2789248 ,  1.2896855 ], 
+         [-1.0108745 , -1.0855657 ,  0.17398663]], dtype=float32) 
+ 
+  .. _He uniform initializer: https://arxiv.org/abs/1502.01852 
+  &quot;&quot;&quot;</span>
+  <span class="s3">return </span><span class="s1">variance_scaling(</span><span class="s4">2.0</span><span class="s3">, </span><span class="s5">&quot;fan_in&quot;</span><span class="s3">, </span><span class="s5">&quot;uniform&quot;</span><span class="s3">, </span><span class="s1">in_axis=in_axis</span><span class="s3">,</span>
+                          <span class="s1">out_axis=out_axis</span><span class="s3">, </span><span class="s1">batch_axis=batch_axis</span><span class="s3">, </span><span class="s1">dtype=dtype)</span>
+
+<span class="s1">kaiming_uniform = he_uniform</span>
+
+
+<span class="s3">def </span><span class="s1">he_normal(in_axis: Union[int</span><span class="s3">, </span><span class="s1">Sequence[int]] = -</span><span class="s4">2</span><span class="s3">,</span>
+              <span class="s1">out_axis: Union[int</span><span class="s3">, </span><span class="s1">Sequence[int]] = -</span><span class="s4">1</span><span class="s3">,</span>
+              <span class="s1">batch_axis: Sequence[int] = ()</span><span class="s3">,</span>
+              <span class="s1">dtype: DTypeLikeInexact = jnp.float_) -&gt; Initializer:</span>
+  <span class="s2">&quot;&quot;&quot;Builds a He normal initializer (aka Kaiming normal initializer). 
+ 
+  A `He normal initializer`_ is a specialization of 
+  :func:`jax.nn.initializers.variance_scaling` where ``scale = 2.0``, 
+  ``mode=&quot;fan_in&quot;``, and ``distribution=&quot;truncated_normal&quot;``. 
+ 
+  Args: 
+    in_axis: axis or sequence of axes of the input dimension in the weights 
+      array. 
+    out_axis: axis or sequence of axes of the output dimension in the weights 
+      array. 
+    batch_axis: axis or sequence of axes in the weight array that should be 
+      ignored. 
+    dtype: the dtype of the weights. 
+ 
+  Returns: 
+    An initializer. 
+ 
+  Example: 
+ 
+  &gt;&gt;&gt; import jax, jax.numpy as jnp 
+  &gt;&gt;&gt; initializer = jax.nn.initializers.kaiming_normal() 
+  &gt;&gt;&gt; initializer(jax.random.PRNGKey(42), (2, 3), jnp.float32)  # doctest: +SKIP 
+  Array([[ 0.6604483 ,  1.1900088 ,  1.2047218 ], 
+         [-0.87225807, -0.95321447,  0.1369438 ]], dtype=float32) 
+ 
+  .. _He normal initializer: https://arxiv.org/abs/1502.01852 
+  &quot;&quot;&quot;</span>
+  <span class="s3">return </span><span class="s1">variance_scaling(</span><span class="s4">2.0</span><span class="s3">, </span><span class="s5">&quot;fan_in&quot;</span><span class="s3">, </span><span class="s5">&quot;truncated_normal&quot;</span><span class="s3">, </span><span class="s1">in_axis=in_axis</span><span class="s3">,</span>
+                          <span class="s1">out_axis=out_axis</span><span class="s3">, </span><span class="s1">batch_axis=batch_axis</span><span class="s3">, </span><span class="s1">dtype=dtype)</span>
+
+<span class="s1">kaiming_normal = he_normal</span>
+
+
+<span class="s3">def </span><span class="s1">orthogonal(scale: RealNumeric = </span><span class="s4">1.0</span><span class="s3">,</span>
+               <span class="s1">column_axis: int = -</span><span class="s4">1</span><span class="s3">,</span>
+               <span class="s1">dtype: DTypeLikeInexact = jnp.float_) -&gt; Initializer:</span>
+  <span class="s2">&quot;&quot;&quot; 
+  Builds an initializer that returns uniformly distributed orthogonal matrices. 
+ 
+  If the shape is not square, the matrices will have orthonormal rows or columns 
+  depending on which side is smaller. 
+ 
+  Args: 
+    scale: the upper bound of the uniform distribution. 
+    column_axis: the axis that contains the columns that should be orthogonal. 
+    dtype: the default dtype of the weights. 
+ 
+  Returns: 
+    An orthogonal initializer. 
+ 
+  Example: 
+ 
+  &gt;&gt;&gt; import jax, jax.numpy as jnp 
+  &gt;&gt;&gt; initializer = jax.nn.initializers.orthogonal() 
+  &gt;&gt;&gt; initializer(jax.random.PRNGKey(42), (2, 3), jnp.float32)  # doctest: +SKIP 
+  Array([[ 3.9026976e-01,  7.2495741e-01, -5.6756169e-01], 
+         [ 8.8047469e-01, -4.7409311e-01, -1.3157725e-04]],            dtype=float32) 
+  &quot;&quot;&quot;</span>
+  <span class="s3">def </span><span class="s1">init(key: KeyArray</span><span class="s3">,</span>
+           <span class="s1">shape: core.Shape</span><span class="s3">,</span>
+           <span class="s1">dtype: DTypeLikeInexact = dtype) -&gt; Array:</span>
+    <span class="s1">dtype = dtypes.canonicalize_dtype(dtype)</span>
+    <span class="s3">if </span><span class="s1">len(shape) &lt; </span><span class="s4">2</span><span class="s1">:</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s5">&quot;orthogonal initializer requires at least a 2D shape&quot;</span><span class="s1">)</span>
+    <span class="s1">n_rows</span><span class="s3">, </span><span class="s1">n_cols = math.prod(shape) // shape[column_axis]</span><span class="s3">, </span><span class="s1">shape[column_axis]</span>
+    <span class="s1">matrix_shape = (n_cols</span><span class="s3">, </span><span class="s1">n_rows) </span><span class="s3">if </span><span class="s1">n_rows &lt; n_cols </span><span class="s3">else </span><span class="s1">(n_rows</span><span class="s3">, </span><span class="s1">n_cols)</span>
+    <span class="s1">A = random.normal(key</span><span class="s3">, </span><span class="s1">matrix_shape</span><span class="s3">, </span><span class="s1">dtype)</span>
+    <span class="s1">Q</span><span class="s3">, </span><span class="s1">R = jnp.linalg.qr(A)</span>
+    <span class="s1">diag_sign = lax.broadcast_to_rank(jnp.sign(jnp.diag(R))</span><span class="s3">, </span><span class="s1">rank=Q.ndim)</span>
+    <span class="s1">Q *= diag_sign </span><span class="s0"># needed for a uniform distribution</span>
+    <span class="s3">if </span><span class="s1">n_rows &lt; n_cols: Q = Q.T</span>
+    <span class="s1">Q = jnp.reshape(Q</span><span class="s3">, </span><span class="s1">tuple(np.delete(shape</span><span class="s3">, </span><span class="s1">column_axis)) + (shape[column_axis]</span><span class="s3">,</span><span class="s1">))</span>
+    <span class="s1">Q = jnp.moveaxis(Q</span><span class="s3">, </span><span class="s1">-</span><span class="s4">1</span><span class="s3">, </span><span class="s1">column_axis)</span>
+    <span class="s3">return </span><span class="s1">scale * Q</span>
+  <span class="s3">return </span><span class="s1">init</span>
+
+
+<span class="s3">def </span><span class="s1">delta_orthogonal(</span>
+  <span class="s1">scale: RealNumeric = </span><span class="s4">1.0</span><span class="s3">,</span>
+  <span class="s1">column_axis: int = -</span><span class="s4">1</span><span class="s3">,</span>
+  <span class="s1">dtype: DTypeLikeInexact = jnp.float_) -&gt; Initializer:</span>
+  <span class="s2">&quot;&quot;&quot; 
+  Builds an initializer for delta orthogonal kernels. 
+ 
+  Args: 
+    scale: the upper bound of the uniform distribution. 
+    column_axis: the axis that contains the columns that should be orthogonal. 
+    dtype: the default dtype of the weights. 
+ 
+  Returns: 
+    A `delta orthogonal initializer`_. The shape passed to the initializer must 
+    be 3D, 4D, or 5D. 
+ 
+  Example: 
+ 
+  &gt;&gt;&gt; import jax, jax.numpy as jnp 
+  &gt;&gt;&gt; initializer = jax.nn.initializers.delta_orthogonal() 
+  &gt;&gt;&gt; initializer(jax.random.PRNGKey(42), (3, 3, 3), jnp.float32)  # doctest: +SKIP 
+  Array([[[ 0.        ,  0.        ,  0.        ], 
+          [ 0.        ,  0.        ,  0.        ], 
+          [ 0.        ,  0.        ,  0.        ]], 
+  &lt;BLANKLINE&gt; 
+         [[ 0.27858758, -0.7949833 , -0.53887904], 
+          [ 0.9120717 ,  0.04322892,  0.40774566], 
+          [-0.30085585, -0.6050892 ,  0.73712474]], 
+  &lt;BLANKLINE&gt; 
+         [[ 0.        ,  0.        ,  0.        ], 
+          [ 0.        ,  0.        ,  0.        ], 
+          [ 0.        ,  0.        ,  0.        ]]], dtype=float32) 
+ 
+ 
+  .. _delta orthogonal initializer: https://arxiv.org/abs/1806.05393 
+  &quot;&quot;&quot;</span>
+  <span class="s3">def </span><span class="s1">init(key: KeyArray</span><span class="s3">,</span>
+           <span class="s1">shape: core.Shape</span><span class="s3">,</span>
+           <span class="s1">dtype: DTypeLikeInexact = dtype) -&gt; Array:</span>
+    <span class="s1">dtype = dtypes.canonicalize_dtype(dtype)</span>
+    <span class="s3">if </span><span class="s1">len(shape) </span><span class="s3">not in </span><span class="s1">[</span><span class="s4">3</span><span class="s3">, </span><span class="s4">4</span><span class="s3">, </span><span class="s4">5</span><span class="s1">]:</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s5">&quot;Delta orthogonal initializer requires a 3D, 4D or 5D &quot;</span>
+                       <span class="s5">&quot;shape.&quot;</span><span class="s1">)</span>
+    <span class="s3">if </span><span class="s1">shape[-</span><span class="s4">1</span><span class="s1">] &lt; shape[-</span><span class="s4">2</span><span class="s1">]:</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s5">&quot;`fan_in` must be less or equal than `fan_out`. &quot;</span><span class="s1">)</span>
+    <span class="s1">ortho_init = orthogonal(scale=scale</span><span class="s3">, </span><span class="s1">column_axis=column_axis</span><span class="s3">, </span><span class="s1">dtype=dtype)</span>
+    <span class="s1">ortho_matrix = ortho_init(key</span><span class="s3">, </span><span class="s1">shape[-</span><span class="s4">2</span><span class="s1">:])</span>
+    <span class="s1">W = jnp.zeros(shape</span><span class="s3">, </span><span class="s1">dtype=dtype)</span>
+    <span class="s3">if </span><span class="s1">len(shape) == </span><span class="s4">3</span><span class="s1">:</span>
+      <span class="s1">k = shape[</span><span class="s4">0</span><span class="s1">]</span>
+      <span class="s3">return </span><span class="s1">W.at[(k-</span><span class="s4">1</span><span class="s1">)//</span><span class="s4">2</span><span class="s3">, </span><span class="s1">...].set(ortho_matrix)</span>
+    <span class="s3">elif </span><span class="s1">len(shape) == </span><span class="s4">4</span><span class="s1">:</span>
+      <span class="s1">k1</span><span class="s3">, </span><span class="s1">k2 = shape[:</span><span class="s4">2</span><span class="s1">]</span>
+      <span class="s3">return </span><span class="s1">W.at[(k1-</span><span class="s4">1</span><span class="s1">)//</span><span class="s4">2</span><span class="s3">, </span><span class="s1">(k2-</span><span class="s4">1</span><span class="s1">)//</span><span class="s4">2</span><span class="s3">, </span><span class="s1">...].set(ortho_matrix)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s1">k1</span><span class="s3">, </span><span class="s1">k2</span><span class="s3">, </span><span class="s1">k3 = shape[:</span><span class="s4">3</span><span class="s1">]</span>
+      <span class="s3">return </span><span class="s1">W.at[(k1-</span><span class="s4">1</span><span class="s1">)//</span><span class="s4">2</span><span class="s3">, </span><span class="s1">(k2-</span><span class="s4">1</span><span class="s1">)//</span><span class="s4">2</span><span class="s3">, </span><span class="s1">(k3-</span><span class="s4">1</span><span class="s1">)//</span><span class="s4">2</span><span class="s3">, </span><span class="s1">...].set(ortho_matrix)</span>
+  <span class="s3">return </span><span class="s1">init</span>
+</pre>
+</body>
+</html>

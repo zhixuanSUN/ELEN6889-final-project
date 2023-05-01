@@ -1,0 +1,164 @@
+<html>
+<head>
+<title>common.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+common.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2022 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+<span class="s2">&quot;&quot;&quot;Module for the common control flow utilities.&quot;&quot;&quot;</span>
+<span class="s3">import </span><span class="s1">os</span>
+<span class="s3">from </span><span class="s1">functools </span><span class="s3">import </span><span class="s1">partial</span>
+
+<span class="s3">from </span><span class="s1">typing </span><span class="s3">import </span><span class="s1">Callable</span><span class="s3">, </span><span class="s1">Optional</span><span class="s3">, </span><span class="s1">Sequence</span>
+
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">core</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">linear_util </span><span class="s3">as </span><span class="s1">lu</span>
+<span class="s3">from </span><span class="s1">jax._src.lax </span><span class="s3">import </span><span class="s1">lax</span>
+<span class="s3">from </span><span class="s1">jax._src.effects </span><span class="s3">import </span><span class="s1">control_flow_allowed_effects </span><span class="s3">as </span><span class="s1">allowed_effects</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">ad_util</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">util</span>
+<span class="s3">from </span><span class="s1">jax._src.util </span><span class="s3">import </span><span class="s1">cache</span><span class="s3">, </span><span class="s1">weakref_lru_cache</span><span class="s3">, </span><span class="s1">safe_map</span><span class="s3">, </span><span class="s1">unzip3</span>
+<span class="s3">from </span><span class="s1">jax.api_util </span><span class="s3">import </span><span class="s1">flatten_fun_nokwargs</span>
+<span class="s3">from </span><span class="s1">jax._src.interpreters </span><span class="s3">import </span><span class="s1">partial_eval </span><span class="s3">as </span><span class="s1">pe</span>
+<span class="s3">from </span><span class="s1">jax.tree_util </span><span class="s3">import </span><span class="s1">tree_map</span><span class="s3">, </span><span class="s1">tree_unflatten</span>
+
+<span class="s1">map</span><span class="s3">, </span><span class="s1">unsafe_map = safe_map</span><span class="s3">, </span><span class="s1">map</span>
+
+<span class="s1">allowed_effects.add_type(lax.InOutFeedEffect)</span>
+
+
+<span class="s3">def </span><span class="s1">_abstractify(x):</span>
+  <span class="s3">return </span><span class="s1">core.raise_to_shaped(core.get_aval(x))</span>
+
+<span class="s3">def </span><span class="s1">_typecheck_param(prim</span><span class="s3">, </span><span class="s1">param</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">msg_required</span><span class="s3">, </span><span class="s1">pred):</span>
+  <span class="s3">if not </span><span class="s1">pred:</span>
+    <span class="s1">msg = (</span><span class="s4">f'invalid </span><span class="s3">{</span><span class="s1">prim</span><span class="s3">} </span><span class="s4">param </span><span class="s3">{</span><span class="s1">name</span><span class="s3">} </span><span class="s4">of type </span><span class="s3">{</span><span class="s1">type(param).__name__</span><span class="s3">}</span><span class="s4">, '</span>
+           <span class="s4">f'</span><span class="s3">{</span><span class="s1">msg_required</span><span class="s3">} </span><span class="s4">required:'</span><span class="s1">)</span>
+    <span class="s1">param_str = str(param)</span>
+    <span class="s1">sep = os.linesep </span><span class="s3">if </span><span class="s1">os.linesep </span><span class="s3">in </span><span class="s1">param_str </span><span class="s3">else </span><span class="s4">' '</span>
+    <span class="s1">msg = sep.join([msg</span><span class="s3">, </span><span class="s1">param_str])</span>
+    <span class="s3">raise </span><span class="s1">core.JaxprTypeError(msg)</span>
+
+<span class="s1">@weakref_lru_cache</span>
+<span class="s3">def </span><span class="s1">_initial_style_open_jaxpr(fun: Callable</span><span class="s3">, </span><span class="s1">in_tree</span><span class="s3">, </span><span class="s1">in_avals</span><span class="s3">,</span>
+                              <span class="s1">primitive_name: Optional[str] = </span><span class="s3">None</span><span class="s1">):</span>
+  <span class="s1">wrapped_fun</span><span class="s3">, </span><span class="s1">out_tree = flatten_fun_nokwargs(lu.wrap_init(fun)</span><span class="s3">, </span><span class="s1">in_tree)</span>
+  <span class="s1">debug = pe.debug_info(fun</span><span class="s3">, </span><span class="s1">in_tree</span><span class="s3">, </span><span class="s1">out_tree</span><span class="s3">, False,</span>
+                        <span class="s1">primitive_name </span><span class="s3">or </span><span class="s4">&quot;&lt;unknown&gt;&quot;</span><span class="s1">)</span>
+  <span class="s1">jaxpr</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">consts = pe.trace_to_jaxpr_dynamic(wrapped_fun</span><span class="s3">, </span><span class="s1">in_avals</span><span class="s3">, </span><span class="s1">debug)</span>
+  <span class="s3">return </span><span class="s1">jaxpr</span><span class="s3">, </span><span class="s1">consts</span><span class="s3">, </span><span class="s1">out_tree()</span>
+
+<span class="s1">@weakref_lru_cache</span>
+<span class="s3">def </span><span class="s1">_initial_style_jaxpr(fun: Callable</span><span class="s3">, </span><span class="s1">in_tree</span><span class="s3">, </span><span class="s1">in_avals</span><span class="s3">,</span>
+                         <span class="s1">primitive_name: Optional[str] = </span><span class="s3">None</span><span class="s1">):</span>
+  <span class="s1">jaxpr</span><span class="s3">, </span><span class="s1">consts</span><span class="s3">, </span><span class="s1">out_tree = _initial_style_open_jaxpr(</span>
+      <span class="s1">fun</span><span class="s3">, </span><span class="s1">in_tree</span><span class="s3">, </span><span class="s1">in_avals</span><span class="s3">, </span><span class="s1">primitive_name)</span>
+  <span class="s1">closed_jaxpr = core.ClosedJaxpr(pe.convert_constvars_jaxpr(jaxpr)</span><span class="s3">, </span><span class="s1">())</span>
+  <span class="s3">return </span><span class="s1">closed_jaxpr</span><span class="s3">, </span><span class="s1">consts</span><span class="s3">, </span><span class="s1">out_tree</span>
+
+<span class="s1">@cache()</span>
+<span class="s3">def </span><span class="s1">_initial_style_jaxprs_with_common_consts(</span>
+    <span class="s1">funs: Sequence[Callable]</span><span class="s3">, </span><span class="s1">in_tree</span><span class="s3">, </span><span class="s1">in_avals</span><span class="s3">, </span><span class="s1">primitive_name: str):</span>
+  <span class="s0"># When staging the branches of a conditional into jaxprs, constants are</span>
+  <span class="s0"># extracted from each branch and converted to jaxpr arguments. To use the</span>
+  <span class="s0"># staged jaxprs as the branches to a conditional *primitive*, we need for</span>
+  <span class="s0"># their (input) signatures to match. This function &quot;joins&quot; the staged jaxprs:</span>
+  <span class="s0"># for each one, it makes another that accepts *all* constants, but only uses</span>
+  <span class="s0"># those that it needs (dropping the rest).</span>
+
+  <span class="s1">jaxprs</span><span class="s3">, </span><span class="s1">all_consts</span><span class="s3">, </span><span class="s1">all_out_trees = \</span>
+      <span class="s1">unzip3(_initial_style_open_jaxpr(fun</span><span class="s3">, </span><span class="s1">in_tree</span><span class="s3">, </span><span class="s1">in_avals</span><span class="s3">, </span><span class="s1">primitive_name)</span>
+             <span class="s3">for </span><span class="s1">fun </span><span class="s3">in </span><span class="s1">funs)</span>
+
+  <span class="s1">newvar = core.gensym(jaxprs</span><span class="s3">, </span><span class="s1">suffix=</span><span class="s4">'_'</span><span class="s1">)</span>
+  <span class="s1">all_const_avals = [map(_abstractify</span><span class="s3">, </span><span class="s1">consts) </span><span class="s3">for </span><span class="s1">consts </span><span class="s3">in </span><span class="s1">all_consts]</span>
+  <span class="s1">unused_const_vars = [map(newvar</span><span class="s3">, </span><span class="s1">const_avals)</span>
+                       <span class="s3">for </span><span class="s1">const_avals </span><span class="s3">in </span><span class="s1">all_const_avals]</span>
+  <span class="s3">def </span><span class="s1">pad_jaxpr_constvars(i</span><span class="s3">, </span><span class="s1">jaxpr):</span>
+    <span class="s1">prefix = util.concatenate(unused_const_vars[:i])</span>
+    <span class="s1">suffix = util.concatenate(unused_const_vars[i + </span><span class="s5">1</span><span class="s1">:])</span>
+    <span class="s1">constvars = [*prefix</span><span class="s3">, </span><span class="s1">*jaxpr.constvars</span><span class="s3">, </span><span class="s1">*suffix]</span>
+    <span class="s3">return </span><span class="s1">jaxpr.replace(constvars=constvars)</span>
+
+  <span class="s1">consts = util.concatenate(all_consts)</span>
+  <span class="s1">jaxprs = tuple(pad_jaxpr_constvars(i</span><span class="s3">, </span><span class="s1">jaxpr) </span><span class="s3">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">jaxpr </span><span class="s3">in </span><span class="s1">enumerate(jaxprs))</span>
+  <span class="s1">closed_jaxprs = [core.ClosedJaxpr(pe.convert_constvars_jaxpr(jaxpr)</span><span class="s3">, </span><span class="s1">())</span>
+                   <span class="s3">for </span><span class="s1">jaxpr </span><span class="s3">in </span><span class="s1">jaxprs]</span>
+  <span class="s3">return </span><span class="s1">closed_jaxprs</span><span class="s3">, </span><span class="s1">consts</span><span class="s3">, </span><span class="s1">all_out_trees</span>
+
+<span class="s3">def </span><span class="s1">_check_tree_and_avals(what</span><span class="s3">, </span><span class="s1">tree1</span><span class="s3">, </span><span class="s1">avals1</span><span class="s3">, </span><span class="s1">tree2</span><span class="s3">, </span><span class="s1">avals2):</span>
+  <span class="s2">&quot;&quot;&quot;Raises TypeError if (tree1, avals1) does not match (tree2, avals2). 
+ 
+  Corresponding `tree` and `avals` must match in the sense that the number of 
+  leaves in `tree` must be equal to the length of `avals`. `what` will be 
+  prepended to details of the mismatch in TypeError. 
+  &quot;&quot;&quot;</span>
+  <span class="s3">if </span><span class="s1">tree1 != tree2:</span>
+    <span class="s3">raise </span><span class="s1">TypeError(</span>
+        <span class="s4">f&quot;</span><span class="s3">{</span><span class="s1">what</span><span class="s3">} </span><span class="s4">must have same type structure, got </span><span class="s3">{</span><span class="s1">tree1</span><span class="s3">} </span><span class="s4">and </span><span class="s3">{</span><span class="s1">tree2</span><span class="s3">}</span><span class="s4">.&quot;</span><span class="s1">)</span>
+  <span class="s3">if not </span><span class="s1">all(map(core.typematch</span><span class="s3">, </span><span class="s1">avals1</span><span class="s3">, </span><span class="s1">avals2)):</span>
+    <span class="s1">diff = tree_map(_show_diff</span><span class="s3">, </span><span class="s1">tree_unflatten(tree1</span><span class="s3">, </span><span class="s1">avals1)</span><span class="s3">,</span>
+                    <span class="s1">tree_unflatten(tree2</span><span class="s3">, </span><span class="s1">avals2))</span>
+    <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s4">f&quot;</span><span class="s3">{</span><span class="s1">what</span><span class="s3">} </span><span class="s4">must have identical types, got</span><span class="s3">\n{</span><span class="s1">diff</span><span class="s3">}</span><span class="s4">.&quot;</span><span class="s1">)</span>
+
+<span class="s3">def </span><span class="s1">_check_tree(func_name</span><span class="s3">, </span><span class="s1">expected_name</span><span class="s3">, </span><span class="s1">actual_tree</span><span class="s3">, </span><span class="s1">expected_tree</span><span class="s3">, </span><span class="s1">has_aux=</span><span class="s3">False</span><span class="s1">):</span>
+  <span class="s3">if </span><span class="s1">has_aux:</span>
+    <span class="s1">actual_tree_children = actual_tree.children()</span>
+
+    <span class="s3">if </span><span class="s1">len(actual_tree_children) == </span><span class="s5">2</span><span class="s1">:</span>
+      <span class="s0"># select first child as result tree</span>
+      <span class="s1">actual_tree = actual_tree_children[</span><span class="s5">0</span><span class="s1">]</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span>
+        <span class="s4">f&quot;</span><span class="s3">{</span><span class="s1">func_name</span><span class="s3">}</span><span class="s4">() produced a pytree with structure &quot;</span>
+        <span class="s4">f&quot;</span><span class="s3">{</span><span class="s1">actual_tree</span><span class="s3">}</span><span class="s4">, but a pytree tuple with auxiliary &quot;</span>
+        <span class="s4">f&quot;output was expected because has_aux was set to True.&quot;</span><span class="s1">)</span>
+
+  <span class="s3">if </span><span class="s1">actual_tree != expected_tree:</span>
+    <span class="s3">raise </span><span class="s1">TypeError(</span>
+        <span class="s4">f&quot;</span><span class="s3">{</span><span class="s1">func_name</span><span class="s3">}</span><span class="s4">() output pytree structure must match </span><span class="s3">{</span><span class="s1">expected_name</span><span class="s3">}</span><span class="s4">, &quot;</span>
+        <span class="s4">f&quot;got </span><span class="s3">{</span><span class="s1">actual_tree</span><span class="s3">} </span><span class="s4">and </span><span class="s3">{</span><span class="s1">expected_tree</span><span class="s3">}</span><span class="s4">.&quot;</span><span class="s1">)</span>
+
+<span class="s3">def </span><span class="s1">_prune_zeros(ts):</span>
+  <span class="s3">return </span><span class="s1">[t </span><span class="s3">for </span><span class="s1">t </span><span class="s3">in </span><span class="s1">ts </span><span class="s3">if </span><span class="s1">type(t) </span><span class="s3">is not </span><span class="s1">ad_util.Zero]</span>
+
+<span class="s3">def </span><span class="s1">_make_closed_jaxpr(traceable: lu.WrappedFun</span><span class="s3">, </span><span class="s1">in_avals: Sequence[core.AbstractValue]):</span>
+  <span class="s1">jaxpr</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">consts = pe.trace_to_jaxpr_dynamic(traceable</span><span class="s3">, </span><span class="s1">in_avals)</span>
+  <span class="s3">return </span><span class="s1">core.ClosedJaxpr(jaxpr</span><span class="s3">, </span><span class="s1">consts)</span>
+
+<span class="s3">def </span><span class="s1">_show_diff(array1</span><span class="s3">, </span><span class="s1">array2):</span>
+  <span class="s3">if </span><span class="s1">core.typematch(array1</span><span class="s3">, </span><span class="s1">array2):</span>
+    <span class="s3">return </span><span class="s4">f&quot;</span><span class="s3">{</span><span class="s1">array1</span><span class="s3">}</span><span class="s4">&quot;</span>
+  <span class="s3">return </span><span class="s4">f&quot;DIFFERENT </span><span class="s3">{</span><span class="s1">array1</span><span class="s3">} </span><span class="s4">vs. </span><span class="s3">{</span><span class="s1">array2</span><span class="s3">}</span><span class="s4">&quot;</span>
+
+<span class="s3">def </span><span class="s1">_avals_short(avals):</span>
+  <span class="s1">to_str = </span><span class="s3">lambda </span><span class="s1">aval: getattr(aval</span><span class="s3">, </span><span class="s4">'str_short'</span><span class="s3">, </span><span class="s1">partial(str</span><span class="s3">, </span><span class="s1">aval))()</span>
+  <span class="s3">return </span><span class="s4">' '</span><span class="s1">.join(map(to_str</span><span class="s3">, </span><span class="s1">avals))</span>
+</pre>
+</body>
+</html>

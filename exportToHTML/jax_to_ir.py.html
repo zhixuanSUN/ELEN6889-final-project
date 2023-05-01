@@ -1,0 +1,271 @@
+<html>
+<head>
+<title>jax_to_ir.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+jax_to_ir.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2019 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s2">r&quot;&quot;&quot;Tool to convert a JAX function to serialized representations. 
+ 
+This script is meant to be used as part of a genrule that converts a JAX program 
+into an IR that can be consumed by another system (e.g. a compiler). 
+ 
+Convert to HLO 
+============== 
+ 
+For example, you can generate an HLO proto for the XLA compiler. The HLO proto 
+represents an XLA program, and can be run from e.g. a C++ program, without 
+involving any Python. 
+ 
+This lets you use JAX as a convenient frontend for writing &quot;XLA programs&quot;.  From 
+another perspective, this script lets you make JAX into an ahead-of-time JAX -&gt; 
+XLA compiler, although when you run the XLA program, it will still be compiled 
+just-in-time. 
+ 
+See tensorflow/compiler/xla/service/hlo_runner.h. 
+ 
+Usage: 
+ 
+  $ cat prog.py 
+  import jax.numpy as jnp 
+ 
+  def fn(x, y, z): 
+    return jnp.dot(x, y) / z 
+ 
+  $ python jax_to_ir.py \ 
+    --fn prog.fn \ 
+    --input_shapes '[(&quot;y&quot;, &quot;f32[128,32]&quot;), (&quot;x&quot;, &quot;f32[8,128]&quot;)]' \ 
+    --constants '{&quot;z&quot;: 3.14159}' \ 
+    --ir_format HLO \ 
+    --ir_human_dest /tmp/fn_hlo.txt \ 
+    --ir_dest /tmp/fn_hlo.pb 
+ 
+Alternatively, you can use this script via a genrule.  This way bazel will 
+generate the hlo text/proto as part of compilation, and then e.g. a C++ program 
+can depend on this.  See jax_to_hlo macro in build_defs.bzl. 
+ 
+The order of elements in input_shapes determines the order of parameters in the 
+resulting HLO program. 
+ 
+Values of `constants` which are lists are converted to Numpy arrays using 
+jnp.asarray.  In addition, you can specify constants using the flag 
+--evaled_constants; values there that are strings are first evaluated using 
+ast.literal_eval.  --evaled_constants is primarily useful for genrules; Skylark 
+doesn't support floating-point types, so genrules need to deal in strings. 
+ 
+Note that XLA's backwards-compatibility guarantees for saved HLO are currently 
+(2019-06-13) best-effort.  It will mostly work, but it will occasionally break, 
+and the XLA team won't (and in fact will be unable to) help.  One way to be sure 
+it won't break is to use the same version of XLA to build the HLO as you use to 
+run it.  The genrule above makes this easy. 
+&quot;&quot;&quot;</span>
+
+<span class="s3">from </span><span class="s1">ast </span><span class="s3">import </span><span class="s1">literal_eval</span>
+<span class="s3">import </span><span class="s1">importlib</span>
+<span class="s3">import </span><span class="s1">functools</span>
+<span class="s3">import </span><span class="s1">re</span>
+
+<span class="s3">from </span><span class="s1">absl </span><span class="s3">import </span><span class="s1">app</span>
+<span class="s3">from </span><span class="s1">absl </span><span class="s3">import </span><span class="s1">flags</span>
+<span class="s3">import </span><span class="s1">jax</span>
+<span class="s3">import </span><span class="s1">jax.numpy </span><span class="s3">as </span><span class="s1">jnp</span>
+
+<span class="s3">try</span><span class="s1">:</span>
+  <span class="s3">from </span><span class="s1">jax.experimental </span><span class="s3">import </span><span class="s1">jax2tf</span>
+<span class="s3">except </span><span class="s1">ImportError:</span>
+  <span class="s1">jax2tf = </span><span class="s3">None  </span><span class="s0"># type: ignore[assignment]</span>
+
+<span class="s3">try</span><span class="s1">:</span>
+  <span class="s3">import </span><span class="s1">tensorflow </span><span class="s3">as </span><span class="s1">tf</span>
+<span class="s3">except </span><span class="s1">ImportError:</span>
+  <span class="s1">tf = </span><span class="s3">None  </span><span class="s0"># type: ignore</span>
+
+<span class="s1">FLAGS = flags.FLAGS</span>
+
+
+<span class="s3">def </span><span class="s1">jax_to_ir(fn</span><span class="s3">, </span><span class="s1">input_shapes</span><span class="s3">, </span><span class="s1">*</span><span class="s3">, </span><span class="s1">constants=</span><span class="s3">None, </span><span class="s1">format):</span>
+  <span class="s2">&quot;&quot;&quot;Converts a JAX function to a serialized ir and a debug txt dump. 
+ 
+  Args: 
+    fn: Function to convert. 
+    input_shapes: List of tuples (arg name, jax.core.ShapedArray), 
+      indicating the shapes of the arguments to fn.  The order of parameters in 
+      the resulting XLA program will match the order in this list. 
+    constants: Dict mapping function argument name to a Python value.  Specified 
+      arguments these values as compile-time constants. 
+    format: Which IR format to use. Supported values are 'HLO' and 'TF'. 
+ 
+  Returns: 
+    A tuple of (compiler_suitable_ir, human_readable_ir). 
+  &quot;&quot;&quot;</span>
+  <span class="s3">if not </span><span class="s1">constants:</span>
+    <span class="s1">constants = {}</span>
+
+  <span class="s1">overlapping_args = {arg_name </span><span class="s3">for </span><span class="s1">arg_name</span><span class="s3">, </span><span class="s1">_ </span><span class="s3">in </span><span class="s1">input_shapes} &amp; set(</span>
+      <span class="s1">constants.keys())</span>
+  <span class="s3">if </span><span class="s1">overlapping_args:</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span>
+        <span class="s4">'Arguments appear in both `input_shapes` and `constants`: %s' </span><span class="s1">%</span>
+        <span class="s4">', '</span><span class="s1">.join(sorted(overlapping_args)))</span>
+
+  <span class="s0"># TODO(tomhennigan): Ideally we could avoid creating actual values here.</span>
+  <span class="s1">args = [jnp.zeros(s.shape</span><span class="s3">, </span><span class="s1">s.dtype) </span><span class="s3">for </span><span class="s1">_</span><span class="s3">, </span><span class="s1">s </span><span class="s3">in </span><span class="s1">input_shapes]</span>
+
+  <span class="s0"># Curry `constants` into the function.</span>
+  <span class="s1">fn_curried = functools.partial(fn</span><span class="s3">, </span><span class="s1">**constants)</span>
+
+  <span class="s0"># Wrapper that takes in args in the order of `input_shapes` and converts them</span>
+  <span class="s0"># to kwargs for calling `fn`.</span>
+  <span class="s3">def </span><span class="s1">ordered_wrapper(*args):</span>
+    <span class="s1">arg_names = [arg_name </span><span class="s3">for </span><span class="s1">arg_name</span><span class="s3">, </span><span class="s1">_ </span><span class="s3">in </span><span class="s1">input_shapes]</span>
+    <span class="s3">return </span><span class="s1">fn_curried(**dict(zip(arg_names</span><span class="s3">, </span><span class="s1">args)))</span>
+
+  <span class="s3">if </span><span class="s1">format == </span><span class="s4">'HLO'</span><span class="s1">:</span>
+    <span class="s1">comp = jax.xla_computation(ordered_wrapper)(*args)</span>
+    <span class="s1">serialized_proto = comp.as_serialized_hlo_module_proto()</span>
+    <span class="s1">debug_txt = comp.as_hlo_text()</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s3">assert </span><span class="s1">format == </span><span class="s4">'TF'</span>
+    <span class="s3">if </span><span class="s1">tf </span><span class="s3">is None</span><span class="s1">:</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span>
+          <span class="s4">'Conversion to TF graph requires TensorFlow to be installed.'</span><span class="s1">)</span>
+
+    <span class="s1">f = jax2tf.convert(ordered_wrapper</span><span class="s3">, </span><span class="s1">native_serialization=</span><span class="s3">False</span><span class="s1">)</span>
+    <span class="s1">f = tf_wrap_with_input_names(f</span><span class="s3">, </span><span class="s1">input_shapes)</span>
+    <span class="s1">f = tf.function(f</span><span class="s3">, </span><span class="s1">autograph=</span><span class="s3">False</span><span class="s1">)</span>
+    <span class="s1">g = f.get_concrete_function(*args).graph.as_graph_def()</span>
+    <span class="s1">serialized_proto = g.SerializeToString()</span>
+    <span class="s1">debug_txt = str(g)</span>
+
+  <span class="s3">return </span><span class="s1">serialized_proto</span><span class="s3">, </span><span class="s1">debug_txt</span>
+
+
+<span class="s3">def </span><span class="s1">tf_wrap_with_input_names(f</span><span class="s3">, </span><span class="s1">input_shapes):</span>
+  <span class="s3">def </span><span class="s1">wrapper(*args):</span>
+    <span class="s1">args = tuple(</span>
+        <span class="s1">tf.identity(a</span><span class="s3">, </span><span class="s1">name=name) </span><span class="s3">for </span><span class="s1">a</span><span class="s3">, </span><span class="s1">(name</span><span class="s3">, </span><span class="s1">_) </span><span class="s3">in </span><span class="s1">zip(args</span><span class="s3">, </span><span class="s1">input_shapes))</span>
+    <span class="s0"># NOTE: Output names already set via `jax2tf.convert(..)`.</span>
+    <span class="s3">return </span><span class="s1">f(*args)</span>
+  <span class="s3">return </span><span class="s1">wrapper</span>
+
+<span class="s1">jax_to_hlo = functools.partial(jax_to_ir</span><span class="s3">, </span><span class="s1">format=</span><span class="s4">'HLO'</span><span class="s1">)</span>
+<span class="s1">jax_to_tf = functools.partial(jax_to_ir</span><span class="s3">, </span><span class="s1">format=</span><span class="s4">'TF'</span><span class="s1">)</span>
+
+
+<span class="s3">def </span><span class="s1">main(argv):</span>
+  <span class="s3">if </span><span class="s1">len(argv) != </span><span class="s5">1</span><span class="s1">:</span>
+    <span class="s3">raise </span><span class="s1">app.UsageError(</span><span class="s4">'No positional arguments are accepted.'</span><span class="s1">)</span>
+
+  <span class="s3">if not </span><span class="s1">FLAGS.ir_dest </span><span class="s3">and not </span><span class="s1">FLAGS.ir_human_dest:</span>
+    <span class="s3">raise </span><span class="s1">app.Error(</span><span class="s4">'At least one of --ir_dest and '</span>
+                    <span class="s4">'--ir_human_dest is required.'</span><span class="s1">)</span>
+
+  <span class="s1">module_name</span><span class="s3">, </span><span class="s1">fn_name = FLAGS.fn.rsplit(</span><span class="s4">'.'</span><span class="s3">, </span><span class="s5">1</span><span class="s1">)</span>
+  <span class="s1">module = importlib.import_module(module_name)</span>
+  <span class="s1">fn = getattr(module</span><span class="s3">, </span><span class="s1">fn_name)</span>
+
+  <span class="s1">input_shapes = [(name</span><span class="s3">, </span><span class="s1">parse_shape_str(shape_str))</span>
+                  <span class="s3">for </span><span class="s1">name</span><span class="s3">, </span><span class="s1">shape_str </span><span class="s3">in </span><span class="s1">literal_eval(FLAGS.input_shapes)]</span>
+
+  <span class="s0"># Parse --constants and --evaled_constants.</span>
+  <span class="s1">constants = {}</span>
+  <span class="s3">for </span><span class="s1">k</span><span class="s3">, </span><span class="s1">v </span><span class="s3">in </span><span class="s1">literal_eval(FLAGS.constants).items():</span>
+    <span class="s3">if </span><span class="s1">isinstance(v</span><span class="s3">, </span><span class="s1">list):</span>
+      <span class="s1">v = jnp.asarray(v)</span>
+    <span class="s1">constants[k] = v</span>
+
+  <span class="s3">for </span><span class="s1">k</span><span class="s3">, </span><span class="s1">v </span><span class="s3">in </span><span class="s1">literal_eval(FLAGS.evaled_constants).items():</span>
+    <span class="s3">if </span><span class="s1">isinstance(v</span><span class="s3">, </span><span class="s1">str):</span>
+      <span class="s1">v = literal_eval(v)</span>
+    <span class="s3">if </span><span class="s1">isinstance(v</span><span class="s3">, </span><span class="s1">list):</span>
+      <span class="s1">v = jnp.asarray(v)</span>
+    <span class="s3">if </span><span class="s1">k </span><span class="s3">in </span><span class="s1">constants:</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span>
+          <span class="s4">'Argument appears in both --constants and --evaled_constants: %s' </span><span class="s1">% k)</span>
+    <span class="s1">constants[k] = v</span>
+
+  <span class="s1">ir</span><span class="s3">, </span><span class="s1">debug_ir = jax_to_ir(fn</span><span class="s3">, </span><span class="s1">input_shapes</span><span class="s3">, </span><span class="s1">constants=constants</span><span class="s3">,</span>
+                           <span class="s1">format=FLAGS.ir_format)</span>
+
+  <span class="s3">if </span><span class="s1">FLAGS.ir_dest:</span>
+    <span class="s3">with </span><span class="s1">open(FLAGS.ir_dest</span><span class="s3">, </span><span class="s4">'wb'</span><span class="s1">) </span><span class="s3">as </span><span class="s1">f:</span>
+      <span class="s1">f.write(ir)</span>
+
+  <span class="s3">if </span><span class="s1">FLAGS.ir_human_dest:</span>
+    <span class="s3">with </span><span class="s1">open(FLAGS.ir_human_dest</span><span class="s3">, </span><span class="s4">'w'</span><span class="s1">) </span><span class="s3">as </span><span class="s1">f:</span>
+      <span class="s1">f.write(debug_ir)</span>
+
+
+<span class="s3">def </span><span class="s1">parse_shape_str(s):</span>
+  <span class="s1">match = _SHAPE_RE.match(s)</span>
+  <span class="s3">if not </span><span class="s1">match:</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">f'Invalid shape </span><span class="s3">{</span><span class="s1">s</span><span class="s3">}</span><span class="s4">. Valid example: &quot;f32[1,2,3]&quot;.'</span>
+                     <span class="s4">f'Note that dtype must be one of </span><span class="s3">{</span><span class="s1">list(_DT)</span><span class="s3">}</span><span class="s4">'</span><span class="s1">)</span>
+  <span class="s1">dtype = _DT[match.group(</span><span class="s5">1</span><span class="s1">)]</span>
+  <span class="s3">if </span><span class="s1">match.group(</span><span class="s5">2</span><span class="s1">):</span>
+    <span class="s1">shape = tuple(int(d.strip()) </span><span class="s3">for </span><span class="s1">d </span><span class="s3">in </span><span class="s1">match.group(</span><span class="s5">2</span><span class="s1">).split(</span><span class="s4">&quot;,&quot;</span><span class="s1">))</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s1">shape = ()</span>
+  <span class="s3">return </span><span class="s1">jax.core.ShapedArray(shape</span><span class="s3">, </span><span class="s1">dtype)</span>
+
+<span class="s1">_DT = {</span><span class="s4">'pred'</span><span class="s1">: jnp.bool_</span><span class="s3">,</span>
+       <span class="s4">'u8'</span><span class="s1">: jnp.uint8</span><span class="s3">, </span><span class="s4">'u16'</span><span class="s1">: jnp.uint16</span><span class="s3">, </span><span class="s4">'u32'</span><span class="s1">: jnp.uint32</span><span class="s3">, </span><span class="s4">'u64'</span><span class="s1">: jnp.uint64</span><span class="s3">,</span>
+       <span class="s4">'s8'</span><span class="s1">: jnp.int8</span><span class="s3">, </span><span class="s4">'s16'</span><span class="s1">: jnp.int16</span><span class="s3">, </span><span class="s4">'s32'</span><span class="s1">: jnp.int32</span><span class="s3">, </span><span class="s4">'s64'</span><span class="s1">: jnp.int64</span><span class="s3">,</span>
+       <span class="s4">'bf16'</span><span class="s1">: jnp.bfloat16</span><span class="s3">,</span>
+       <span class="s4">'f16'</span><span class="s1">: jnp.float16</span><span class="s3">, </span><span class="s4">'f32'</span><span class="s1">: jnp.float32</span><span class="s3">, </span><span class="s4">'f64'</span><span class="s1">: jnp.float64</span><span class="s3">,</span>
+       <span class="s4">'c64'</span><span class="s1">: jnp.complex64</span><span class="s3">, </span><span class="s4">'c128'</span><span class="s1">: jnp.complex128}</span>
+<span class="s1">_SHAPE_RE = re.compile(</span><span class="s4">f&quot;^(</span><span class="s3">{</span><span class="s4">'|'</span><span class="s1">.join(_DT)</span><span class="s3">}</span><span class="s4">)</span><span class="s3">\\</span><span class="s4">[</span><span class="s3">\\</span><span class="s4">s*(</span><span class="s3">\\</span><span class="s4">d*[</span><span class="s3">\\</span><span class="s4">s*,</span><span class="s3">\\</span><span class="s4">d+]*)</span><span class="s3">\\</span><span class="s4">s*</span><span class="s3">\\</span><span class="s4">]$&quot;</span><span class="s1">)</span>
+
+
+<span class="s3">def </span><span class="s1">set_up_flags():</span>
+  <span class="s1">flags.DEFINE_string(</span>
+      <span class="s4">'fn'</span><span class="s3">, None,</span>
+      <span class="s4">&quot;Fully-qualified name of function that we're going to convert&quot;</span><span class="s1">)</span>
+  <span class="s1">flags.DEFINE_string(</span><span class="s4">'input_shapes'</span><span class="s3">, None,</span>
+                      <span class="s4">'Python dict indicating XLA shapes of params'</span><span class="s1">)</span>
+  <span class="s1">flags.DEFINE_string(</span><span class="s4">'constants'</span><span class="s3">, </span><span class="s4">'{}'</span><span class="s3">,</span>
+                      <span class="s4">'Python dict giving constant values for some params'</span><span class="s1">)</span>
+  <span class="s1">flags.DEFINE_string(</span><span class="s4">'evaled_constants'</span><span class="s3">, </span><span class="s4">'{}'</span><span class="s3">,</span>
+                      <span class="s4">'Python dict giving constant values for some params.  '</span>
+                      <span class="s4">'Values in this dict that are of type str are evaluated '</span>
+                      <span class="s4">'using ast.literal_eval.'</span><span class="s1">)</span>
+  <span class="s1">flags.DEFINE_enum(</span><span class="s4">'ir_format'</span><span class="s3">, </span><span class="s4">'HLO'</span><span class="s3">, </span><span class="s1">(</span><span class="s4">'HLO'</span><span class="s3">, </span><span class="s4">'TF'</span><span class="s1">)</span><span class="s3">, </span><span class="s4">'Output format.'</span><span class="s1">)</span>
+  <span class="s1">flags.DEFINE_string(</span><span class="s4">'ir_dest'</span><span class="s3">, None, </span><span class="s4">'File to write IR to'</span><span class="s1">)</span>
+  <span class="s1">flags.DEFINE_string(</span><span class="s4">'ir_human_dest'</span><span class="s3">, None,</span>
+                      <span class="s4">'File to write human readable debug output'</span><span class="s1">)</span>
+  <span class="s1">flags.mark_flag_as_required(</span><span class="s4">'fn'</span><span class="s1">)</span>
+  <span class="s1">flags.mark_flag_as_required(</span><span class="s4">'input_shapes'</span><span class="s1">)</span>
+
+
+<span class="s3">if </span><span class="s1">__name__ == </span><span class="s4">'__main__'</span><span class="s1">:</span>
+  <span class="s1">set_up_flags()</span>
+  <span class="s1">app.run(main)</span>
+</pre>
+</body>
+</html>

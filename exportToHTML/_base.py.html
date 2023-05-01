@@ -1,0 +1,143 @@
+<html>
+<head>
+<title>_base.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6897bb;}
+.s5 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_base.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2021 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s2">&quot;&quot;&quot;Base JAX Sparse object.&quot;&quot;&quot;</span>
+<span class="s3">import </span><span class="s1">abc</span>
+<span class="s3">import </span><span class="s1">math</span>
+<span class="s3">from </span><span class="s1">typing </span><span class="s3">import </span><span class="s1">Sequence</span><span class="s3">, </span><span class="s1">Tuple</span>
+
+<span class="s3">import </span><span class="s1">jax</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">core</span>
+<span class="s3">from </span><span class="s1">jax._src.typing </span><span class="s3">import </span><span class="s1">Array</span>
+
+
+<span class="s3">class </span><span class="s1">JAXSparse(abc.ABC):</span>
+  <span class="s2">&quot;&quot;&quot;Base class for high-level JAX sparse objects.&quot;&quot;&quot;</span>
+  <span class="s1">data: jax.Array</span>
+  <span class="s1">shape: Tuple[int</span><span class="s3">, </span><span class="s1">...]</span>
+  <span class="s1">nse: property</span>
+  <span class="s1">dtype: property</span>
+
+  <span class="s0"># Ignore type because of https://github.com/python/mypy/issues/4266.</span>
+  <span class="s1">__hash__ = </span><span class="s3">None  </span><span class="s0"># type: ignore</span>
+
+  <span class="s3">def </span><span class="s1">__len__(self):</span>
+    <span class="s3">return </span><span class="s1">self.shape[</span><span class="s4">0</span><span class="s1">]</span>
+
+  <span class="s1">@property</span>
+  <span class="s3">def </span><span class="s1">size(self) -&gt; int:</span>
+    <span class="s3">return </span><span class="s1">math.prod(self.shape)</span>
+
+  <span class="s1">@property</span>
+  <span class="s3">def </span><span class="s1">ndim(self) -&gt; int:</span>
+    <span class="s3">return </span><span class="s1">len(self.shape)</span>
+
+  <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">args: Tuple[Array</span><span class="s3">, </span><span class="s1">...]</span><span class="s3">, </span><span class="s1">*</span><span class="s3">, </span><span class="s1">shape: Sequence[int]):</span>
+    <span class="s1">self.shape = tuple(shape)</span>
+
+  <span class="s3">def </span><span class="s1">__repr__(self):</span>
+    <span class="s1">name = self.__class__.__name__</span>
+    <span class="s3">try</span><span class="s1">:</span>
+      <span class="s1">nse = self.nse</span>
+      <span class="s1">dtype = self.dtype</span>
+      <span class="s1">shape = list(self.shape)</span>
+    <span class="s3">except</span><span class="s1">:</span>
+      <span class="s1">repr_ = </span><span class="s5">f&quot;</span><span class="s3">{</span><span class="s1">name</span><span class="s3">}</span><span class="s5">(&lt;invalid&gt;)&quot;</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s1">repr_ = </span><span class="s5">f&quot;</span><span class="s3">{</span><span class="s1">name</span><span class="s3">}</span><span class="s5">(</span><span class="s3">{</span><span class="s1">dtype</span><span class="s3">}{</span><span class="s1">shape</span><span class="s3">}</span><span class="s5">, </span><span class="s3">{</span><span class="s1">nse=</span><span class="s3">}</span><span class="s5">)&quot;</span>
+    <span class="s3">if </span><span class="s1">isinstance(self.data</span><span class="s3">, </span><span class="s1">core.Tracer):</span>
+      <span class="s1">repr_ = </span><span class="s5">f&quot;</span><span class="s3">{</span><span class="s1">type(self.data).__name__</span><span class="s3">}</span><span class="s5">[</span><span class="s3">{</span><span class="s1">repr_</span><span class="s3">}</span><span class="s5">]&quot;</span>
+    <span class="s3">return </span><span class="s1">repr_</span>
+
+  <span class="s1">@abc.abstractmethod</span>
+  <span class="s3">def </span><span class="s1">tree_flatten(self):</span>
+    <span class="s1">...</span>
+
+  <span class="s1">@classmethod</span>
+  <span class="s1">@abc.abstractmethod</span>
+  <span class="s3">def </span><span class="s1">tree_unflatten(cls</span><span class="s3">, </span><span class="s1">aux_data</span><span class="s3">, </span><span class="s1">children):</span>
+    <span class="s1">...</span>
+
+  <span class="s1">@abc.abstractmethod</span>
+  <span class="s3">def </span><span class="s1">transpose(self</span><span class="s3">, </span><span class="s1">axes=</span><span class="s3">None</span><span class="s1">):</span>
+    <span class="s1">...</span>
+
+  <span class="s1">@property</span>
+  <span class="s3">def </span><span class="s1">T(self):</span>
+    <span class="s3">return </span><span class="s1">self.transpose()</span>
+
+  <span class="s3">def </span><span class="s1">block_until_ready(self):</span>
+    <span class="s3">for </span><span class="s1">arg </span><span class="s3">in </span><span class="s1">self.tree_flatten()[</span><span class="s4">0</span><span class="s1">]:</span>
+      <span class="s1">arg.block_until_ready()</span>
+    <span class="s3">return </span><span class="s1">self</span>
+
+  <span class="s0"># Not abstract methods because not all sparse classes implement them</span>
+
+  <span class="s3">def </span><span class="s1">sum(self</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError(</span><span class="s5">f&quot;</span><span class="s3">{</span><span class="s1">self.__class__</span><span class="s3">}</span><span class="s5">.sum&quot;</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">__neg__(self):</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError(</span><span class="s5">f&quot;</span><span class="s3">{</span><span class="s1">self.__class__</span><span class="s3">}</span><span class="s5">.__neg__&quot;</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">__pos__(self):</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError(</span><span class="s5">f&quot;</span><span class="s3">{</span><span class="s1">self.__class__</span><span class="s3">}</span><span class="s5">.__pos__&quot;</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">__matmul__(self</span><span class="s3">, </span><span class="s1">other):</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError(</span><span class="s5">f&quot;</span><span class="s3">{</span><span class="s1">self.__class__</span><span class="s3">}</span><span class="s5">.__matmul__&quot;</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">__rmatmul__(self</span><span class="s3">, </span><span class="s1">other):</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError(</span><span class="s5">f&quot;</span><span class="s3">{</span><span class="s1">self.__class__</span><span class="s3">}</span><span class="s5">.__rmatmul__&quot;</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">__mul__(self</span><span class="s3">, </span><span class="s1">other):</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError(</span><span class="s5">f&quot;</span><span class="s3">{</span><span class="s1">self.__class__</span><span class="s3">}</span><span class="s5">.__mul__&quot;</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">__rmul__(self</span><span class="s3">, </span><span class="s1">other):</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError(</span><span class="s5">f&quot;</span><span class="s3">{</span><span class="s1">self.__class__</span><span class="s3">}</span><span class="s5">.__rmul__&quot;</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">__add__(self</span><span class="s3">, </span><span class="s1">other):</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError(</span><span class="s5">f&quot;</span><span class="s3">{</span><span class="s1">self.__class__</span><span class="s3">}</span><span class="s5">.__add__&quot;</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">__radd__(self</span><span class="s3">, </span><span class="s1">other):</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError(</span><span class="s5">f&quot;</span><span class="s3">{</span><span class="s1">self.__class__</span><span class="s3">}</span><span class="s5">.__radd__&quot;</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">__sub__(self</span><span class="s3">, </span><span class="s1">other):</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError(</span><span class="s5">f&quot;</span><span class="s3">{</span><span class="s1">self.__class__</span><span class="s3">}</span><span class="s5">.__sub__&quot;</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">__rsub__(self</span><span class="s3">, </span><span class="s1">other):</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError(</span><span class="s5">f&quot;</span><span class="s3">{</span><span class="s1">self.__class__</span><span class="s3">}</span><span class="s5">.__rsub__&quot;</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">__getitem__(self</span><span class="s3">, </span><span class="s1">item):</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError(</span><span class="s5">f&quot;</span><span class="s3">{</span><span class="s1">self.__class__</span><span class="s3">}</span><span class="s5">.__getitem__&quot;</span><span class="s1">)</span>
+</pre>
+</body>
+</html>

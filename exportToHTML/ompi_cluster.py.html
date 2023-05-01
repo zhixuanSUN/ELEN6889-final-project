@@ -1,0 +1,80 @@
+<html>
+<head>
+<title>ompi_cluster.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+ompi_cluster.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2023 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Optional</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">clusters</span>
+
+<span class="s0">#  OMPI_MCA_orte_hnp_uri exists only when processes are launched via mpirun or mpiexec</span>
+<span class="s1">_ORTE_URI = </span><span class="s3">'OMPI_MCA_orte_hnp_uri'</span>
+<span class="s1">_PROCESS_COUNT = </span><span class="s3">'OMPI_COMM_WORLD_SIZE'</span>
+<span class="s1">_PROCESS_ID = </span><span class="s3">'OMPI_COMM_WORLD_RANK'</span>
+<span class="s1">_LOCAL_PROCESS_ID = </span><span class="s3">'OMPI_COMM_WORLD_LOCAL_RANK'</span>
+
+<span class="s2">class </span><span class="s1">OmpiCluster(clusters.ClusterEnv):</span>
+  <span class="s1">@classmethod</span>
+  <span class="s2">def </span><span class="s1">is_env_present(cls) -&gt; bool:</span>
+    <span class="s2">return </span><span class="s1">_ORTE_URI </span><span class="s2">in </span><span class="s1">os.environ</span>
+
+  <span class="s1">@classmethod</span>
+  <span class="s2">def </span><span class="s1">get_coordinator_address(cls) -&gt; str:</span>
+    <span class="s0"># Examples of orte_uri:</span>
+    <span class="s0"># 1531576320.0;tcp://10.96.0.1,10.148.0.1,10.108.0.1:34911</span>
+    <span class="s0"># 1314521088.0;tcp6://[fe80::b9b:ac5d:9cf0:b858,2620:10d:c083:150e::3000:2]:43370</span>
+    <span class="s1">orte_uri = os.environ[_ORTE_URI]</span>
+    <span class="s1">job_id_str = orte_uri.split(</span><span class="s3">'.'</span><span class="s2">, </span><span class="s1">maxsplit=</span><span class="s4">1</span><span class="s1">)[</span><span class="s4">0</span><span class="s1">]</span>
+    <span class="s0"># The jobid is always a multiple of 2^12, let's divide it by 2^12</span>
+    <span class="s0"># to reduce likelihood of port conflict between jobs</span>
+    <span class="s1">job_id = int(job_id_str) // </span><span class="s4">2</span><span class="s1">**</span><span class="s4">12</span>
+    <span class="s0"># Pick port in ephemeral range [(65535 - 2^12 + 1), 65535]</span>
+    <span class="s1">port = job_id % </span><span class="s4">2</span><span class="s1">**</span><span class="s4">12 </span><span class="s1">+ (</span><span class="s4">65535 </span><span class="s1">- </span><span class="s4">2</span><span class="s1">**</span><span class="s4">12 </span><span class="s1">+ </span><span class="s4">1</span><span class="s1">)</span>
+    <span class="s1">launcher_ip_match = re.search(</span><span class="s3">r&quot;tcp://(.+?)[,:]|tcp6://\[(.+?)[,\]]&quot;</span><span class="s2">, </span><span class="s1">orte_uri)</span>
+    <span class="s2">if </span><span class="s1">launcher_ip_match </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">RuntimeError(</span><span class="s3">'Could not parse coordinator IP address from Open MPI environment.'</span><span class="s1">)</span>
+    <span class="s1">launcher_ip = next(i </span><span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">launcher_ip_match.groups() </span><span class="s2">if </span><span class="s1">i </span><span class="s2">is not None</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s3">f'</span><span class="s2">{</span><span class="s1">launcher_ip</span><span class="s2">}</span><span class="s3">:</span><span class="s2">{</span><span class="s1">port</span><span class="s2">}</span><span class="s3">'</span>
+
+  <span class="s1">@classmethod</span>
+  <span class="s2">def </span><span class="s1">get_process_count(cls) -&gt; int:</span>
+    <span class="s2">return </span><span class="s1">int(os.environ[_PROCESS_COUNT])</span>
+
+  <span class="s1">@classmethod</span>
+  <span class="s2">def </span><span class="s1">get_process_id(cls) -&gt; int:</span>
+    <span class="s2">return </span><span class="s1">int(os.environ[_PROCESS_ID])</span>
+
+  <span class="s1">@classmethod</span>
+  <span class="s2">def </span><span class="s1">get_local_process_id(cls) -&gt; Optional[int]:</span>
+    <span class="s2">return </span><span class="s1">int(os.environ[_LOCAL_PROCESS_ID])</span>
+</pre>
+</body>
+</html>

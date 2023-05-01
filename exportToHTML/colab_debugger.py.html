@@ -1,0 +1,282 @@
+<html>
+<head>
+<title>colab_debugger.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6897bb;}
+.s5 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+colab_debugger.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2022 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+<span class="s2">&quot;&quot;&quot;Module for Colab-specific debugger.&quot;&quot;&quot;</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">annotations</span>
+
+<span class="s3">import </span><span class="s1">html</span>
+<span class="s3">import </span><span class="s1">inspect</span>
+<span class="s3">import </span><span class="s1">traceback</span>
+
+<span class="s3">from </span><span class="s1">typing </span><span class="s3">import </span><span class="s1">List</span>
+
+<span class="s3">import </span><span class="s1">uuid</span>
+
+<span class="s3">from </span><span class="s1">jax._src.debugger </span><span class="s3">import </span><span class="s1">colab_lib</span>
+<span class="s3">from </span><span class="s1">jax._src.debugger </span><span class="s3">import </span><span class="s1">core </span><span class="s3">as </span><span class="s1">debugger_core</span>
+<span class="s3">from </span><span class="s1">jax._src.debugger </span><span class="s3">import </span><span class="s1">cli_debugger</span>
+
+<span class="s0"># pylint: disable=g-import-not-at-top</span>
+<span class="s0"># pytype: disable=import-error</span>
+<span class="s3">if </span><span class="s1">colab_lib.IS_COLAB_ENABLED:</span>
+  <span class="s3">from </span><span class="s1">google.colab </span><span class="s3">import </span><span class="s1">output</span>
+<span class="s3">try</span><span class="s1">:</span>
+  <span class="s3">import </span><span class="s1">pygments</span>
+  <span class="s1">IS_PYGMENTS_ENABLED = </span><span class="s3">True</span>
+<span class="s3">except </span><span class="s1">ImportError:</span>
+  <span class="s1">IS_PYGMENTS_ENABLED = </span><span class="s3">False</span>
+<span class="s0"># pytype: enable=import-error</span>
+<span class="s0"># pylint: enable=g-import-not-at-top</span>
+
+
+<span class="s3">class </span><span class="s1">CodeViewer(colab_lib.DynamicDOMElement):</span>
+  <span class="s2">&quot;&quot;&quot;A mutable DOM element that displays code as HTML.&quot;&quot;&quot;</span>
+
+  <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">code_: str</span><span class="s3">, </span><span class="s1">highlights: List[int]</span><span class="s3">, </span><span class="s1">linenostart: int = </span><span class="s4">1</span><span class="s1">):</span>
+    <span class="s1">self._code = code_</span>
+    <span class="s1">self._highlights = highlights</span>
+    <span class="s1">self._view = colab_lib.dynamic(colab_lib.div())</span>
+    <span class="s1">self._linenostart = linenostart</span>
+
+  <span class="s3">def </span><span class="s1">render(self):</span>
+    <span class="s1">self.update_code(</span>
+        <span class="s1">self._code</span><span class="s3">, </span><span class="s1">self._highlights</span><span class="s3">, </span><span class="s1">linenostart=self._linenostart)</span>
+
+  <span class="s3">def </span><span class="s1">clear(self):</span>
+    <span class="s1">self._view.clear()</span>
+
+  <span class="s3">def </span><span class="s1">append(self</span><span class="s3">, </span><span class="s1">child):</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError</span>
+
+  <span class="s3">def </span><span class="s1">update(self</span><span class="s3">, </span><span class="s1">elem):</span>
+    <span class="s1">self._view.update(elem)</span>
+
+  <span class="s3">def </span><span class="s1">_highlight_code(self</span><span class="s3">, </span><span class="s1">code: str</span><span class="s3">, </span><span class="s1">highlights</span><span class="s3">, </span><span class="s1">linenostart: int):</span>
+    <span class="s1">is_dark_mode = output.eval_js(</span>
+        <span class="s5">'document.documentElement.matches(&quot;[theme=dark]&quot;);'</span><span class="s1">)</span>
+    <span class="s1">code_style = </span><span class="s5">&quot;monokai&quot; </span><span class="s3">if </span><span class="s1">is_dark_mode </span><span class="s3">else </span><span class="s5">&quot;default&quot;</span>
+    <span class="s1">hl_color = </span><span class="s5">&quot;#4e56b7&quot; </span><span class="s3">if </span><span class="s1">is_dark_mode </span><span class="s3">else </span><span class="s5">&quot;#fff7c1&quot;</span>
+    <span class="s3">if </span><span class="s1">IS_PYGMENTS_ENABLED:</span>
+      <span class="s1">lexer = pygments.lexers.get_lexer_by_name(</span><span class="s5">&quot;python&quot;</span><span class="s1">)</span>
+      <span class="s1">formatter = pygments.formatters.HtmlFormatter(</span>
+          <span class="s1">full=</span><span class="s3">False,</span>
+          <span class="s1">hl_lines=highlights</span><span class="s3">,</span>
+          <span class="s1">linenos=</span><span class="s3">True,</span>
+          <span class="s1">linenostart=linenostart</span><span class="s3">,</span>
+          <span class="s1">style=code_style)</span>
+      <span class="s3">if </span><span class="s1">hl_color:</span>
+        <span class="s1">formatter.style.highlight_color = hl_color</span>
+      <span class="s1">css_ = formatter.get_style_defs()</span>
+      <span class="s1">code = pygments.highlight(code</span><span class="s3">, </span><span class="s1">lexer</span><span class="s3">, </span><span class="s1">formatter)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s3">return </span><span class="s5">&quot;&quot;</span><span class="s1">;</span>
+    <span class="s3">return </span><span class="s1">code</span><span class="s3">, </span><span class="s1">css_</span>
+
+  <span class="s3">def </span><span class="s1">update_code(self</span><span class="s3">, </span><span class="s1">code_</span><span class="s3">, </span><span class="s1">highlights</span><span class="s3">, </span><span class="s1">*</span><span class="s3">, </span><span class="s1">linenostart: int = </span><span class="s4">1</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot;Updates the code viewer to use new code.&quot;&quot;&quot;</span>
+    <span class="s1">self._code = code_</span>
+    <span class="s1">self._view.clear()</span>
+    <span class="s1">code_</span><span class="s3">, </span><span class="s1">css_ = self._highlight_code(self._code</span><span class="s3">, </span><span class="s1">highlights</span><span class="s3">, </span><span class="s1">linenostart)</span>
+    <span class="s1">uuid_ = uuid.uuid4()</span>
+    <span class="s1">code_div = colab_lib.div(</span>
+        <span class="s1">colab_lib.css(css_)</span><span class="s3">,</span>
+        <span class="s1">code_</span><span class="s3">,</span>
+        <span class="s1">id=</span><span class="s5">f&quot;code-</span><span class="s3">{</span><span class="s1">uuid_</span><span class="s3">}</span><span class="s5">&quot;</span><span class="s3">,</span>
+        <span class="s1">style=colab_lib.style({</span>
+            <span class="s5">&quot;max-height&quot;</span><span class="s1">: </span><span class="s5">&quot;500px&quot;</span><span class="s3">,</span>
+            <span class="s5">&quot;overflow-y&quot;</span><span class="s1">: </span><span class="s5">&quot;scroll&quot;</span><span class="s3">,</span>
+            <span class="s5">&quot;background-color&quot;</span><span class="s1">: </span><span class="s5">&quot;var(--colab-border-color)&quot;</span><span class="s3">,</span>
+            <span class="s5">&quot;padding&quot;</span><span class="s1">: </span><span class="s5">&quot;5px 5px 5px 5px&quot;</span><span class="s3">,</span>
+        <span class="s1">}))</span>
+    <span class="s3">if </span><span class="s1">highlights:</span>
+      <span class="s1">percent_scroll = highlights[</span><span class="s4">0</span><span class="s1">] / len(self._code.split(</span><span class="s5">&quot;</span><span class="s3">\n</span><span class="s5">&quot;</span><span class="s1">))</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s1">percent_scroll = </span><span class="s4">0.</span>
+    <span class="s1">self.update(code_div)</span>
+    <span class="s0"># Scroll to where the line is</span>
+    <span class="s1">output.eval_js(</span><span class="s5">&quot;&quot;&quot; 
+    console.log(&quot;{id}&quot;) 
+    var elem = document.getElementById(&quot;{id}&quot;) 
+    var maxScrollPosition = elem.scrollHeight - elem.clientHeight; 
+    elem.scrollTop = maxScrollPosition * {percent_scroll} 
+    &quot;&quot;&quot;</span><span class="s1">.format(id=</span><span class="s5">f&quot;code-</span><span class="s3">{</span><span class="s1">uuid_</span><span class="s3">}</span><span class="s5">&quot;</span><span class="s3">, </span><span class="s1">percent_scroll=percent_scroll))</span>
+
+
+<span class="s3">class </span><span class="s1">FramePreview(colab_lib.DynamicDOMElement):</span>
+  <span class="s2">&quot;&quot;&quot;Displays information about a stack frame.&quot;&quot;&quot;</span>
+
+  <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">frame):</span>
+    <span class="s1">super().__init__()</span>
+    <span class="s1">self._header = colab_lib.dynamic(</span>
+        <span class="s1">colab_lib.div(colab_lib.pre(colab_lib.code(</span><span class="s5">&quot;&quot;</span><span class="s1">))))</span>
+    <span class="s1">self._code_view = CodeViewer(</span><span class="s5">&quot;&quot;</span><span class="s3">, </span><span class="s1">highlights=[])</span>
+    <span class="s1">self.frame = frame</span>
+    <span class="s1">self._file_cache = {}</span>
+
+  <span class="s3">def </span><span class="s1">clear(self):</span>
+    <span class="s1">self._header.clear()</span>
+    <span class="s1">self._code_view.clear()</span>
+
+  <span class="s3">def </span><span class="s1">append(self</span><span class="s3">, </span><span class="s1">child):</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError</span>
+
+  <span class="s3">def </span><span class="s1">update(self</span><span class="s3">, </span><span class="s1">elem):</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError</span>
+
+  <span class="s3">def </span><span class="s1">update_frame(self</span><span class="s3">, </span><span class="s1">frame):</span>
+    <span class="s2">&quot;&quot;&quot;Updates the frame viewer to use a new frame.&quot;&quot;&quot;</span>
+    <span class="s1">self.frame = frame</span>
+    <span class="s1">lineno = self.frame.lineno </span><span class="s3">or None</span>
+    <span class="s1">filename = self.frame.filename.strip()</span>
+    <span class="s3">if </span><span class="s1">inspect.getmodulename(filename):</span>
+      <span class="s3">if </span><span class="s1">filename </span><span class="s3">not in </span><span class="s1">self._file_cache:</span>
+        <span class="s3">try</span><span class="s1">:</span>
+          <span class="s3">with </span><span class="s1">open(filename</span><span class="s3">, </span><span class="s5">&quot;r&quot;</span><span class="s1">) </span><span class="s3">as </span><span class="s1">fp:</span>
+            <span class="s1">self._file_cache[filename] = fp.read()</span>
+          <span class="s1">source = self._file_cache[filename]</span>
+          <span class="s1">highlight = lineno</span>
+          <span class="s1">linenostart = </span><span class="s4">1</span>
+        <span class="s3">except </span><span class="s1">FileNotFoundError:</span>
+          <span class="s1">source = </span><span class="s5">&quot;</span><span class="s3">\n</span><span class="s5">&quot;</span><span class="s1">.join(frame.source)</span>
+          <span class="s1">highlight = min(frame.offset + </span><span class="s4">1</span><span class="s3">, </span><span class="s1">len(frame.source) - </span><span class="s4">1</span><span class="s1">)</span>
+          <span class="s1">linenostart = lineno - frame.offset</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s1">source = </span><span class="s5">&quot;</span><span class="s3">\n</span><span class="s5">&quot;</span><span class="s1">.join(frame.source)</span>
+      <span class="s1">highlight = min(frame.offset + </span><span class="s4">1</span><span class="s3">, </span><span class="s1">len(frame.source) - </span><span class="s4">1</span><span class="s1">)</span>
+      <span class="s1">linenostart = lineno - frame.offset</span>
+    <span class="s1">self._header.clear()</span>
+    <span class="s1">self._header.update(</span>
+        <span class="s1">colab_lib.div(</span>
+            <span class="s1">colab_lib.pre(colab_lib.code(</span><span class="s5">f&quot;</span><span class="s3">{</span><span class="s1">html.escape(filename)</span><span class="s3">}</span><span class="s5">(</span><span class="s3">{</span><span class="s1">lineno</span><span class="s3">}</span><span class="s5">)&quot;</span><span class="s1">))</span><span class="s3">,</span>
+            <span class="s1">style=colab_lib.style({</span>
+                <span class="s5">&quot;padding&quot;</span><span class="s1">: </span><span class="s5">&quot;5px 5px 5px 5px&quot;</span><span class="s3">,</span>
+                <span class="s5">&quot;background-color&quot;</span><span class="s1">: </span><span class="s5">&quot;var(--colab-highlighted-surface-color)&quot;</span><span class="s3">,</span>
+            <span class="s1">})))</span>
+    <span class="s1">self._code_view.update_code(source</span><span class="s3">, </span><span class="s1">[highlight]</span><span class="s3">, </span><span class="s1">linenostart=linenostart)</span>
+
+  <span class="s3">def </span><span class="s1">render(self):</span>
+    <span class="s1">self.update_frame(self.frame)</span>
+
+
+<span class="s3">class </span><span class="s1">DebuggerView(colab_lib.DynamicDOMElement):</span>
+  <span class="s2">&quot;&quot;&quot;Main view for the Colab debugger.&quot;&quot;&quot;</span>
+
+  <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">frame</span><span class="s3">, </span><span class="s1">*</span><span class="s3">, </span><span class="s1">log_color=</span><span class="s5">&quot;&quot;</span><span class="s1">):</span>
+    <span class="s1">super().__init__()</span>
+    <span class="s1">self._interaction_log = colab_lib.dynamic(colab_lib.div())</span>
+    <span class="s1">self._frame_preview = FramePreview(frame)</span>
+    <span class="s1">self._header = colab_lib.dynamic(</span>
+        <span class="s1">colab_lib.div(</span>
+            <span class="s1">colab_lib.span(</span><span class="s5">&quot;Breakpoint&quot;</span><span class="s1">)</span><span class="s3">,</span>
+            <span class="s1">style=colab_lib.style({</span>
+                <span class="s5">&quot;background-color&quot;</span><span class="s1">: </span><span class="s5">&quot;var(--colab-secondary-surface-color)&quot;</span><span class="s3">,</span>
+                <span class="s5">&quot;color&quot;</span><span class="s1">: </span><span class="s5">&quot;var(--colab-primary-text-color)&quot;</span><span class="s3">,</span>
+                <span class="s5">&quot;padding&quot;</span><span class="s1">: </span><span class="s5">&quot;5px 5px 5px 5px&quot;</span><span class="s3">,</span>
+                <span class="s5">&quot;font-weight&quot;</span><span class="s1">: </span><span class="s5">&quot;bold&quot;</span><span class="s3">,</span>
+            <span class="s1">})))</span>
+
+  <span class="s3">def </span><span class="s1">render(self):</span>
+    <span class="s1">self._header.render()</span>
+    <span class="s1">self._frame_preview.render()</span>
+    <span class="s1">self._interaction_log.render()</span>
+
+  <span class="s3">def </span><span class="s1">append(self</span><span class="s3">, </span><span class="s1">child):</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError</span>
+
+  <span class="s3">def </span><span class="s1">update(self</span><span class="s3">, </span><span class="s1">elem):</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError</span>
+
+  <span class="s3">def </span><span class="s1">clear(self):</span>
+    <span class="s1">self._header.clear()</span>
+    <span class="s1">self._interaction_log.clear()</span>
+    <span class="s1">self._frame_preview.clear()</span>
+
+  <span class="s3">def </span><span class="s1">update_frame(self</span><span class="s3">, </span><span class="s1">frame):</span>
+    <span class="s1">self._frame_preview.update_frame(frame)</span>
+
+  <span class="s3">def </span><span class="s1">write(self</span><span class="s3">, </span><span class="s1">text):</span>
+    <span class="s1">self._interaction_log.append(colab_lib.pre(text))</span>
+
+  <span class="s3">def </span><span class="s1">read(self):</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError()</span>
+
+  <span class="s3">def </span><span class="s1">readline(self):</span>
+    <span class="s3">with </span><span class="s1">output.use_tags([</span><span class="s5">&quot;stdin&quot;</span><span class="s1">]):</span>
+      <span class="s1">user_input = input() + </span><span class="s5">&quot;</span><span class="s3">\n</span><span class="s5">&quot;</span>
+    <span class="s1">output.clear(output_tags=[</span><span class="s5">&quot;stdin&quot;</span><span class="s1">])</span>
+    <span class="s3">return </span><span class="s1">user_input</span>
+
+  <span class="s3">def </span><span class="s1">isatty(self):</span>
+    <span class="s3">return True</span>
+
+  <span class="s3">def </span><span class="s1">flush(self):</span>
+    <span class="s3">pass</span>
+
+<span class="s3">class </span><span class="s1">ColabDebugger(cli_debugger.CliDebugger):</span>
+  <span class="s2">&quot;&quot;&quot;A JAX debugger for a Colab environment.&quot;&quot;&quot;</span>
+
+  <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">,</span>
+               <span class="s1">frames: List[debugger_core.DebuggerFrame]</span><span class="s3">,</span>
+               <span class="s1">thread_id: int):</span>
+    <span class="s1">super().__init__(frames</span><span class="s3">, </span><span class="s1">thread_id)</span>
+    <span class="s1">self._debugger_view = DebuggerView(self.current_frame())</span>
+    <span class="s1">self.stdout = self.stdin = self._debugger_view  </span><span class="s0"># type: ignore</span>
+
+  <span class="s3">def </span><span class="s1">do_up(self</span><span class="s3">, </span><span class="s1">arg):</span>
+    <span class="s1">super().do_up(arg)</span>
+    <span class="s1">self._debugger_view.update_frame(self.current_frame())</span>
+    <span class="s3">return False</span>
+
+  <span class="s3">def </span><span class="s1">do_down(self</span><span class="s3">, </span><span class="s1">arg):</span>
+    <span class="s1">super().do_down(arg)</span>
+    <span class="s1">self._debugger_view.update_frame(self.current_frame())</span>
+    <span class="s3">return False</span>
+
+  <span class="s3">def </span><span class="s1">run(self):</span>
+    <span class="s1">self._debugger_view.render()</span>
+    <span class="s3">while True</span><span class="s1">:</span>
+      <span class="s3">if not </span><span class="s1">self.cmdloop():</span>
+        <span class="s3">return</span>
+
+
+<span class="s3">def </span><span class="s1">_run_debugger(frames</span><span class="s3">, </span><span class="s1">thread_id</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+  <span class="s3">try</span><span class="s1">:</span>
+    <span class="s1">ColabDebugger(frames</span><span class="s3">, </span><span class="s1">thread_id</span><span class="s3">, </span><span class="s1">**kwargs).run()</span>
+  <span class="s3">except </span><span class="s1">Exception:</span>
+    <span class="s1">traceback.print_exc()</span>
+
+
+<span class="s3">if </span><span class="s1">colab_lib.IS_COLAB_ENABLED:</span>
+  <span class="s1">debugger_core.register_debugger(</span><span class="s5">&quot;colab&quot;</span><span class="s3">, </span><span class="s1">_run_debugger</span><span class="s3">, </span><span class="s4">1</span><span class="s1">)</span>
+</pre>
+</body>
+</html>

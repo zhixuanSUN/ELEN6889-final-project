@@ -1,0 +1,449 @@
+<html>
+<head>
+<title>line_search.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6897bb;}
+.s4 { color: #629755; font-style: italic;}
+.s5 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+line_search.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2020 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">NamedTuple</span><span class="s2">, </span><span class="s1">Union</span>
+<span class="s2">from </span><span class="s1">functools </span><span class="s2">import </span><span class="s1">partial</span>
+
+<span class="s2">from </span><span class="s1">jax._src.numpy.util </span><span class="s2">import </span><span class="s1">promote_dtypes_inexact</span>
+<span class="s2">import </span><span class="s1">jax.numpy </span><span class="s2">as </span><span class="s1">jnp</span>
+<span class="s2">import </span><span class="s1">jax</span>
+<span class="s2">from </span><span class="s1">jax </span><span class="s2">import </span><span class="s1">lax</span>
+
+<span class="s1">_dot = partial(jnp.dot</span><span class="s2">, </span><span class="s1">precision=lax.Precision.HIGHEST)</span>
+
+
+<span class="s2">def </span><span class="s1">_cubicmin(a</span><span class="s2">, </span><span class="s1">fa</span><span class="s2">, </span><span class="s1">fpa</span><span class="s2">, </span><span class="s1">b</span><span class="s2">, </span><span class="s1">fb</span><span class="s2">, </span><span class="s1">c</span><span class="s2">, </span><span class="s1">fc):</span>
+  <span class="s1">dtype = jnp.result_type(a</span><span class="s2">, </span><span class="s1">fa</span><span class="s2">, </span><span class="s1">fpa</span><span class="s2">, </span><span class="s1">b</span><span class="s2">, </span><span class="s1">fb</span><span class="s2">, </span><span class="s1">c</span><span class="s2">, </span><span class="s1">fc)</span>
+  <span class="s1">C = fpa</span>
+  <span class="s1">db = b - a</span>
+  <span class="s1">dc = c - a</span>
+  <span class="s1">denom = (db * dc) ** </span><span class="s3">2 </span><span class="s1">* (db - dc)</span>
+  <span class="s1">d1 = jnp.array([[dc ** </span><span class="s3">2</span><span class="s2">, </span><span class="s1">-db ** </span><span class="s3">2</span><span class="s1">]</span><span class="s2">,</span>
+                  <span class="s1">[-dc ** </span><span class="s3">3</span><span class="s2">, </span><span class="s1">db ** </span><span class="s3">3</span><span class="s1">]]</span><span class="s2">, </span><span class="s1">dtype=dtype)</span>
+  <span class="s1">d2 = jnp.array([fb - fa - C * db</span><span class="s2">, </span><span class="s1">fc - fa - C * dc]</span><span class="s2">, </span><span class="s1">dtype=dtype)</span>
+  <span class="s1">A</span><span class="s2">, </span><span class="s1">B = _dot(d1</span><span class="s2">, </span><span class="s1">d2) / denom</span>
+
+  <span class="s1">radical = B * B - </span><span class="s3">3. </span><span class="s1">* A * C</span>
+  <span class="s1">xmin = a + (-B + jnp.sqrt(radical)) / (</span><span class="s3">3. </span><span class="s1">* A)</span>
+
+  <span class="s2">return </span><span class="s1">xmin</span>
+
+
+<span class="s2">def </span><span class="s1">_quadmin(a</span><span class="s2">, </span><span class="s1">fa</span><span class="s2">, </span><span class="s1">fpa</span><span class="s2">, </span><span class="s1">b</span><span class="s2">, </span><span class="s1">fb):</span>
+  <span class="s1">D = fa</span>
+  <span class="s1">C = fpa</span>
+  <span class="s1">db = b - a</span>
+  <span class="s1">B = (fb - D - C * db) / (db ** </span><span class="s3">2</span><span class="s1">)</span>
+  <span class="s1">xmin = a - C / (</span><span class="s3">2. </span><span class="s1">* B)</span>
+  <span class="s2">return </span><span class="s1">xmin</span>
+
+
+<span class="s2">def </span><span class="s1">_binary_replace(replace_bit</span><span class="s2">, </span><span class="s1">original_dict</span><span class="s2">, </span><span class="s1">new_dict</span><span class="s2">, </span><span class="s1">keys=</span><span class="s2">None</span><span class="s1">):</span>
+  <span class="s2">if </span><span class="s1">keys </span><span class="s2">is None</span><span class="s1">:</span>
+    <span class="s1">keys = new_dict.keys()</span>
+  <span class="s1">out = dict()</span>
+  <span class="s2">for </span><span class="s1">key </span><span class="s2">in </span><span class="s1">keys:</span>
+    <span class="s1">out[key] = jnp.where(replace_bit</span><span class="s2">, </span><span class="s1">new_dict[key]</span><span class="s2">, </span><span class="s1">original_dict[key])</span>
+  <span class="s2">return </span><span class="s1">out</span>
+
+
+<span class="s2">class </span><span class="s1">_ZoomState(NamedTuple):</span>
+  <span class="s1">done: Union[bool</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">failed: Union[bool</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">j: Union[int</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">a_lo: Union[float</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">phi_lo: Union[float</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">dphi_lo: Union[float</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">a_hi: Union[float</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">phi_hi: Union[float</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">dphi_hi: Union[float</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">a_rec: Union[float</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">phi_rec: Union[float</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">a_star: Union[float</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">phi_star: Union[float</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">dphi_star: Union[float</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">g_star: Union[float</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">nfev: Union[int</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">ngev: Union[int</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+
+
+<span class="s2">def </span><span class="s1">_zoom(restricted_func_and_grad</span><span class="s2">, </span><span class="s1">wolfe_one</span><span class="s2">, </span><span class="s1">wolfe_two</span><span class="s2">, </span><span class="s1">a_lo</span><span class="s2">, </span><span class="s1">phi_lo</span><span class="s2">,</span>
+          <span class="s1">dphi_lo</span><span class="s2">, </span><span class="s1">a_hi</span><span class="s2">, </span><span class="s1">phi_hi</span><span class="s2">, </span><span class="s1">dphi_hi</span><span class="s2">, </span><span class="s1">g_0</span><span class="s2">, </span><span class="s1">pass_through):</span>
+  <span class="s4">&quot;&quot;&quot; 
+  Implementation of zoom. Algorithm 3.6 from Wright and Nocedal, 'Numerical 
+  Optimization', 1999, pg. 59-61. Tries cubic, quadratic, and bisection methods 
+  of zooming. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">state = _ZoomState(</span>
+      <span class="s1">done=</span><span class="s2">False,</span>
+      <span class="s1">failed=</span><span class="s2">False,</span>
+      <span class="s1">j=</span><span class="s3">0</span><span class="s2">,</span>
+      <span class="s1">a_lo=a_lo</span><span class="s2">,</span>
+      <span class="s1">phi_lo=phi_lo</span><span class="s2">,</span>
+      <span class="s1">dphi_lo=dphi_lo</span><span class="s2">,</span>
+      <span class="s1">a_hi=a_hi</span><span class="s2">,</span>
+      <span class="s1">phi_hi=phi_hi</span><span class="s2">,</span>
+      <span class="s1">dphi_hi=dphi_hi</span><span class="s2">,</span>
+      <span class="s1">a_rec=(a_lo + a_hi) / </span><span class="s3">2.</span><span class="s2">,</span>
+      <span class="s1">phi_rec=(phi_lo + phi_hi) / </span><span class="s3">2.</span><span class="s2">,</span>
+      <span class="s1">a_star=</span><span class="s3">1.</span><span class="s2">,</span>
+      <span class="s1">phi_star=phi_lo</span><span class="s2">,</span>
+      <span class="s1">dphi_star=dphi_lo</span><span class="s2">,</span>
+      <span class="s1">g_star=g_0</span><span class="s2">,</span>
+      <span class="s1">nfev=</span><span class="s3">0</span><span class="s2">,</span>
+      <span class="s1">ngev=</span><span class="s3">0</span><span class="s2">,</span>
+  <span class="s1">)</span>
+  <span class="s1">delta1 = </span><span class="s3">0.2</span>
+  <span class="s1">delta2 = </span><span class="s3">0.1</span>
+
+  <span class="s2">def </span><span class="s1">body(state):</span>
+    <span class="s0"># Body of zoom algorithm. We use boolean arithmetic to avoid using jax.cond</span>
+    <span class="s0"># so that it works on GPU/TPU.</span>
+    <span class="s1">dalpha = (state.a_hi - state.a_lo)</span>
+    <span class="s1">a = jnp.minimum(state.a_hi</span><span class="s2">, </span><span class="s1">state.a_lo)</span>
+    <span class="s1">b = jnp.maximum(state.a_hi</span><span class="s2">, </span><span class="s1">state.a_lo)</span>
+    <span class="s1">cchk = delta1 * dalpha</span>
+    <span class="s1">qchk = delta2 * dalpha</span>
+
+    <span class="s0"># This will cause the line search to stop, and since the Wolfe conditions</span>
+    <span class="s0"># are not satisfied the minimization should stop too.</span>
+    <span class="s1">threshold = jnp.where((jnp.finfo(dalpha).bits &lt; </span><span class="s3">64</span><span class="s1">)</span><span class="s2">, </span><span class="s3">1e-5</span><span class="s2">, </span><span class="s3">1e-10</span><span class="s1">)</span>
+    <span class="s1">state = state._replace(failed=state.failed | (dalpha &lt;= threshold))</span>
+
+    <span class="s0"># Cubmin is sometimes nan, though in this case the bounds check will fail.</span>
+    <span class="s1">a_j_cubic = _cubicmin(state.a_lo</span><span class="s2">, </span><span class="s1">state.phi_lo</span><span class="s2">, </span><span class="s1">state.dphi_lo</span><span class="s2">, </span><span class="s1">state.a_hi</span><span class="s2">,</span>
+                          <span class="s1">state.phi_hi</span><span class="s2">, </span><span class="s1">state.a_rec</span><span class="s2">, </span><span class="s1">state.phi_rec)</span>
+    <span class="s1">use_cubic = (state.j &gt; </span><span class="s3">0</span><span class="s1">) &amp; (a_j_cubic &gt; a + cchk) &amp; (a_j_cubic &lt; b - cchk)</span>
+    <span class="s1">a_j_quad = _quadmin(state.a_lo</span><span class="s2">, </span><span class="s1">state.phi_lo</span><span class="s2">, </span><span class="s1">state.dphi_lo</span><span class="s2">, </span><span class="s1">state.a_hi</span><span class="s2">, </span><span class="s1">state.phi_hi)</span>
+    <span class="s1">use_quad = (~use_cubic) &amp; (a_j_quad &gt; a + qchk) &amp; (a_j_quad &lt; b - qchk)</span>
+    <span class="s1">a_j_bisection = (state.a_lo + state.a_hi) / </span><span class="s3">2.</span>
+    <span class="s1">use_bisection = (~use_cubic) &amp; (~use_quad)</span>
+
+    <span class="s1">a_j = jnp.where(use_cubic</span><span class="s2">, </span><span class="s1">a_j_cubic</span><span class="s2">, </span><span class="s1">state.a_rec)</span>
+    <span class="s1">a_j = jnp.where(use_quad</span><span class="s2">, </span><span class="s1">a_j_quad</span><span class="s2">, </span><span class="s1">a_j)</span>
+    <span class="s1">a_j = jnp.where(use_bisection</span><span class="s2">, </span><span class="s1">a_j_bisection</span><span class="s2">, </span><span class="s1">a_j)</span>
+
+    <span class="s0"># TODO(jakevdp): should we use some sort of fixed-point approach here instead?</span>
+    <span class="s1">phi_j</span><span class="s2">, </span><span class="s1">dphi_j</span><span class="s2">, </span><span class="s1">g_j = restricted_func_and_grad(a_j)</span>
+    <span class="s1">phi_j = phi_j.astype(state.phi_lo.dtype)</span>
+    <span class="s1">dphi_j = dphi_j.astype(state.dphi_lo.dtype)</span>
+    <span class="s1">g_j = g_j.astype(state.g_star.dtype)</span>
+    <span class="s1">state = state._replace(nfev=state.nfev + </span><span class="s3">1</span><span class="s2">,</span>
+                           <span class="s1">ngev=state.ngev + </span><span class="s3">1</span><span class="s1">)</span>
+
+    <span class="s1">hi_to_j = wolfe_one(a_j</span><span class="s2">, </span><span class="s1">phi_j) | (phi_j &gt;= state.phi_lo)</span>
+    <span class="s1">star_to_j = wolfe_two(dphi_j) &amp; (~hi_to_j)</span>
+    <span class="s1">hi_to_lo = (dphi_j * (state.a_hi - state.a_lo) &gt;= </span><span class="s3">0.</span><span class="s1">) &amp; (~hi_to_j) &amp; (~star_to_j)</span>
+    <span class="s1">lo_to_j = (~hi_to_j) &amp; (~star_to_j)</span>
+
+    <span class="s1">state = state._replace(</span>
+        <span class="s1">**_binary_replace(</span>
+            <span class="s1">hi_to_j</span><span class="s2">,</span>
+            <span class="s1">state._asdict()</span><span class="s2">,</span>
+            <span class="s1">dict(</span>
+                <span class="s1">a_hi=a_j</span><span class="s2">,</span>
+                <span class="s1">phi_hi=phi_j</span><span class="s2">,</span>
+                <span class="s1">dphi_hi=dphi_j</span><span class="s2">,</span>
+                <span class="s1">a_rec=state.a_hi</span><span class="s2">,</span>
+                <span class="s1">phi_rec=state.phi_hi</span><span class="s2">,</span>
+            <span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">)</span><span class="s2">,</span>
+    <span class="s1">)</span>
+
+    <span class="s0"># for termination</span>
+    <span class="s1">state = state._replace(</span>
+        <span class="s1">done=star_to_j | state.done</span><span class="s2">,</span>
+        <span class="s1">**_binary_replace(</span>
+            <span class="s1">star_to_j</span><span class="s2">,</span>
+            <span class="s1">state._asdict()</span><span class="s2">,</span>
+            <span class="s1">dict(</span>
+                <span class="s1">a_star=a_j</span><span class="s2">,</span>
+                <span class="s1">phi_star=phi_j</span><span class="s2">,</span>
+                <span class="s1">dphi_star=dphi_j</span><span class="s2">,</span>
+                <span class="s1">g_star=g_j</span><span class="s2">,</span>
+            <span class="s1">)</span>
+        <span class="s1">)</span><span class="s2">,</span>
+    <span class="s1">)</span>
+    <span class="s1">state = state._replace(</span>
+        <span class="s1">**_binary_replace(</span>
+            <span class="s1">hi_to_lo</span><span class="s2">,</span>
+            <span class="s1">state._asdict()</span><span class="s2">,</span>
+            <span class="s1">dict(</span>
+                <span class="s1">a_hi=state.a_lo</span><span class="s2">,</span>
+                <span class="s1">phi_hi=state.phi_lo</span><span class="s2">,</span>
+                <span class="s1">dphi_hi=state.dphi_lo</span><span class="s2">,</span>
+                <span class="s1">a_rec=state.a_hi</span><span class="s2">,</span>
+                <span class="s1">phi_rec=state.phi_hi</span><span class="s2">,</span>
+            <span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">)</span><span class="s2">,</span>
+    <span class="s1">)</span>
+    <span class="s1">state = state._replace(</span>
+        <span class="s1">**_binary_replace(</span>
+            <span class="s1">lo_to_j</span><span class="s2">,</span>
+            <span class="s1">state._asdict()</span><span class="s2">,</span>
+            <span class="s1">dict(</span>
+                <span class="s1">a_lo=a_j</span><span class="s2">,</span>
+                <span class="s1">phi_lo=phi_j</span><span class="s2">,</span>
+                <span class="s1">dphi_lo=dphi_j</span><span class="s2">,</span>
+                <span class="s1">a_rec=state.a_lo</span><span class="s2">,</span>
+                <span class="s1">phi_rec=state.phi_lo</span><span class="s2">,</span>
+            <span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">)</span><span class="s2">,</span>
+    <span class="s1">)</span>
+    <span class="s1">state = state._replace(j=state.j + </span><span class="s3">1</span><span class="s1">)</span>
+    <span class="s0"># Choose higher cutoff for maxiter than Scipy as Jax takes longer to find</span>
+    <span class="s0"># the same value - possibly floating point issues?</span>
+    <span class="s1">state = state._replace(failed= state.failed | (state.j &gt;= </span><span class="s3">30</span><span class="s1">))</span>
+    <span class="s2">return </span><span class="s1">state</span>
+
+  <span class="s1">state = lax.while_loop(</span><span class="s2">lambda </span><span class="s1">state: (~state.done) &amp; (~pass_through) &amp; (~state.failed)</span><span class="s2">,</span>
+                         <span class="s1">body</span><span class="s2">,</span>
+                         <span class="s1">state)</span>
+
+  <span class="s2">return </span><span class="s1">state</span>
+
+
+<span class="s2">class </span><span class="s1">_LineSearchState(NamedTuple):</span>
+  <span class="s1">done: Union[bool</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">failed: Union[bool</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">i: Union[int</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">a_i1: Union[float</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">phi_i1: Union[float</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">dphi_i1: Union[float</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">nfev: Union[int</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">ngev: Union[int</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">a_star: Union[float</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">phi_star: Union[float</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">dphi_star: Union[float</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">g_star: jax.Array</span>
+
+
+<span class="s2">class </span><span class="s1">_LineSearchResults(NamedTuple):</span>
+  <span class="s4">&quot;&quot;&quot;Results of line search. 
+ 
+  Parameters: 
+    failed: True if the strong Wolfe criteria were satisfied 
+    nit: integer number of iterations 
+    nfev: integer number of functions evaluations 
+    ngev: integer number of gradients evaluations 
+    k: integer number of iterations 
+    a_k: integer step size 
+    f_k: final function value 
+    g_k: final gradient value 
+    status: integer end status 
+  &quot;&quot;&quot;</span>
+  <span class="s1">failed: Union[bool</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">nit: Union[int</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">nfev: Union[int</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">ngev: Union[int</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">k: Union[int</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">a_k: Union[int</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+  <span class="s1">f_k: jax.Array</span>
+  <span class="s1">g_k: jax.Array</span>
+  <span class="s1">status: Union[bool</span><span class="s2">, </span><span class="s1">jax.Array]</span>
+
+
+<span class="s2">def </span><span class="s1">line_search(f</span><span class="s2">, </span><span class="s1">xk</span><span class="s2">, </span><span class="s1">pk</span><span class="s2">, </span><span class="s1">old_fval=</span><span class="s2">None, </span><span class="s1">old_old_fval=</span><span class="s2">None, </span><span class="s1">gfk=</span><span class="s2">None, </span><span class="s1">c1=</span><span class="s3">1e-4</span><span class="s2">,</span>
+                <span class="s1">c2=</span><span class="s3">0.9</span><span class="s2">, </span><span class="s1">maxiter=</span><span class="s3">20</span><span class="s1">):</span>
+  <span class="s4">&quot;&quot;&quot;Inexact line search that satisfies strong Wolfe conditions. 
+ 
+  Algorithm 3.5 from Wright and Nocedal, 'Numerical Optimization', 1999, pg. 59-61 
+ 
+  Args: 
+    fun: function of the form f(x) where x is a flat ndarray and returns a real 
+      scalar. The function should be composed of operations with vjp defined. 
+    x0: initial guess. 
+    pk: direction to search in. Assumes the direction is a descent direction. 
+    old_fval, gfk: initial value of value_and_gradient as position. 
+    old_old_fval: unused argument, only for scipy API compliance. 
+    maxiter: maximum number of iterations to search 
+    c1, c2: Wolfe criteria constant, see ref. 
+ 
+  Returns: LineSearchResults 
+  &quot;&quot;&quot;</span>
+  <span class="s1">xk</span><span class="s2">, </span><span class="s1">pk = promote_dtypes_inexact(xk</span><span class="s2">, </span><span class="s1">pk)</span>
+  <span class="s2">def </span><span class="s1">restricted_func_and_grad(t):</span>
+    <span class="s1">t = jnp.array(t</span><span class="s2">, </span><span class="s1">dtype=pk.dtype)</span>
+    <span class="s1">phi</span><span class="s2">, </span><span class="s1">g = jax.value_and_grad(f)(xk + t * pk)</span>
+    <span class="s1">dphi = jnp.real(_dot(g</span><span class="s2">, </span><span class="s1">pk))</span>
+    <span class="s2">return </span><span class="s1">phi</span><span class="s2">, </span><span class="s1">dphi</span><span class="s2">, </span><span class="s1">g</span>
+
+  <span class="s2">if </span><span class="s1">old_fval </span><span class="s2">is None or </span><span class="s1">gfk </span><span class="s2">is None</span><span class="s1">:</span>
+    <span class="s1">phi_0</span><span class="s2">, </span><span class="s1">dphi_0</span><span class="s2">, </span><span class="s1">gfk = restricted_func_and_grad(</span><span class="s3">0</span><span class="s1">)</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s1">phi_0 = old_fval</span>
+    <span class="s1">dphi_0 = jnp.real(_dot(gfk</span><span class="s2">, </span><span class="s1">pk))</span>
+  <span class="s2">if </span><span class="s1">old_old_fval </span><span class="s2">is not None</span><span class="s1">:</span>
+    <span class="s1">candidate_start_value = </span><span class="s3">1.01 </span><span class="s1">* </span><span class="s3">2 </span><span class="s1">* (phi_0 - old_old_fval) / dphi_0</span>
+    <span class="s1">start_value = jnp.where(candidate_start_value &gt; </span><span class="s3">1</span><span class="s2">, </span><span class="s3">1.0</span><span class="s2">, </span><span class="s1">candidate_start_value)</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s1">start_value = </span><span class="s3">1</span>
+
+  <span class="s2">def </span><span class="s1">wolfe_one(a_i</span><span class="s2">, </span><span class="s1">phi_i):</span>
+    <span class="s0"># actually negation of W1</span>
+    <span class="s2">return </span><span class="s1">phi_i &gt; phi_0 + c1 * a_i * dphi_0</span>
+
+  <span class="s2">def </span><span class="s1">wolfe_two(dphi_i):</span>
+    <span class="s2">return </span><span class="s1">jnp.abs(dphi_i) &lt;= -c2 * dphi_0</span>
+
+  <span class="s1">state = _LineSearchState(</span>
+      <span class="s1">done=</span><span class="s2">False,</span>
+      <span class="s1">failed=</span><span class="s2">False,</span>
+      <span class="s0"># algorithm begins at 1 as per Wright and Nocedal, however Scipy has a</span>
+      <span class="s0"># bug and starts at 0. See https://github.com/scipy/scipy/issues/12157</span>
+      <span class="s1">i=</span><span class="s3">1</span><span class="s2">,</span>
+      <span class="s1">a_i1=</span><span class="s3">0.</span><span class="s2">,</span>
+      <span class="s1">phi_i1=phi_0</span><span class="s2">,</span>
+      <span class="s1">dphi_i1=dphi_0</span><span class="s2">,</span>
+      <span class="s1">nfev=</span><span class="s3">1 </span><span class="s2">if </span><span class="s1">(old_fval </span><span class="s2">is None or </span><span class="s1">gfk </span><span class="s2">is None</span><span class="s1">) </span><span class="s2">else </span><span class="s3">0</span><span class="s2">,</span>
+      <span class="s1">ngev=</span><span class="s3">1 </span><span class="s2">if </span><span class="s1">(old_fval </span><span class="s2">is None or </span><span class="s1">gfk </span><span class="s2">is None</span><span class="s1">) </span><span class="s2">else </span><span class="s3">0</span><span class="s2">,</span>
+      <span class="s1">a_star=</span><span class="s3">0.</span><span class="s2">,</span>
+      <span class="s1">phi_star=phi_0</span><span class="s2">,</span>
+      <span class="s1">dphi_star=dphi_0</span><span class="s2">,</span>
+      <span class="s1">g_star=gfk</span><span class="s2">,</span>
+  <span class="s1">)</span>
+
+  <span class="s2">def </span><span class="s1">body(state):</span>
+    <span class="s0"># no amax in this version, we just double as in scipy.</span>
+    <span class="s0"># unlike original algorithm we do our next choice at the start of this loop</span>
+    <span class="s1">a_i = jnp.where(state.i == </span><span class="s3">1</span><span class="s2">, </span><span class="s1">start_value</span><span class="s2">, </span><span class="s1">state.a_i1 * </span><span class="s3">2.</span><span class="s1">)</span>
+
+    <span class="s1">phi_i</span><span class="s2">, </span><span class="s1">dphi_i</span><span class="s2">, </span><span class="s1">g_i = restricted_func_and_grad(a_i)</span>
+    <span class="s1">state = state._replace(nfev=state.nfev + </span><span class="s3">1</span><span class="s2">,</span>
+                           <span class="s1">ngev=state.ngev + </span><span class="s3">1</span><span class="s1">)</span>
+
+    <span class="s1">star_to_zoom1 = wolfe_one(a_i</span><span class="s2">, </span><span class="s1">phi_i) | ((phi_i &gt;= state.phi_i1) &amp; (state.i &gt; </span><span class="s3">1</span><span class="s1">))</span>
+    <span class="s1">star_to_i = wolfe_two(dphi_i) &amp; (~star_to_zoom1)</span>
+    <span class="s1">star_to_zoom2 = (dphi_i &gt;= </span><span class="s3">0.</span><span class="s1">) &amp; (~star_to_zoom1) &amp; (~star_to_i)</span>
+
+    <span class="s1">zoom1 = _zoom(restricted_func_and_grad</span><span class="s2">,</span>
+                  <span class="s1">wolfe_one</span><span class="s2">,</span>
+                  <span class="s1">wolfe_two</span><span class="s2">,</span>
+                  <span class="s1">state.a_i1</span><span class="s2">,</span>
+                  <span class="s1">state.phi_i1</span><span class="s2">,</span>
+                  <span class="s1">state.dphi_i1</span><span class="s2">,</span>
+                  <span class="s1">a_i</span><span class="s2">,</span>
+                  <span class="s1">phi_i</span><span class="s2">,</span>
+                  <span class="s1">dphi_i</span><span class="s2">,</span>
+                  <span class="s1">gfk</span><span class="s2">,</span>
+                  <span class="s1">~star_to_zoom1)</span>
+
+    <span class="s1">state = state._replace(nfev=state.nfev + zoom1.nfev</span><span class="s2">,</span>
+                           <span class="s1">ngev=state.ngev + zoom1.ngev)</span>
+
+    <span class="s1">zoom2 = _zoom(restricted_func_and_grad</span><span class="s2">,</span>
+                  <span class="s1">wolfe_one</span><span class="s2">,</span>
+                  <span class="s1">wolfe_two</span><span class="s2">,</span>
+                  <span class="s1">a_i</span><span class="s2">,</span>
+                  <span class="s1">phi_i</span><span class="s2">,</span>
+                  <span class="s1">dphi_i</span><span class="s2">,</span>
+                  <span class="s1">state.a_i1</span><span class="s2">,</span>
+                  <span class="s1">state.phi_i1</span><span class="s2">,</span>
+                  <span class="s1">state.dphi_i1</span><span class="s2">,</span>
+                  <span class="s1">gfk</span><span class="s2">,</span>
+                  <span class="s1">~star_to_zoom2)</span>
+
+    <span class="s1">state = state._replace(nfev=state.nfev + zoom2.nfev</span><span class="s2">,</span>
+                           <span class="s1">ngev=state.ngev + zoom2.ngev)</span>
+
+    <span class="s1">state = state._replace(</span>
+        <span class="s1">done=star_to_zoom1 | state.done</span><span class="s2">,</span>
+        <span class="s1">failed=(star_to_zoom1 &amp; zoom1.failed) | state.failed</span><span class="s2">,</span>
+        <span class="s1">**_binary_replace(</span>
+            <span class="s1">star_to_zoom1</span><span class="s2">,</span>
+            <span class="s1">state._asdict()</span><span class="s2">,</span>
+            <span class="s1">zoom1._asdict()</span><span class="s2">,</span>
+            <span class="s1">keys=[</span><span class="s5">'a_star'</span><span class="s2">, </span><span class="s5">'phi_star'</span><span class="s2">, </span><span class="s5">'dphi_star'</span><span class="s2">, </span><span class="s5">'g_star'</span><span class="s1">]</span><span class="s2">,</span>
+        <span class="s1">)</span><span class="s2">,</span>
+    <span class="s1">)</span>
+    <span class="s1">state = state._replace(</span>
+        <span class="s1">done=star_to_i | state.done</span><span class="s2">,</span>
+        <span class="s1">**_binary_replace(</span>
+            <span class="s1">star_to_i</span><span class="s2">,</span>
+            <span class="s1">state._asdict()</span><span class="s2">,</span>
+            <span class="s1">dict(</span>
+                <span class="s1">a_star=a_i</span><span class="s2">,</span>
+                <span class="s1">phi_star=phi_i</span><span class="s2">,</span>
+                <span class="s1">dphi_star=dphi_i</span><span class="s2">,</span>
+                <span class="s1">g_star=g_i</span><span class="s2">,</span>
+            <span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">)</span><span class="s2">,</span>
+    <span class="s1">)</span>
+    <span class="s1">state = state._replace(</span>
+        <span class="s1">done=star_to_zoom2 | state.done</span><span class="s2">,</span>
+        <span class="s1">failed=(star_to_zoom2 &amp; zoom2.failed) | state.failed</span><span class="s2">,</span>
+        <span class="s1">**_binary_replace(</span>
+            <span class="s1">star_to_zoom2</span><span class="s2">,</span>
+            <span class="s1">state._asdict()</span><span class="s2">,</span>
+            <span class="s1">zoom2._asdict()</span><span class="s2">,</span>
+            <span class="s1">keys=[</span><span class="s5">'a_star'</span><span class="s2">, </span><span class="s5">'phi_star'</span><span class="s2">, </span><span class="s5">'dphi_star'</span><span class="s2">, </span><span class="s5">'g_star'</span><span class="s1">]</span><span class="s2">,</span>
+        <span class="s1">)</span><span class="s2">,</span>
+    <span class="s1">)</span>
+    <span class="s1">state = state._replace(i=state.i + </span><span class="s3">1</span><span class="s2">, </span><span class="s1">a_i1=a_i</span><span class="s2">, </span><span class="s1">phi_i1=phi_i</span><span class="s2">, </span><span class="s1">dphi_i1=dphi_i)</span>
+    <span class="s2">return </span><span class="s1">state</span>
+
+  <span class="s1">state = lax.while_loop(</span><span class="s2">lambda </span><span class="s1">state: (~state.done) &amp; (state.i &lt;= maxiter) &amp; (~state.failed)</span><span class="s2">,</span>
+                         <span class="s1">body</span><span class="s2">,</span>
+                         <span class="s1">state)</span>
+
+  <span class="s1">status = jnp.where(</span>
+      <span class="s1">state.failed</span><span class="s2">,</span>
+      <span class="s1">jnp.array(</span><span class="s3">1</span><span class="s1">)</span><span class="s2">,  </span><span class="s0"># zoom failed</span>
+          <span class="s1">jnp.where(</span>
+              <span class="s1">state.i &gt; maxiter</span><span class="s2">,</span>
+              <span class="s1">jnp.array(</span><span class="s3">3</span><span class="s1">)</span><span class="s2">,  </span><span class="s0"># maxiter reached</span>
+              <span class="s1">jnp.array(</span><span class="s3">0</span><span class="s1">)</span><span class="s2">,  </span><span class="s0"># passed (should be)</span>
+          <span class="s1">)</span><span class="s2">,</span>
+  <span class="s1">)</span>
+  <span class="s0"># Step sizes which are too small causes the optimizer to get stuck with a</span>
+  <span class="s0"># direction of zero in &lt;64 bit mode - avoid with a floor on minimum step size.</span>
+  <span class="s1">alpha_k = state.a_star</span>
+  <span class="s1">alpha_k = jnp.where((jnp.finfo(alpha_k).bits != </span><span class="s3">64</span><span class="s1">)</span>
+                    <span class="s1">&amp; (jnp.abs(alpha_k) &lt; </span><span class="s3">1e-8</span><span class="s1">)</span><span class="s2">,</span>
+                      <span class="s1">jnp.sign(alpha_k) * </span><span class="s3">1e-8</span><span class="s2">,</span>
+                      <span class="s1">alpha_k)</span>
+  <span class="s1">results = _LineSearchResults(</span>
+      <span class="s1">failed=state.failed | (~state.done)</span><span class="s2">,</span>
+      <span class="s1">nit=state.i - </span><span class="s3">1</span><span class="s2">,  </span><span class="s0"># because iterations started at 1</span>
+      <span class="s1">nfev=state.nfev</span><span class="s2">,</span>
+      <span class="s1">ngev=state.ngev</span><span class="s2">,</span>
+      <span class="s1">k=state.i</span><span class="s2">,</span>
+      <span class="s1">a_k=alpha_k</span><span class="s2">,</span>
+      <span class="s1">f_k=state.phi_star</span><span class="s2">,</span>
+      <span class="s1">g_k=state.g_star</span><span class="s2">,</span>
+      <span class="s1">status=status</span><span class="s2">,</span>
+  <span class="s1">)</span>
+  <span class="s2">return </span><span class="s1">results</span>
+</pre>
+</body>
+</html>

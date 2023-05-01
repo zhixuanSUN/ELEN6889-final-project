@@ -1,0 +1,226 @@
+<html>
+<head>
+<title>traceback_util.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+.s5 { color: #629755; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+traceback_util.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2020 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s2">import </span><span class="s1">functools</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">traceback</span>
+<span class="s2">import </span><span class="s1">types</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Any</span><span class="s2">, </span><span class="s1">Callable</span><span class="s2">, </span><span class="s1">List</span><span class="s2">, </span><span class="s1">Optional</span><span class="s2">, </span><span class="s1">TypeVar</span><span class="s2">, </span><span class="s1">cast</span>
+
+<span class="s2">from </span><span class="s1">jax._src.config </span><span class="s2">import </span><span class="s1">config</span>
+<span class="s2">from </span><span class="s1">jax._src.lib </span><span class="s2">import </span><span class="s1">xla_extension</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">util</span>
+
+
+<span class="s1">C = TypeVar(</span><span class="s3">&quot;C&quot;</span><span class="s2">, </span><span class="s1">bound=Callable[...</span><span class="s2">, </span><span class="s1">Any])</span>
+
+<span class="s1">_exclude_paths: List[str] = [__file__</span><span class="s2">, </span><span class="s1">util.__file__]</span>
+
+<span class="s2">def </span><span class="s1">register_exclusion(path: str):</span>
+  <span class="s1">_exclude_paths.append(path)</span>
+
+<span class="s1">_jax_message_append = (</span>
+    <span class="s3">'The stack trace below excludes JAX-internal frames.</span><span class="s2">\n</span><span class="s3">'</span>
+    <span class="s3">'The preceding is the original exception that occurred, unmodified.</span><span class="s2">\n</span><span class="s3">'</span>
+    <span class="s3">'</span><span class="s2">\n</span><span class="s3">--------------------'</span><span class="s1">)</span>
+
+<span class="s2">def </span><span class="s1">_path_starts_with(path: str</span><span class="s2">, </span><span class="s1">path_prefix: str) -&gt; bool:</span>
+  <span class="s1">path = os.path.abspath(path)</span>
+  <span class="s1">path_prefix = os.path.abspath(path_prefix)</span>
+  <span class="s2">try</span><span class="s1">:</span>
+    <span class="s1">common = os.path.commonpath([path</span><span class="s2">, </span><span class="s1">path_prefix])</span>
+  <span class="s2">except </span><span class="s1">ValueError:</span>
+    <span class="s0"># path and path_prefix are both absolute, the only case will raise a</span>
+    <span class="s0"># ValueError is different drives.</span>
+    <span class="s0"># https://docs.python.org/3/library/os.path.html#os.path.commonpath</span>
+    <span class="s2">return False</span>
+  <span class="s2">try</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">common == path_prefix </span><span class="s2">or </span><span class="s1">os.path.samefile(common</span><span class="s2">, </span><span class="s1">path_prefix)</span>
+  <span class="s2">except </span><span class="s1">OSError:</span>
+    <span class="s0"># One of the paths may not exist.</span>
+    <span class="s2">return False</span>
+
+<span class="s2">def </span><span class="s1">include_frame(f: types.FrameType) -&gt; bool:</span>
+  <span class="s2">return not </span><span class="s1">any(_path_starts_with(f.f_code.co_filename</span><span class="s2">, </span><span class="s1">path)</span>
+                 <span class="s2">for </span><span class="s1">path </span><span class="s2">in </span><span class="s1">_exclude_paths)</span>
+
+<span class="s0"># When scanning stack traces, we might encounter frames from cpython that are</span>
+<span class="s0"># removed from printed stack traces, such as frames from parts of importlib. We</span>
+<span class="s0"># ignore these frames heuristically based on source and name match.</span>
+<span class="s2">def </span><span class="s1">_ignore_known_hidden_frame(f: types.FrameType) -&gt; bool:</span>
+  <span class="s2">return </span><span class="s3">'importlib._bootstrap' </span><span class="s2">in </span><span class="s1">f.f_code.co_filename</span>
+
+<span class="s2">def </span><span class="s1">_add_tracebackhide_to_hidden_frames(tb: types.TracebackType):</span>
+  <span class="s2">for </span><span class="s1">f</span><span class="s2">, </span><span class="s1">_lineno </span><span class="s2">in </span><span class="s1">traceback.walk_tb(tb):</span>
+    <span class="s2">if not </span><span class="s1">include_frame(f):</span>
+      <span class="s1">f.f_locals[</span><span class="s3">&quot;__tracebackhide__&quot;</span><span class="s1">] = </span><span class="s2">True</span>
+
+<span class="s2">def </span><span class="s1">filter_traceback(tb: types.TracebackType) -&gt; Optional[types.TracebackType]:</span>
+  <span class="s1">out = </span><span class="s2">None</span>
+  <span class="s0"># Scan the traceback and collect relevant frames.</span>
+  <span class="s1">frames = list(traceback.walk_tb(tb))</span>
+  <span class="s2">for </span><span class="s1">f</span><span class="s2">, </span><span class="s1">lineno </span><span class="s2">in </span><span class="s1">reversed(frames):</span>
+    <span class="s2">if </span><span class="s1">include_frame(f):</span>
+      <span class="s1">out = types.TracebackType(out</span><span class="s2">, </span><span class="s1">f</span><span class="s2">, </span><span class="s1">f.f_lasti</span><span class="s2">, </span><span class="s1">lineno)</span>
+  <span class="s2">return </span><span class="s1">out</span>
+
+<span class="s2">def </span><span class="s1">_add_call_stack_frames(tb: types.TracebackType) -&gt; types.TracebackType:</span>
+  <span class="s0"># Continue up the call stack.</span>
+  <span class="s0">#</span>
+  <span class="s0"># We would like to avoid stepping too far up, e.g. past the exec/eval point of</span>
+  <span class="s0"># a REPL such as IPython. To that end, we stop past the first contiguous bunch</span>
+  <span class="s0"># of module-level frames, if we reach any such frames at all. This is a</span>
+  <span class="s0"># heuristic that might stop in advance of the REPL boundary. For example, if</span>
+  <span class="s0"># the call stack includes module-level frames from the current module A, and</span>
+  <span class="s0"># the current module A was imported from within a function F elsewhere, then</span>
+  <span class="s0"># the stack trace we produce will be truncated at F's frame.</span>
+  <span class="s1">out = tb</span>
+
+  <span class="s1">reached_module_level = </span><span class="s2">False</span>
+  <span class="s2">for </span><span class="s1">f</span><span class="s2">, </span><span class="s1">lineno </span><span class="s2">in </span><span class="s1">traceback.walk_stack(tb.tb_frame):</span>
+    <span class="s2">if </span><span class="s1">_ignore_known_hidden_frame(f):</span>
+      <span class="s2">continue</span>
+    <span class="s2">if </span><span class="s1">reached_module_level </span><span class="s2">and </span><span class="s1">f.f_code.co_name != </span><span class="s3">'&lt;module&gt;'</span><span class="s1">:</span>
+      <span class="s2">break</span>
+    <span class="s2">if </span><span class="s1">include_frame(f):</span>
+      <span class="s1">out = types.TracebackType(out</span><span class="s2">, </span><span class="s1">f</span><span class="s2">, </span><span class="s1">f.f_lasti</span><span class="s2">, </span><span class="s1">lineno)</span>
+    <span class="s2">if </span><span class="s1">f.f_code.co_name == </span><span class="s3">'&lt;module&gt;'</span><span class="s1">:</span>
+      <span class="s1">reached_module_level = </span><span class="s2">True</span>
+  <span class="s2">return </span><span class="s1">out</span>
+
+<span class="s2">def </span><span class="s1">_is_reraiser_frame(f: traceback.FrameSummary) -&gt; bool:</span>
+  <span class="s2">return </span><span class="s1">(f.filename == __file__ </span><span class="s2">and</span>
+          <span class="s1">f.name == </span><span class="s3">'reraise_with_filtered_traceback'</span><span class="s1">)</span>
+
+<span class="s2">def </span><span class="s1">_is_under_reraiser(e: BaseException) -&gt; bool:</span>
+  <span class="s2">if </span><span class="s1">e.__traceback__ </span><span class="s2">is None</span><span class="s1">:</span>
+    <span class="s2">return False</span>
+  <span class="s1">tb = traceback.extract_stack(e.__traceback__.tb_frame)</span>
+  <span class="s2">return </span><span class="s1">any(_is_reraiser_frame(f) </span><span class="s2">for </span><span class="s1">f </span><span class="s2">in </span><span class="s1">tb[:-</span><span class="s4">1</span><span class="s1">])</span>
+
+<span class="s2">def </span><span class="s1">format_exception_only(e: BaseException) -&gt; str:</span>
+  <span class="s2">return </span><span class="s3">''</span><span class="s1">.join(traceback.format_exception_only(type(e)</span><span class="s2">, </span><span class="s1">e)).strip()</span>
+
+<span class="s2">class </span><span class="s1">UnfilteredStackTrace(Exception): </span><span class="s2">pass</span>
+
+<span class="s2">def </span><span class="s1">_running_under_ipython() -&gt; bool:</span>
+  <span class="s5">&quot;&quot;&quot;Returns true if we appear to be in an IPython session.&quot;&quot;&quot;</span>
+  <span class="s2">try</span><span class="s1">:</span>
+    <span class="s1">get_ipython()  </span><span class="s0"># type: ignore</span>
+    <span class="s2">return True</span>
+  <span class="s2">except </span><span class="s1">NameError:</span>
+    <span class="s2">return False</span>
+
+<span class="s2">def </span><span class="s1">_ipython_supports_tracebackhide() -&gt; bool:</span>
+  <span class="s5">&quot;&quot;&quot;Returns true if the IPython version supports __tracebackhide__.&quot;&quot;&quot;</span>
+  <span class="s2">import </span><span class="s1">IPython  </span><span class="s0"># type: ignore</span>
+  <span class="s2">return </span><span class="s1">IPython.version_info[:</span><span class="s4">2</span><span class="s1">] &gt;= (</span><span class="s4">7</span><span class="s2">, </span><span class="s4">17</span><span class="s1">)</span>
+
+<span class="s2">def </span><span class="s1">_filtering_mode() -&gt; str:</span>
+  <span class="s1">mode = config.jax_traceback_filtering</span>
+  <span class="s2">if </span><span class="s1">mode </span><span class="s2">is None or </span><span class="s1">mode == </span><span class="s3">&quot;auto&quot;</span><span class="s1">:</span>
+    <span class="s2">if </span><span class="s1">(_running_under_ipython() </span><span class="s2">and </span><span class="s1">_ipython_supports_tracebackhide()):</span>
+      <span class="s1">mode = </span><span class="s3">&quot;tracebackhide&quot;</span>
+    <span class="s2">else</span><span class="s1">:</span>
+      <span class="s1">mode = </span><span class="s3">&quot;remove_frames&quot;</span>
+  <span class="s2">return </span><span class="s1">mode</span>
+
+<span class="s2">def </span><span class="s1">api_boundary(fun: C) -&gt; C:</span>
+  <span class="s5">'''Wraps ``fun`` to form a boundary for filtering exception tracebacks. 
+ 
+  When an exception occurs below ``fun``, this appends to it a custom 
+  ``__cause__`` that carries a filtered traceback. The traceback imitates the 
+  stack trace of the original exception, but with JAX-internal frames removed. 
+ 
+  This boundary annotation works in composition with itself. The topmost frame 
+  corresponding to an :func:`~api_boundary` is the one below which stack traces 
+  are filtered. In other words, if ``api_boundary(f)`` calls 
+  ``api_boundary(g)``, directly or indirectly, the filtered stack trace provided 
+  is the same as if ``api_boundary(f)`` were to simply call ``g`` instead. 
+ 
+  This annotation is primarily useful in wrapping functions output by JAX's 
+  transformations. For example, consider ``g = jax.jit(f)``. When ``g`` is 
+  called, JAX's JIT compilation machinery is invoked, which in turn calls ``f`` 
+  in order to trace and translate it. If the function ``f`` raises an exception, 
+  the stack unwinds through JAX's JIT internals up to the original call site of 
+  ``g``. Because the function returned by :func:`~jax.jit` is annotated as an 
+  :func:`~api_boundary`, such an exception is accompanied by an additional 
+  traceback that excludes the frames specific to JAX's implementation. 
+  '''</span>
+
+  <span class="s1">@functools.wraps(fun)</span>
+  <span class="s2">def </span><span class="s1">reraise_with_filtered_traceback(*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+    <span class="s1">__tracebackhide__ = </span><span class="s2">True</span>
+    <span class="s2">try</span><span class="s1">:</span>
+      <span class="s2">return </span><span class="s1">fun(*args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+    <span class="s2">except </span><span class="s1">Exception </span><span class="s2">as </span><span class="s1">e:</span>
+      <span class="s1">mode = _filtering_mode()</span>
+      <span class="s2">if </span><span class="s1">_is_under_reraiser(e) </span><span class="s2">or </span><span class="s1">mode == </span><span class="s3">&quot;off&quot;</span><span class="s1">:</span>
+        <span class="s2">raise</span>
+      <span class="s2">if </span><span class="s1">mode == </span><span class="s3">&quot;tracebackhide&quot;</span><span class="s1">:</span>
+        <span class="s1">_add_tracebackhide_to_hidden_frames(e.__traceback__)</span>
+        <span class="s2">raise</span>
+      <span class="s2">assert </span><span class="s1">mode == </span><span class="s3">&quot;remove_frames&quot;</span><span class="s2">, </span><span class="s1">mode</span>
+
+      <span class="s1">filtered_tb</span><span class="s2">, </span><span class="s1">unfiltered</span><span class="s2">, </span><span class="s1">mode = </span><span class="s2">None, None, None</span>
+      <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">filtered_tb = filter_traceback(e.__traceback__)</span>
+        <span class="s1">msg = format_exception_only(e)</span>
+        <span class="s1">msg = </span><span class="s3">f'</span><span class="s2">{</span><span class="s1">msg</span><span class="s2">}\n\n{</span><span class="s1">_jax_message_append</span><span class="s2">}</span><span class="s3">'</span>
+        <span class="s1">unfiltered = UnfilteredStackTrace(msg)</span>
+        <span class="s1">unfiltered.with_traceback(_add_call_stack_frames(e.__traceback__))</span>
+        <span class="s1">unfiltered.__context__ = e.__context__</span>
+        <span class="s1">unfiltered.__cause__ = e.__cause__</span>
+        <span class="s1">unfiltered.__suppress_context__ = e.__suppress_context__</span>
+        <span class="s1">e.__context__ = </span><span class="s2">None</span>
+        <span class="s1">e.__cause__ = unfiltered</span>
+
+        <span class="s1">e.__traceback__ = filtered_tb</span>
+        <span class="s0"># In Python &lt; 3.11, there seems to be no way to alter the currently</span>
+        <span class="s0"># raised exception traceback, except via the C API. The interpreter</span>
+        <span class="s0"># keeps a copy of the traceback (exc_traceback) that is separate to the</span>
+        <span class="s0"># __traceback__ of exc_value. Python 3.11 removes exc_traceback and</span>
+        <span class="s0"># just setting __traceback__ is enough. Since it is no longer needed,</span>
+        <span class="s0"># the XLA extension no longer defines a traceback-replacing method at</span>
+        <span class="s0"># Python 3.11 and onward.</span>
+        <span class="s2">if </span><span class="s1">hasattr(xla_extension</span><span class="s2">, </span><span class="s3">&quot;replace_thread_exc_traceback&quot;</span><span class="s1">):</span>
+          <span class="s1">xla_extension.replace_thread_exc_traceback(filtered_tb)</span>
+        <span class="s2">raise</span>
+      <span class="s2">finally</span><span class="s1">:</span>
+        <span class="s2">del </span><span class="s1">filtered_tb</span>
+        <span class="s2">del </span><span class="s1">unfiltered</span>
+        <span class="s2">del </span><span class="s1">mode</span>
+  <span class="s2">return </span><span class="s1">cast(C</span><span class="s2">, </span><span class="s1">reraise_with_filtered_traceback)</span>
+</pre>
+</body>
+</html>

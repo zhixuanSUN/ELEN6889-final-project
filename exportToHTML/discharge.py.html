@@ -1,0 +1,265 @@
+<html>
+<head>
+<title>discharge.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+discharge.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2022 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+<span class="s2">&quot;&quot;&quot;Module for discharging state primitives.&quot;&quot;&quot;</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">annotations</span>
+<span class="s3">import </span><span class="s1">dataclasses</span>
+<span class="s3">from </span><span class="s1">functools </span><span class="s3">import </span><span class="s1">partial</span>
+
+<span class="s3">from </span><span class="s1">typing </span><span class="s3">import </span><span class="s1">Any</span><span class="s3">, </span><span class="s1">Dict</span><span class="s3">, </span><span class="s1">List</span><span class="s3">, </span><span class="s1">Optional</span><span class="s3">, </span><span class="s1">Protocol</span><span class="s3">, </span><span class="s1">Sequence</span><span class="s3">, </span><span class="s1">Tuple</span><span class="s3">, </span><span class="s1">Union</span>
+
+<span class="s3">import </span><span class="s1">numpy </span><span class="s3">as </span><span class="s1">np</span>
+
+<span class="s3">from </span><span class="s1">jax </span><span class="s3">import </span><span class="s1">lax</span>
+
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">core</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">linear_util </span><span class="s3">as </span><span class="s1">lu</span>
+<span class="s3">from </span><span class="s1">jax._src.interpreters </span><span class="s3">import </span><span class="s1">partial_eval </span><span class="s3">as </span><span class="s1">pe</span>
+<span class="s3">from </span><span class="s1">jax._src.state.types </span><span class="s3">import </span><span class="s1">AbstractRef</span>
+<span class="s3">from </span><span class="s1">jax._src.state.primitives </span><span class="s3">import </span><span class="s1">get_p</span><span class="s3">, </span><span class="s1">swap_p</span><span class="s3">, </span><span class="s1">addupdate_p</span>
+<span class="s3">from </span><span class="s1">jax._src.util </span><span class="s3">import </span><span class="s1">safe_map</span><span class="s3">, </span><span class="s1">safe_zip</span><span class="s3">, </span><span class="s1">split_list</span>
+
+<span class="s0">## JAX utilities</span>
+
+<span class="s1">map</span><span class="s3">, </span><span class="s1">unsafe_map = safe_map</span><span class="s3">, </span><span class="s1">map</span>
+<span class="s1">zip</span><span class="s3">, </span><span class="s1">unsafe_zip = safe_zip</span><span class="s3">, </span><span class="s1">zip</span>
+
+<span class="s0">## Discharging state</span>
+
+<span class="s0"># Let's say we have a jaxpr that takes in `Ref`s and outputs regular JAX values</span>
+<span class="s0"># (`Ref`s should never be outputs from jaxprs). We'd like to convert that jaxpr</span>
+<span class="s0"># into a &quot;pure&quot; jaxpr that takes in and outputs values and no longer has the</span>
+<span class="s0"># `Read/Write/Accum` effects.</span>
+
+<span class="s3">def </span><span class="s1">discharge_state(jaxpr: core.Jaxpr</span><span class="s3">, </span><span class="s1">consts: Sequence[Any]</span><span class="s3">, </span><span class="s1">* </span><span class="s3">,</span>
+                    <span class="s1">should_discharge: Union[bool</span><span class="s3">, </span><span class="s1">Sequence[bool]] = </span><span class="s3">True</span>
+                    <span class="s1">) -&gt; Tuple[core.Jaxpr</span><span class="s3">, </span><span class="s1">List[Any]]:</span>
+  <span class="s2">&quot;&quot;&quot;Converts a jaxpr that takes in `Ref`s into one that doesn't.&quot;&quot;&quot;</span>
+  <span class="s3">if </span><span class="s1">isinstance(should_discharge</span><span class="s3">, </span><span class="s1">bool):</span>
+    <span class="s1">should_discharge = [should_discharge] * len(jaxpr.invars)</span>
+  <span class="s1">in_avals = [v.aval.inner_aval</span>
+              <span class="s3">if </span><span class="s1">type(v.aval) </span><span class="s3">is </span><span class="s1">AbstractRef </span><span class="s3">and </span><span class="s1">d</span>
+              <span class="s3">else </span><span class="s1">v.aval </span><span class="s3">for </span><span class="s1">v</span><span class="s3">, </span><span class="s1">d </span><span class="s3">in </span><span class="s1">zip(jaxpr.invars</span><span class="s3">, </span><span class="s1">should_discharge)]</span>
+  <span class="s1">eval_jaxpr = lu.wrap_init(partial(_eval_jaxpr_discharge_state</span><span class="s3">, </span><span class="s1">jaxpr</span><span class="s3">,</span>
+                                    <span class="s1">should_discharge</span><span class="s3">, </span><span class="s1">consts))</span>
+  <span class="s1">new_jaxpr</span><span class="s3">, </span><span class="s1">_ </span><span class="s3">, </span><span class="s1">new_consts = pe.trace_to_jaxpr_dynamic(eval_jaxpr</span><span class="s3">, </span><span class="s1">in_avals)</span>
+  <span class="s3">return </span><span class="s1">new_jaxpr</span><span class="s3">, </span><span class="s1">new_consts</span>
+
+<span class="s1">@dataclasses.dataclass</span>
+<span class="s3">class </span><span class="s1">Environment:</span>
+  <span class="s1">env: Dict[core.Var</span><span class="s3">, </span><span class="s1">Any]</span>
+
+  <span class="s3">def </span><span class="s1">read(self</span><span class="s3">, </span><span class="s1">v: core.Atom) -&gt; Any:</span>
+    <span class="s3">if </span><span class="s1">type(v) </span><span class="s3">is </span><span class="s1">core.Literal:</span>
+      <span class="s3">return </span><span class="s1">v.val</span>
+    <span class="s3">assert </span><span class="s1">isinstance(v</span><span class="s3">, </span><span class="s1">core.Var)</span>
+    <span class="s3">return </span><span class="s1">self.env[v]</span>
+
+  <span class="s3">def </span><span class="s1">write(self</span><span class="s3">, </span><span class="s1">v: core.Var</span><span class="s3">, </span><span class="s1">val: Any) -&gt; </span><span class="s3">None</span><span class="s1">:</span>
+    <span class="s1">self.env[v] = val</span>
+
+<span class="s3">class </span><span class="s1">DischargeRule(Protocol):</span>
+
+  <span class="s3">def </span><span class="s1">__call__(self</span><span class="s3">, </span><span class="s1">in_avals: Sequence[core.AbstractValue]</span><span class="s3">,</span>
+      <span class="s1">out_avals: Sequence[core.AbstractValue]</span><span class="s3">, </span><span class="s1">*args: Any</span><span class="s3">,</span>
+      <span class="s1">**params: Any) -&gt; Tuple[Sequence[Optional[Any]]</span><span class="s3">, </span><span class="s1">Sequence[Any]]:</span>
+    <span class="s1">...</span>
+
+<span class="s1">_discharge_rules: dict[core.Primitive</span><span class="s3">, </span><span class="s1">DischargeRule] = {}</span>
+
+<span class="s3">def </span><span class="s1">register_discharge_rule(prim: core.Primitive):</span>
+  <span class="s3">def </span><span class="s1">register(f: DischargeRule):</span>
+    <span class="s1">_discharge_rules[prim] = f</span>
+  <span class="s3">return </span><span class="s1">register</span>
+
+<span class="s3">def </span><span class="s1">_has_refs(eqn: core.JaxprEqn):</span>
+  <span class="s3">return </span><span class="s1">any(isinstance(v.aval</span><span class="s3">, </span><span class="s1">AbstractRef) </span><span class="s3">for </span><span class="s1">v </span><span class="s3">in </span><span class="s1">eqn.invars)</span>
+
+<span class="s3">def </span><span class="s1">_eval_jaxpr_discharge_state(</span>
+    <span class="s1">jaxpr: core.Jaxpr</span><span class="s3">, </span><span class="s1">should_discharge: Sequence[bool]</span><span class="s3">, </span><span class="s1">consts: Sequence[Any]</span><span class="s3">,</span>
+    <span class="s1">*args: Any):</span>
+  <span class="s1">env = Environment({})</span>
+
+  <span class="s1">map(env.write</span><span class="s3">, </span><span class="s1">jaxpr.constvars</span><span class="s3">, </span><span class="s1">consts)</span>
+  <span class="s0"># Here some args may correspond to `Ref` avals but they'll be treated like</span>
+  <span class="s0"># regular values in this interpreter.</span>
+  <span class="s1">map(env.write</span><span class="s3">, </span><span class="s1">jaxpr.invars</span><span class="s3">, </span><span class="s1">args)</span>
+
+  <span class="s1">refs_to_discharge = set(id(v.aval) </span><span class="s3">for </span><span class="s1">v</span><span class="s3">, </span><span class="s1">d</span>
+                          <span class="s3">in </span><span class="s1">zip(jaxpr.invars</span><span class="s3">, </span><span class="s1">should_discharge) </span><span class="s3">if </span><span class="s1">d</span>
+                          <span class="s3">and </span><span class="s1">isinstance(v.aval</span><span class="s3">, </span><span class="s1">AbstractRef))</span>
+
+  <span class="s3">for </span><span class="s1">eqn </span><span class="s3">in </span><span class="s1">jaxpr.eqns:</span>
+    <span class="s3">if </span><span class="s1">_has_refs(eqn) </span><span class="s3">and </span><span class="s1">any(id(v.aval) </span><span class="s3">in </span><span class="s1">refs_to_discharge</span>
+                              <span class="s3">for </span><span class="s1">v </span><span class="s3">in </span><span class="s1">eqn.invars):</span>
+      <span class="s3">if </span><span class="s1">eqn.primitive </span><span class="s3">not in </span><span class="s1">_discharge_rules:</span>
+        <span class="s3">raise </span><span class="s1">NotImplementedError(</span><span class="s4">&quot;No state discharge rule implemented for &quot;</span>
+            <span class="s4">f&quot;primitive: </span><span class="s3">{</span><span class="s1">eqn.primitive</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+      <span class="s1">invals = map(env.read</span><span class="s3">, </span><span class="s1">eqn.invars)</span>
+      <span class="s1">in_avals = [v.aval </span><span class="s3">for </span><span class="s1">v </span><span class="s3">in </span><span class="s1">eqn.invars]</span>
+      <span class="s1">out_avals = [v.aval </span><span class="s3">for </span><span class="s1">v </span><span class="s3">in </span><span class="s1">eqn.outvars]</span>
+      <span class="s1">new_invals</span><span class="s3">, </span><span class="s1">ans = _discharge_rules[eqn.primitive](</span>
+          <span class="s1">in_avals</span><span class="s3">, </span><span class="s1">out_avals</span><span class="s3">, </span><span class="s1">*invals</span><span class="s3">, </span><span class="s1">**eqn.params)</span>
+      <span class="s3">for </span><span class="s1">new_inval</span><span class="s3">, </span><span class="s1">invar </span><span class="s3">in </span><span class="s1">zip(new_invals</span><span class="s3">, </span><span class="s1">eqn.invars):</span>
+        <span class="s3">if </span><span class="s1">new_inval </span><span class="s3">is not None</span><span class="s1">:</span>
+          <span class="s1">env.write(invar</span><span class="s3">, </span><span class="s1">new_inval)  </span><span class="s0"># type: ignore[arg-type]</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s0"># Default primitive rule, similar to `core.eval_jaxpr`. Note that here</span>
+      <span class="s0"># we assume any higher-order primitives inside of the jaxpr are *not*</span>
+      <span class="s0"># stateful.</span>
+      <span class="s1">subfuns</span><span class="s3">, </span><span class="s1">bind_params = eqn.primitive.get_bind_params(eqn.params)</span>
+      <span class="s1">ans = eqn.primitive.bind(*subfuns</span><span class="s3">, </span><span class="s1">*map(env.read</span><span class="s3">, </span><span class="s1">eqn.invars)</span><span class="s3">,</span>
+                               <span class="s1">**bind_params)</span>
+    <span class="s3">if </span><span class="s1">eqn.primitive.multiple_results:</span>
+      <span class="s1">map(env.write</span><span class="s3">, </span><span class="s1">eqn.outvars</span><span class="s3">, </span><span class="s1">ans)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s1">env.write(eqn.outvars[</span><span class="s5">0</span><span class="s1">]</span><span class="s3">, </span><span class="s1">ans)</span>
+  <span class="s0"># By convention, we return the outputs of the jaxpr first and then the final</span>
+  <span class="s0"># values of the `Ref`s. Callers to this function should be able to split</span>
+  <span class="s0"># them up by looking at `len(jaxpr.outvars)`.</span>
+  <span class="s1">out_vals = map(env.read</span><span class="s3">, </span><span class="s1">jaxpr.outvars)</span>
+  <span class="s1">ref_vals = map(</span>
+      <span class="s1">env.read</span><span class="s3">, </span><span class="s1">[v </span><span class="s3">for </span><span class="s1">v </span><span class="s3">in </span><span class="s1">jaxpr.invars </span><span class="s3">if </span><span class="s1">id(v.aval) </span><span class="s3">in </span><span class="s1">refs_to_discharge])</span>
+  <span class="s3">return </span><span class="s1">out_vals + ref_vals</span>
+
+<span class="s1">@register_discharge_rule(get_p)</span>
+<span class="s3">def </span><span class="s1">_get_discharge_rule(</span>
+    <span class="s1">in_avals: Sequence[core.AbstractValue]</span><span class="s3">,</span>
+    <span class="s1">out_avals: Sequence[core.AbstractValue]</span><span class="s3">, </span><span class="s1">x</span><span class="s3">, </span><span class="s1">*non_slice_idx</span><span class="s3">,</span>
+    <span class="s1">indexed_dims: Sequence[bool]):</span>
+  <span class="s3">del </span><span class="s1">in_avals</span><span class="s3">, </span><span class="s1">out_avals</span>
+  <span class="s1">y = _get_discharge(x</span><span class="s3">, </span><span class="s1">non_slice_idx</span><span class="s3">, </span><span class="s1">indexed_dims)</span>
+  <span class="s3">return </span><span class="s1">(</span><span class="s3">None,</span><span class="s1">) * (len(non_slice_idx) + </span><span class="s5">1</span><span class="s1">)</span><span class="s3">, </span><span class="s1">y</span>
+
+<span class="s3">def </span><span class="s1">_get_discharge(x</span><span class="s3">, </span><span class="s1">idx</span><span class="s3">, </span><span class="s1">indexed_dims):</span>
+  <span class="s3">if not </span><span class="s1">any(indexed_dims):</span>
+    <span class="s3">return </span><span class="s1">x</span>
+  <span class="s3">if </span><span class="s1">all(</span><span class="s3">not </span><span class="s1">i.shape </span><span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">idx):</span>
+    <span class="s3">return </span><span class="s1">_dynamic_index(x</span><span class="s3">, </span><span class="s1">idx</span><span class="s3">, </span><span class="s1">indexed_dims)</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s3">return </span><span class="s1">_prepend_gather(x</span><span class="s3">, </span><span class="s1">idx</span><span class="s3">, </span><span class="s1">indexed_dims)</span>
+
+<span class="s3">def </span><span class="s1">_prepend_gather(x</span><span class="s3">, </span><span class="s1">idx</span><span class="s3">, </span><span class="s1">indexed_dims):</span>
+  <span class="s1">indexer = _indexer(idx</span><span class="s3">, </span><span class="s1">indexed_dims)</span>
+  <span class="s0"># NumPy advanced int indexing won't prepend w/ only one dim, so add dummy.</span>
+  <span class="s3">return </span><span class="s1">x[</span><span class="s3">None</span><span class="s1">][(np.array(</span><span class="s5">0</span><span class="s3">, </span><span class="s4">'int32'</span><span class="s1">)</span><span class="s3">, </span><span class="s1">*indexer)]</span>
+
+<span class="s3">def </span><span class="s1">_prepend_scatter(x</span><span class="s3">, </span><span class="s1">idx</span><span class="s3">, </span><span class="s1">indexed_dims</span><span class="s3">, </span><span class="s1">val</span><span class="s3">, </span><span class="s1">*</span><span class="s3">, </span><span class="s1">add=</span><span class="s3">False</span><span class="s1">):</span>
+  <span class="s1">indexer = _indexer(idx</span><span class="s3">, </span><span class="s1">indexed_dims)</span>
+  <span class="s3">if </span><span class="s1">add:</span>
+    <span class="s3">return </span><span class="s1">x[</span><span class="s3">None</span><span class="s1">].at[(</span><span class="s5">0</span><span class="s3">, </span><span class="s1">*indexer)].add(val)[</span><span class="s5">0</span><span class="s1">]</span>
+  <span class="s3">return </span><span class="s1">x[</span><span class="s3">None</span><span class="s1">].at[(</span><span class="s5">0</span><span class="s3">, </span><span class="s1">*indexer)].set(val)[</span><span class="s5">0</span><span class="s1">]</span>
+
+<span class="s3">def </span><span class="s1">_indexer(idx</span><span class="s3">, </span><span class="s1">indexed_dims):</span>
+  <span class="s1">idx_ = iter(idx)</span>
+  <span class="s1">indexer = tuple([next(idx_) </span><span class="s3">if </span><span class="s1">b </span><span class="s3">else </span><span class="s1">slice(</span><span class="s3">None</span><span class="s1">) </span><span class="s3">for </span><span class="s1">b </span><span class="s3">in </span><span class="s1">indexed_dims])</span>
+  <span class="s3">assert </span><span class="s1">next(idx_</span><span class="s3">, None</span><span class="s1">) </span><span class="s3">is None</span>
+  <span class="s3">return </span><span class="s1">indexer</span>
+
+<span class="s1">@register_discharge_rule(swap_p)</span>
+<span class="s3">def </span><span class="s1">_swap_discharge_rule(</span>
+    <span class="s1">in_avals: Sequence[core.AbstractValue]</span><span class="s3">,</span>
+    <span class="s1">out_avals: Sequence[core.AbstractValue]</span><span class="s3">, </span><span class="s1">x</span><span class="s3">, </span><span class="s1">val</span><span class="s3">, </span><span class="s1">*non_slice_idx</span><span class="s3">,</span>
+    <span class="s1">indexed_dims: Sequence[bool]):</span>
+  <span class="s3">del </span><span class="s1">in_avals</span><span class="s3">, </span><span class="s1">out_avals</span>
+  <span class="s3">if not </span><span class="s1">any(indexed_dims):</span>
+    <span class="s1">z</span><span class="s3">, </span><span class="s1">x_new = x</span><span class="s3">, </span><span class="s1">val</span>
+  <span class="s1">z</span><span class="s3">, </span><span class="s1">x_new = _swap_discharge(x</span><span class="s3">, </span><span class="s1">val</span><span class="s3">, </span><span class="s1">non_slice_idx</span><span class="s3">, </span><span class="s1">indexed_dims)</span>
+  <span class="s3">return </span><span class="s1">(x_new</span><span class="s3">, None</span><span class="s1">) + (</span><span class="s3">None,</span><span class="s1">) * len(non_slice_idx)</span><span class="s3">, </span><span class="s1">z</span>
+
+<span class="s3">def </span><span class="s1">_swap_discharge(x</span><span class="s3">, </span><span class="s1">val</span><span class="s3">, </span><span class="s1">idx</span><span class="s3">, </span><span class="s1">indexed_dims):</span>
+  <span class="s3">if not </span><span class="s1">any(indexed_dims):</span>
+    <span class="s1">z</span><span class="s3">, </span><span class="s1">x_new = x</span><span class="s3">, </span><span class="s1">val</span>
+  <span class="s3">elif </span><span class="s1">all(</span><span class="s3">not </span><span class="s1">i.shape </span><span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">idx):</span>
+    <span class="s1">z = _dynamic_index(x</span><span class="s3">, </span><span class="s1">idx</span><span class="s3">, </span><span class="s1">indexed_dims)</span>
+    <span class="s1">x_new = _dynamic_update_index(x</span><span class="s3">, </span><span class="s1">idx</span><span class="s3">, </span><span class="s1">val</span><span class="s3">, </span><span class="s1">indexed_dims)</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s1">z = _prepend_gather(x</span><span class="s3">, </span><span class="s1">idx</span><span class="s3">, </span><span class="s1">indexed_dims)</span>
+    <span class="s1">x_new = _prepend_scatter(x</span><span class="s3">, </span><span class="s1">idx</span><span class="s3">, </span><span class="s1">indexed_dims</span><span class="s3">, </span><span class="s1">val)</span>
+  <span class="s3">return </span><span class="s1">z</span><span class="s3">, </span><span class="s1">x_new</span>
+
+<span class="s1">@register_discharge_rule(addupdate_p)</span>
+<span class="s3">def </span><span class="s1">_addupdate_discharge_rule(</span>
+    <span class="s1">in_avals: Sequence[core.AbstractValue]</span><span class="s3">,</span>
+    <span class="s1">out_avals: Sequence[core.AbstractValue]</span><span class="s3">, </span><span class="s1">x</span><span class="s3">, </span><span class="s1">val</span><span class="s3">, </span><span class="s1">*non_slice_idx</span><span class="s3">,</span>
+    <span class="s1">indexed_dims: Sequence[bool]):</span>
+  <span class="s3">del </span><span class="s1">in_avals</span><span class="s3">, </span><span class="s1">out_avals</span>
+  <span class="s1">ans = _addupdate_discharge(x</span><span class="s3">, </span><span class="s1">val</span><span class="s3">, </span><span class="s1">non_slice_idx</span><span class="s3">, </span><span class="s1">indexed_dims)</span>
+  <span class="s3">return </span><span class="s1">(ans</span><span class="s3">, None</span><span class="s1">) + (</span><span class="s3">None,</span><span class="s1">) * len(non_slice_idx)</span><span class="s3">, </span><span class="s1">[]</span>
+
+<span class="s3">def </span><span class="s1">_addupdate_discharge(x</span><span class="s3">, </span><span class="s1">val</span><span class="s3">, </span><span class="s1">idx</span><span class="s3">, </span><span class="s1">indexed_dims):</span>
+  <span class="s3">if not </span><span class="s1">any(indexed_dims):</span>
+    <span class="s3">return </span><span class="s1">x + val</span>
+  <span class="s3">if </span><span class="s1">all(</span><span class="s3">not </span><span class="s1">i.shape </span><span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">idx):</span>
+    <span class="s1">y = val + _dynamic_index(x</span><span class="s3">, </span><span class="s1">idx</span><span class="s3">, </span><span class="s1">indexed_dims)</span>
+    <span class="s3">return </span><span class="s1">_dynamic_update_index(x</span><span class="s3">, </span><span class="s1">idx</span><span class="s3">, </span><span class="s1">y</span><span class="s3">, </span><span class="s1">indexed_dims)</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s3">return </span><span class="s1">_prepend_scatter(x</span><span class="s3">, </span><span class="s1">idx</span><span class="s3">, </span><span class="s1">indexed_dims</span><span class="s3">, </span><span class="s1">val</span><span class="s3">, </span><span class="s1">add=</span><span class="s3">True</span><span class="s1">)</span>
+
+<span class="s3">def </span><span class="s1">_dynamic_index(x</span><span class="s3">, </span><span class="s1">idx</span><span class="s3">, </span><span class="s1">indexed_dims):</span>
+  <span class="s3">assert </span><span class="s1">isinstance(idx</span><span class="s3">, </span><span class="s1">(list</span><span class="s3">, </span><span class="s1">tuple)) </span><span class="s3">and </span><span class="s1">idx</span>
+  <span class="s1">idx_ = iter(idx)</span>
+  <span class="s1">starts = [next(idx_) </span><span class="s3">if </span><span class="s1">b </span><span class="s3">else </span><span class="s1">np.int32(</span><span class="s5">0</span><span class="s1">) </span><span class="s3">for </span><span class="s1">b </span><span class="s3">in </span><span class="s1">indexed_dims]</span>
+  <span class="s3">assert </span><span class="s1">next(idx_</span><span class="s3">, None</span><span class="s1">) </span><span class="s3">is None</span>
+  <span class="s1">sizes = [</span><span class="s5">1 </span><span class="s3">if </span><span class="s1">b </span><span class="s3">else </span><span class="s1">size </span><span class="s3">for </span><span class="s1">b</span><span class="s3">, </span><span class="s1">size </span><span class="s3">in </span><span class="s1">zip(indexed_dims</span><span class="s3">, </span><span class="s1">x.shape)]</span>
+  <span class="s1">out = lax.dynamic_slice(x</span><span class="s3">, </span><span class="s1">starts</span><span class="s3">, </span><span class="s1">sizes)</span>
+  <span class="s3">return </span><span class="s1">lax.squeeze(out</span><span class="s3">, </span><span class="s1">[i </span><span class="s3">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">b </span><span class="s3">in </span><span class="s1">enumerate(indexed_dims) </span><span class="s3">if </span><span class="s1">b])</span>
+
+<span class="s3">def </span><span class="s1">_dynamic_update_index(x</span><span class="s3">, </span><span class="s1">idx</span><span class="s3">, </span><span class="s1">val</span><span class="s3">, </span><span class="s1">indexed_dims):</span>
+  <span class="s3">assert </span><span class="s1">isinstance(idx</span><span class="s3">, </span><span class="s1">(list</span><span class="s3">, </span><span class="s1">tuple)) </span><span class="s3">and </span><span class="s1">idx</span>
+  <span class="s1">idx_ = iter(idx)</span>
+  <span class="s1">starts = [next(idx_) </span><span class="s3">if </span><span class="s1">b </span><span class="s3">else </span><span class="s1">np.int32(</span><span class="s5">0</span><span class="s1">) </span><span class="s3">for </span><span class="s1">b </span><span class="s3">in </span><span class="s1">indexed_dims]</span>
+  <span class="s3">assert </span><span class="s1">next(idx_</span><span class="s3">, None</span><span class="s1">) </span><span class="s3">is None</span>
+  <span class="s1">sizes = [</span><span class="s5">1 </span><span class="s3">if </span><span class="s1">b </span><span class="s3">else </span><span class="s1">size </span><span class="s3">for </span><span class="s1">b</span><span class="s3">, </span><span class="s1">size </span><span class="s3">in </span><span class="s1">zip(indexed_dims</span><span class="s3">, </span><span class="s1">x.shape)]</span>
+  <span class="s3">return </span><span class="s1">lax.dynamic_update_slice(x</span><span class="s3">, </span><span class="s1">val.reshape(sizes)</span><span class="s3">, </span><span class="s1">starts)</span>
+
+<span class="s1">@register_discharge_rule(core.closed_call_p)</span>
+<span class="s3">def </span><span class="s1">_closed_call_discharge_rule(</span>
+    <span class="s1">in_avals: Sequence[core.AbstractValue]</span><span class="s3">, </span><span class="s1">_</span><span class="s3">,</span><span class="s1">*args</span><span class="s3">,</span>
+    <span class="s1">call_jaxpr: core.ClosedJaxpr):</span>
+  <span class="s1">jaxpr</span><span class="s3">, </span><span class="s1">consts = call_jaxpr.jaxpr</span><span class="s3">, </span><span class="s1">call_jaxpr.consts</span>
+  <span class="s1">num_outs = len(jaxpr.outvars)</span>
+  <span class="s1">discharged_jaxpr</span><span class="s3">, </span><span class="s1">discharged_consts = discharge_state(jaxpr</span><span class="s3">, </span><span class="s1">consts)</span>
+  <span class="s1">discharged_closed_jaxpr = core.ClosedJaxpr(discharged_jaxpr</span><span class="s3">,</span>
+                                             <span class="s1">discharged_consts)</span>
+  <span class="s1">fun = lu.wrap_init(core.jaxpr_as_fun(discharged_closed_jaxpr))</span>
+  <span class="s1">out_and_ref_vals = core.closed_call_p.bind(fun</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">,</span>
+                                             <span class="s1">call_jaxpr=discharged_closed_jaxpr)</span>
+  <span class="s1">out_vals</span><span class="s3">, </span><span class="s1">ref_vals = split_list(out_and_ref_vals</span><span class="s3">, </span><span class="s1">[num_outs])</span>
+  <span class="s1">ref_vals_iter = iter(ref_vals)</span>
+  <span class="s1">new_invals = tuple(next(ref_vals_iter) </span><span class="s3">if </span><span class="s1">isinstance(aval</span><span class="s3">, </span><span class="s1">AbstractRef)</span>
+                     <span class="s3">else None for </span><span class="s1">aval </span><span class="s3">in </span><span class="s1">in_avals)</span>
+  <span class="s3">assert </span><span class="s1">next(ref_vals_iter</span><span class="s3">, None</span><span class="s1">) </span><span class="s3">is None</span>
+  <span class="s3">return </span><span class="s1">new_invals</span><span class="s3">, </span><span class="s1">out_vals</span>
+</pre>
+</body>
+</html>

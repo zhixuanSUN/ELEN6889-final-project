@@ -1,0 +1,470 @@
+<html>
+<head>
+<title>tf_test_util.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+.s5 { color: #629755; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+tf_test_util.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2020 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s2">import </span><span class="s1">contextlib</span>
+<span class="s2">import </span><span class="s1">dataclasses</span>
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">import </span><span class="s1">os</span>
+
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Any</span><span class="s2">, </span><span class="s1">Callable</span><span class="s2">, </span><span class="s1">List</span><span class="s2">, </span><span class="s1">Optional</span><span class="s2">, </span><span class="s1">Sequence</span><span class="s2">, </span><span class="s1">Tuple</span>
+
+<span class="s2">from </span><span class="s1">absl.testing </span><span class="s2">import </span><span class="s1">absltest</span>
+<span class="s2">from </span><span class="s1">absl </span><span class="s2">import </span><span class="s1">logging</span>
+
+<span class="s2">import </span><span class="s1">jax</span>
+<span class="s2">from </span><span class="s1">jax </span><span class="s2">import </span><span class="s1">dtypes</span>
+<span class="s2">from </span><span class="s1">jax </span><span class="s2">import </span><span class="s1">numpy </span><span class="s2">as </span><span class="s1">jnp</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">test_util </span><span class="s2">as </span><span class="s1">jtu</span>
+<span class="s2">from </span><span class="s1">jax </span><span class="s2">import </span><span class="s1">tree_util</span>
+
+<span class="s2">from </span><span class="s1">jax.config </span><span class="s2">import </span><span class="s1">config</span>
+<span class="s2">from </span><span class="s1">jax.experimental </span><span class="s2">import </span><span class="s1">jax2tf</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">xla_bridge</span>
+<span class="s2">import </span><span class="s1">numpy </span><span class="s2">as </span><span class="s1">np</span>
+<span class="s2">import </span><span class="s1">tensorflow </span><span class="s2">as </span><span class="s1">tf  </span><span class="s0"># type: ignore[import]</span>
+<span class="s2">from </span><span class="s1">tensorflow.compiler.xla </span><span class="s2">import </span><span class="s1">xla_data_pb2  </span><span class="s0"># type: ignore[import]</span>
+
+<span class="s1">DType = Any</span>
+
+<span class="s2">def </span><span class="s1">_make_tf_input_signature(*tf_args) -&gt; List[tf.TensorSpec]:</span>
+  <span class="s0"># tf_args can be PyTrees</span>
+  <span class="s2">def </span><span class="s1">_make_one_array_signature(tf_arg):</span>
+    <span class="s2">return </span><span class="s1">tf.TensorSpec(np.shape(tf_arg)</span><span class="s2">, </span><span class="s1">jax2tf.dtype_of_val(tf_arg))</span>
+
+  <span class="s2">return </span><span class="s1">tf.nest.map_structure(_make_one_array_signature</span><span class="s2">, </span><span class="s1">list(tf_args))</span>
+
+<span class="s2">def </span><span class="s1">_run_tf_function(func_tf: Callable</span><span class="s2">, </span><span class="s1">*tf_args</span><span class="s2">, </span><span class="s1">mode: str):</span>
+  <span class="s2">if </span><span class="s1">mode == </span><span class="s3">&quot;eager&quot;</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">func_tf(*tf_args)  </span><span class="s0"># EAGER</span>
+  <span class="s2">elif </span><span class="s1">mode == </span><span class="s3">&quot;graph&quot;</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">tf.function(  </span><span class="s0"># GRAPH</span>
+        <span class="s1">func_tf</span><span class="s2">,</span>
+        <span class="s1">autograph=</span><span class="s2">False,</span>
+        <span class="s1">input_signature=_make_tf_input_signature(*tf_args))(*tf_args)  </span><span class="s0"># GRAPH</span>
+  <span class="s2">elif </span><span class="s1">mode == </span><span class="s3">&quot;compiled&quot;</span><span class="s1">:</span>
+    <span class="s0"># Adding an explicit input_signature prevents TF from constant-folding</span>
+    <span class="s0"># the computation eagerly before compilation</span>
+    <span class="s2">return </span><span class="s1">tf.function(  </span><span class="s0"># COMPILED</span>
+        <span class="s1">func_tf</span><span class="s2">,</span>
+        <span class="s1">autograph=</span><span class="s2">False,</span>
+        <span class="s1">jit_compile=</span><span class="s2">True,</span>
+        <span class="s1">input_signature=_make_tf_input_signature(*tf_args))(</span>
+            <span class="s1">*tf_args)  </span><span class="s0"># COMPILED</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s2">assert False, </span><span class="s1">(</span>
+        <span class="s3">f&quot;Expected 'eager', 'graph', or 'compiled' for mode: got '</span><span class="s2">{</span><span class="s1">mode</span><span class="s2">}</span><span class="s3">'&quot;</span><span class="s1">)</span>
+
+
+<span class="s0">## Helper functions for matching OpMetadata in TF graphs</span>
+<span class="s1">@dataclasses.dataclass(order=</span><span class="s2">True, </span><span class="s1">frozen=</span><span class="s2">True</span><span class="s1">)</span>
+<span class="s2">class </span><span class="s1">OpMetadataGraph:</span>
+  <span class="s1">tf_type: str  </span><span class="s0"># The standard Tf.Operation.type</span>
+  <span class="s1">op_type: str  </span><span class="s0"># The rest are OpMetadata fields from _Xla... attributes</span>
+  <span class="s1">op_name: str</span>
+  <span class="s1">source_file: str</span>
+  <span class="s1">source_line: str</span>
+
+
+<span class="s2">def </span><span class="s1">SaveAndLoadModel(model: tf.Module</span><span class="s2">,</span>
+                     <span class="s1">save_gradients=</span><span class="s2">True</span><span class="s1">) -&gt; tf.Module:</span>
+  <span class="s0"># Roundtrip through saved model on disk.</span>
+  <span class="s1">model_dir = os.path.join(absltest.get_default_test_tmpdir()</span><span class="s2">, </span><span class="s1">str(id(model)))</span>
+  <span class="s1">tf.saved_model.save(</span>
+      <span class="s1">model</span><span class="s2">, </span><span class="s1">model_dir</span><span class="s2">,</span>
+      <span class="s1">options=tf.saved_model.SaveOptions(experimental_custom_gradients=save_gradients))</span>
+  <span class="s1">restored_model = tf.saved_model.load(model_dir)</span>
+  <span class="s2">return </span><span class="s1">restored_model</span>
+
+<span class="s2">def </span><span class="s1">SaveAndLoadFunction(f_tf: Callable</span><span class="s2">, </span><span class="s1">*</span><span class="s2">,</span>
+                        <span class="s1">input_signature: Optional[Sequence[tf.TensorSpec]] = </span><span class="s2">None,</span>
+                        <span class="s1">input_args: Optional[Sequence[Any]] = </span><span class="s2">None,</span>
+                        <span class="s1">variables: Sequence[tf.Variable] = ()</span><span class="s2">,</span>
+                        <span class="s1">save_gradients=</span><span class="s2">True</span><span class="s1">) -&gt; Tuple[Callable</span><span class="s2">, </span><span class="s1">tf.train.Checkpoint]:</span>
+  <span class="s0"># Roundtrip through saved model on disk. Return the Checkpoint also</span>
+  <span class="s0"># for the cases when there are variables. If you don't pass input_signature</span>
+  <span class="s0"># then it is created from the input_args.</span>
+  <span class="s1">model = tf.train.Checkpoint()</span>
+  <span class="s2">if </span><span class="s1">input_signature </span><span class="s2">is None</span><span class="s1">:</span>
+    <span class="s2">assert </span><span class="s1">input_args </span><span class="s2">is not None</span>
+    <span class="s1">input_signature = tf.nest.map_structure(</span><span class="s2">lambda </span><span class="s1">a: tf.TensorSpec(a.shape</span><span class="s2">, </span><span class="s1">a.dtype)</span><span class="s2">,</span>
+                                            <span class="s1">input_args)</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s2">assert </span><span class="s1">input_args </span><span class="s2">is None</span>
+  <span class="s1">model.f = tf.function(f_tf</span><span class="s2">,</span>
+                        <span class="s1">autograph=</span><span class="s2">False,</span>
+                        <span class="s1">input_signature=input_signature)</span>
+  <span class="s1">model.variables = variables</span>
+  <span class="s1">restored = SaveAndLoadModel(model</span><span class="s2">, </span><span class="s1">save_gradients=save_gradients)</span>
+  <span class="s2">return </span><span class="s1">restored.f</span><span class="s2">, </span><span class="s1">restored</span>
+
+<span class="s2">def </span><span class="s1">TransformJaxVJP(f: Callable</span><span class="s2">, </span><span class="s1">args</span><span class="s2">, </span><span class="s1">res_f_of_args):</span>
+  <span class="s0"># Given `f` and its `args` tuple and `res_f_of_args=f(*args)` return a pair of a function</span>
+  <span class="s0"># that computes the VJP of `f` and appropriate arguments tuple.</span>
+  <span class="s2">def </span><span class="s1">make_ct(res):</span>
+    <span class="s1">res_dtype = np.result_type(res)</span>
+    <span class="s2">assert </span><span class="s1">res_dtype != dtypes.float0</span>
+    <span class="s0"># We produce cotangents of the same type as the primal. It does not</span>
+    <span class="s0"># seem to matter whether we feed float0, and avoiding float0 makes things</span>
+    <span class="s0"># simpler with TF.</span>
+    <span class="s2">return </span><span class="s1">np.ones(np.shape(res)</span><span class="s2">, </span><span class="s1">dtype=res_dtype)</span>
+
+  <span class="s1">cts = tree_util.tree_map(make_ct</span><span class="s2">, </span><span class="s1">res_f_of_args)</span>
+
+  <span class="s2">def </span><span class="s1">f_vjp(args</span><span class="s2">, </span><span class="s1">cts):</span>
+    <span class="s1">res</span><span class="s2">, </span><span class="s1">pullback = jax.vjp(f</span><span class="s2">, </span><span class="s1">*args)</span>
+    <span class="s2">return </span><span class="s1">pullback(cts)</span>
+  <span class="s2">return </span><span class="s1">(f_vjp</span><span class="s2">, </span><span class="s1">(args</span><span class="s2">, </span><span class="s1">cts))</span>
+
+<span class="s2">def </span><span class="s1">TransformTfValueAndGrad(tf_f: Callable</span><span class="s2">, </span><span class="s1">tf_args</span><span class="s2">,</span>
+                          <span class="s1">unconnected_gradients=tf.UnconnectedGradients.ZERO):</span>
+  <span class="s0"># Given a TF function `tf_f` and its `tf_args` tuple,</span>
+  <span class="s0"># return a pair of a function that computes both the value and the</span>
+  <span class="s0"># gradient and appropriate arguments tuple.</span>
+  <span class="s2">def </span><span class="s1">wrapped(*tf_args):</span>
+    <span class="s1">tf_vars = tf.nest.map_structure(tf.Variable</span><span class="s2">, </span><span class="s1">tf_args)</span>
+    <span class="s2">with </span><span class="s1">tf.GradientTape() </span><span class="s2">as </span><span class="s1">tape:</span>
+      <span class="s1">res_tf = tf_f(*tf_vars)</span>
+
+    <span class="s1">grad = tape.gradient(res_tf</span><span class="s2">, </span><span class="s1">tf_vars</span><span class="s2">,</span>
+                         <span class="s1">unconnected_gradients=unconnected_gradients)</span>
+    <span class="s2">return </span><span class="s1">(res_tf</span><span class="s2">, </span><span class="s1">grad)</span>
+  <span class="s2">return </span><span class="s1">wrapped</span><span class="s2">, </span><span class="s1">tf_args</span>
+
+<span class="s2">def </span><span class="s1">ComputeTfValueAndGrad(tf_f: Callable</span><span class="s2">, </span><span class="s1">tf_args: Sequence</span><span class="s2">,</span>
+                          <span class="s1">unconnected_gradients=tf.UnconnectedGradients.ZERO):</span>
+  <span class="s2">assert </span><span class="s1">isinstance(tf_args</span><span class="s2">, </span><span class="s1">Sequence)</span><span class="s2">, </span><span class="s3">f&quot;tf_args must be a tuple: </span><span class="s2">{</span><span class="s1">tf_args</span><span class="s2">}</span><span class="s3">&quot;</span>
+  <span class="s1">f1</span><span class="s2">, </span><span class="s1">args1 = TransformTfValueAndGrad(tf_f</span><span class="s2">, </span><span class="s1">tf_args</span><span class="s2">,</span>
+                                      <span class="s1">unconnected_gradients=unconnected_gradients)</span>
+  <span class="s2">return </span><span class="s1">f1(*args1)</span>
+
+
+<span class="s1">@jtu.with_config(jax_numpy_rank_promotion=</span><span class="s3">&quot;allow&quot;</span><span class="s2">,</span>
+                 <span class="s1">jax_numpy_dtype_promotion=</span><span class="s3">'standard'</span><span class="s1">)</span>
+<span class="s2">class </span><span class="s1">JaxToTfTestCase(jtu.JaxTestCase):</span>
+
+  <span class="s2">def </span><span class="s1">setUp(self):</span>
+    <span class="s1">super().setUp()</span>
+    <span class="s0"># Ensure that all TF ops are created on the proper device (TPU or GPU or CPU)</span>
+    <span class="s1">tf_preferred_devices = (</span>
+        <span class="s1">tf.config.list_logical_devices(</span><span class="s3">&quot;TPU&quot;</span><span class="s1">) +</span>
+        <span class="s1">tf.config.list_logical_devices(</span><span class="s3">&quot;GPU&quot;</span><span class="s1">) +</span>
+        <span class="s1">tf.config.list_logical_devices())</span>
+    <span class="s1">self.tf_default_device = tf_preferred_devices[</span><span class="s4">0</span><span class="s1">]</span>
+    <span class="s1">logging.info(</span><span class="s3">&quot;Running jax2tf converted code on %s.&quot;</span><span class="s2">, </span><span class="s1">self.tf_default_device)</span>
+    <span class="s0"># We need --config=cuda build flag for TF to see the GPUs</span>
+    <span class="s1">self.assertEqual(jtu.device_under_test().upper()</span><span class="s2">,</span>
+                     <span class="s1">self.tf_default_device.device_type)</span>
+
+    <span class="s2">with </span><span class="s1">contextlib.ExitStack() </span><span class="s2">as </span><span class="s1">stack:</span>
+      <span class="s1">stack.enter_context(tf.device(self.tf_default_device))</span>
+      <span class="s1">self.addCleanup(stack.pop_all().close)</span>
+
+  <span class="s2">def </span><span class="s1">assertDtypesMatch(self</span><span class="s2">, </span><span class="s1">x</span><span class="s2">, </span><span class="s1">y</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">canonicalize_dtypes=</span><span class="s2">True</span><span class="s1">):</span>
+    <span class="s5">&quot;&quot;&quot;Compares dtypes across JAX and TF dtypes. Overrides super method.&quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">to_numpy_dtype(dt):</span>
+      <span class="s2">return </span><span class="s1">dt </span><span class="s2">if </span><span class="s1">isinstance(dt</span><span class="s2">, </span><span class="s1">np.dtype) </span><span class="s2">else </span><span class="s1">dt.as_numpy_dtype</span>
+
+    <span class="s2">if not </span><span class="s1">config.x64_enabled </span><span class="s2">and </span><span class="s1">canonicalize_dtypes:</span>
+      <span class="s1">self.assertEqual(</span>
+          <span class="s1">dtypes.canonicalize_dtype(to_numpy_dtype(jtu._dtype(x)))</span><span class="s2">,</span>
+          <span class="s1">dtypes.canonicalize_dtype(to_numpy_dtype(jtu._dtype(y))))</span>
+    <span class="s2">else</span><span class="s1">:</span>
+      <span class="s1">self.assertEqual(</span>
+          <span class="s1">to_numpy_dtype(jtu._dtype(x))</span><span class="s2">, </span><span class="s1">to_numpy_dtype(jtu._dtype(y)))</span>
+
+  <span class="s2">def </span><span class="s1">ConvertAndCompare(self</span><span class="s2">,</span>
+                        <span class="s1">func_jax: Callable</span><span class="s2">,</span>
+                        <span class="s1">*args</span><span class="s2">,</span>
+                        <span class="s1">enable_xla: bool = </span><span class="s2">True,</span>
+                        <span class="s1">limitations: Sequence = ()):</span>
+    <span class="s5">&quot;&quot;&quot;Compares jax_func(*args) with convert(jax_func)(*args). 
+ 
+    It compares the result of JAX, TF (&quot;eager&quot; mode), 
+    TF with tf.function (&quot;graph&quot; mode), and TF with 
+    tf.function(jit_compile=True) (&quot;compiled&quot; mode). In each mode, 
+    either we expect to encounter a known limitation, or the value should 
+    match the value from the JAX execution. 
+ 
+    Args: 
+      func_jax: the function to invoke (``func_jax(*args)``) 
+      args: the arguments. 
+      enable_xla: if True, allows the use of XLA ops in jax2tf.convert 
+        (default: True). 
+      limitations: the set of limitations for this harness (not yet filtered 
+        by mode). 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># Run JAX. Should not fail, we assume that the harness has been filtered</span>
+    <span class="s0"># already by JAX unimplemented primitives.</span>
+    <span class="s1">result_jax = func_jax(*args)  </span><span class="s0"># JAX</span>
+    <span class="s1">result_tf = </span><span class="s2">None</span>
+
+    <span class="s1">func_tf = jax2tf.convert(func_jax</span><span class="s2">, </span><span class="s1">enable_xla=enable_xla)</span>
+
+    <span class="s1">unexpected_successes: List[str] = []</span>
+    <span class="s0"># Run the &quot;compiled&quot; mode first, it is most important</span>
+    <span class="s2">for </span><span class="s1">mode </span><span class="s2">in </span><span class="s1">(</span><span class="s3">&quot;compiled&quot;</span><span class="s2">, </span><span class="s3">&quot;eager&quot;</span><span class="s2">, </span><span class="s3">&quot;graph&quot;</span><span class="s1">):</span>
+      <span class="s2">def </span><span class="s1">log_message(extra):</span>
+        <span class="s2">return </span><span class="s3">f&quot;[</span><span class="s2">{</span><span class="s1">self._testMethodName</span><span class="s2">}</span><span class="s3">] </span><span class="s2">{</span><span class="s1">mode=</span><span class="s2">}</span><span class="s3">: </span><span class="s2">{</span><span class="s1">extra</span><span class="s2">}</span><span class="s3">&quot;</span>
+
+      <span class="s1">jax2tf_limits = tuple(filter(</span><span class="s2">lambda </span><span class="s1">l: l.filter(mode=mode)</span><span class="s2">, </span><span class="s1">limitations))</span>
+
+      <span class="s1">skip_tf_run = [l </span><span class="s2">for </span><span class="s1">l </span><span class="s2">in </span><span class="s1">jax2tf_limits </span><span class="s2">if </span><span class="s1">l.skip_tf_run]</span>
+      <span class="s2">if </span><span class="s1">skip_tf_run:</span>
+        <span class="s1">logging.info(log_message(</span><span class="s3">f&quot;Skip TF run due to limitations </span><span class="s2">{</span><span class="s1">skip_tf_run</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">))</span>
+        <span class="s2">continue</span>
+
+      <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">result_tf = _run_tf_function(func_tf</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">mode=mode)</span>
+        <span class="s1">tf_exception = </span><span class="s2">None</span>
+      <span class="s2">except </span><span class="s1">Exception </span><span class="s2">as </span><span class="s1">e:</span>
+        <span class="s1">tf_exception = e</span>
+
+      <span class="s1">expect_tf_error = [l </span><span class="s2">for </span><span class="s1">l </span><span class="s2">in </span><span class="s1">jax2tf_limits </span><span class="s2">if </span><span class="s1">l.expect_tf_error]</span>
+      <span class="s2">if </span><span class="s1">tf_exception:</span>
+        <span class="s2">if </span><span class="s1">expect_tf_error:</span>
+          <span class="s1">logging.info(log_message(</span>
+            <span class="s3">&quot;Found expected TF error with enabled limitations &quot;</span>
+            <span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">expect_tf_error</span><span class="s2">}</span><span class="s3">; TF error is </span><span class="s2">{</span><span class="s1">tf_exception</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">))</span>
+          <span class="s2">continue</span>
+        <span class="s2">else</span><span class="s1">:</span>
+          <span class="s2">raise </span><span class="s1">tf_exception</span>
+      <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">expect_tf_error:</span>
+          <span class="s0"># It is more ergonomic to print all successful modes once</span>
+          <span class="s1">logging.warning(log_message(</span>
+            <span class="s3">f&quot;Unexpected execution success with known limitations </span><span class="s2">{</span><span class="s1">expect_tf_error</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">))</span>
+          <span class="s1">unexpected_successes.append(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">mode</span><span class="s2">}</span><span class="s3">: </span><span class="s2">{</span><span class="s1">expect_tf_error</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+
+      <span class="s2">if </span><span class="s1">(jtu.device_under_test() == </span><span class="s3">&quot;gpu&quot; </span><span class="s2">and</span>
+          <span class="s3">&quot;dot_general_preferred&quot; </span><span class="s2">in </span><span class="s1">self._testMethodName):</span>
+        <span class="s1">logging.info(log_message(</span><span class="s3">f&quot;Arguments are </span><span class="s2">{</span><span class="s1">args</span><span class="s2">}</span><span class="s3">, JAX result is </span><span class="s2">{</span><span class="s1">result_jax</span><span class="s2">}\n</span><span class="s3">and TF result is </span><span class="s2">{</span><span class="s1">result_tf</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">))</span>
+
+      <span class="s1">skip_comparison = [l </span><span class="s2">for </span><span class="s1">l </span><span class="s2">in </span><span class="s1">jax2tf_limits </span><span class="s2">if </span><span class="s1">l.skip_comparison]</span>
+      <span class="s2">if </span><span class="s1">skip_comparison:</span>
+        <span class="s1">logging.warning(log_message(</span><span class="s3">f&quot;Skip result comparison due to </span><span class="s2">{</span><span class="s1">skip_comparison</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">))</span>
+        <span class="s2">continue</span>
+
+      <span class="s1">max_tol = </span><span class="s2">None</span>
+      <span class="s1">max_tol_lim = </span><span class="s2">None if not </span><span class="s1">jax2tf_limits </span><span class="s2">else </span><span class="s1">jax2tf_limits[</span><span class="s4">0</span><span class="s1">].get_max_tolerance_limitation(jax2tf_limits)</span>
+      <span class="s2">if </span><span class="s1">max_tol_lim </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s1">max_tol = max_tol_lim.tol</span>
+        <span class="s1">logging.info(log_message(</span><span class="s3">f&quot;Using tol=</span><span class="s2">{</span><span class="s1">max_tol</span><span class="s2">} </span><span class="s3">due to </span><span class="s2">{</span><span class="s1">max_tol_lim</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">))</span>
+
+      <span class="s0"># Convert results to np.arrays</span>
+      <span class="s1">result_tf = tf.nest.map_structure(</span><span class="s2">lambda </span><span class="s1">t: t.numpy()</span><span class="s2">, </span><span class="s1">result_tf)  </span><span class="s0"># type: ignore</span>
+
+      <span class="s1">custom_assert_lim = [l </span><span class="s2">for </span><span class="s1">l </span><span class="s2">in </span><span class="s1">jax2tf_limits </span><span class="s2">if </span><span class="s1">l.custom_assert]</span>
+      <span class="s2">assert </span><span class="s1">len(custom_assert_lim) &lt;= </span><span class="s4">1</span><span class="s2">, </span><span class="s3">f&quot;Expecting at most one applicable limitation with custom_assert, found </span><span class="s2">{</span><span class="s1">custom_assert_lim</span><span class="s2">}</span><span class="s3">&quot;</span>
+
+      <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">err_msg = </span><span class="s3">f&quot;TF mode </span><span class="s2">{</span><span class="s1">mode</span><span class="s2">}</span><span class="s3">.&quot;</span>
+        <span class="s1">log_hlo_on_error = mode == </span><span class="s3">&quot;compiled&quot; </span><span class="s2">or </span><span class="s1">jtu.device_under_test() == </span><span class="s3">&quot;tpu&quot;</span>
+        <span class="s2">if </span><span class="s1">log_hlo_on_error:</span>
+          <span class="s1">err_msg += </span><span class="s3">&quot; See the logs for JAX and TF HLO comparisons.&quot;</span>
+        <span class="s2">if </span><span class="s1">custom_assert_lim:</span>
+          <span class="s1">logging.info(log_message(</span><span class="s3">f&quot;Running custom_assert with tol=</span><span class="s2">{</span><span class="s1">max_tol</span><span class="s2">} </span><span class="s3">due to </span><span class="s2">{</span><span class="s1">custom_assert_lim[</span><span class="s4">0</span><span class="s1">]</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">))</span>
+          <span class="s1">custom_assert_lim[</span><span class="s4">0</span><span class="s1">].custom_assert(self</span><span class="s2">, </span><span class="s1">result_jax</span><span class="s2">, </span><span class="s1">result_tf</span><span class="s2">,</span>
+                                             <span class="s1">args=args</span><span class="s2">, </span><span class="s1">tol=max_tol</span><span class="s2">,</span>
+                                             <span class="s1">err_msg=err_msg)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+          <span class="s1">logging.info(log_message(</span><span class="s3">f&quot;Running default assert with tol=</span><span class="s2">{</span><span class="s1">max_tol</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">))</span>
+          <span class="s1">self.assertAllClose(result_jax</span><span class="s2">, </span><span class="s1">result_tf</span><span class="s2">, </span><span class="s1">atol=max_tol</span><span class="s2">, </span><span class="s1">rtol=max_tol</span><span class="s2">,</span>
+                              <span class="s1">err_msg=err_msg)</span>
+      <span class="s2">except </span><span class="s1">AssertionError </span><span class="s2">as </span><span class="s1">e:</span>
+        <span class="s0"># Print the HLO for comparison</span>
+        <span class="s2">if not </span><span class="s1">log_hlo_on_error:</span>
+          <span class="s1">print(</span><span class="s3">f&quot;[</span><span class="s2">{</span><span class="s1">self._testMethodName</span><span class="s2">}</span><span class="s3">] Not logging HLO because the &quot;</span>
+                <span class="s3">f&quot;mode was </span><span class="s2">{</span><span class="s1">mode</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+          <span class="s2">raise</span>
+
+        <span class="s1">logging.info(</span><span class="s3">&quot;[%s] Logging HLO for exception in mode %s: %s&quot;</span><span class="s2">,</span>
+                     <span class="s1">self._testMethodName</span><span class="s2">, </span><span class="s1">mode</span><span class="s2">, </span><span class="s1">e)</span>
+        <span class="s1">jax_lowered = jax.jit(func_jax).lower(*args)</span>
+        <span class="s0"># We log the HLO dialect for easier comparison with TF</span>
+        <span class="s1">logging.info(</span><span class="s3">&quot;[%s] JAX NON_OPT HLO</span><span class="s2">\n</span><span class="s3">%s&quot;</span><span class="s2">,</span>
+                     <span class="s1">self._testMethodName</span><span class="s2">,</span>
+                     <span class="s1">jax_lowered.compiler_ir(dialect=</span><span class="s3">&quot;hlo&quot;</span><span class="s1">).as_hlo_text())  </span><span class="s0"># type: ignore</span>
+
+        <span class="s1">tf_args_signature = _make_tf_input_signature(*args)</span>
+        <span class="s0"># If we give the signature, we cannot pass scalars</span>
+        <span class="s1">tf_args_no_scalars = tuple(</span>
+            <span class="s1">map(</span><span class="s2">lambda </span><span class="s1">a</span><span class="s2">, </span><span class="s1">sig: tf.convert_to_tensor(a</span><span class="s2">, </span><span class="s1">dtype=sig.dtype)</span><span class="s2">,</span>
+                <span class="s1">args</span><span class="s2">, </span><span class="s1">tf_args_signature))</span>
+
+        <span class="s1">tf_func_compiled = tf.function(</span>
+            <span class="s1">func_tf</span><span class="s2">,</span>
+            <span class="s1">autograph=</span><span class="s2">False,</span>
+            <span class="s1">jit_compile=</span><span class="s2">True,</span>
+            <span class="s1">input_signature=tf_args_signature)</span>
+        <span class="s1">tf_hlo = tf_func_compiled.experimental_get_compiler_ir(*tf_args_no_scalars)(</span>
+                    <span class="s1">stage=</span><span class="s3">&quot;hlo&quot;</span><span class="s1">)</span>
+        <span class="s1">logging.info(</span><span class="s3">&quot;[%s] TF NON OPT HLO</span><span class="s2">\n</span><span class="s3">{%s}&quot;</span><span class="s2">, </span><span class="s1">self._testMethodName</span><span class="s2">,</span>
+                     <span class="s1">tf_hlo)</span>
+
+        <span class="s1">backend = xla_bridge.get_backend()</span>
+        <span class="s1">modules = backend.compile(str(jax_lowered.compiler_ir())).hlo_modules()</span>
+        <span class="s1">jax_opt_hlo = modules[</span><span class="s4">0</span><span class="s1">].to_string()</span>
+        <span class="s1">logging.info(</span><span class="s3">&quot;[%s] JAX OPT HLO</span><span class="s2">\n</span><span class="s3">%s&quot;</span><span class="s2">, </span><span class="s1">self._testMethodName</span><span class="s2">,</span>
+                     <span class="s1">jax_opt_hlo)</span>
+
+        <span class="s1">tf_opt_hlo = tf_func_compiled.experimental_get_compiler_ir(*tf_args_no_scalars)(</span>
+                    <span class="s1">stage=</span><span class="s3">&quot;optimized_hlo&quot;</span><span class="s1">)</span>
+        <span class="s1">logging.info(</span><span class="s3">&quot;[%s] TF OPT HLO</span><span class="s2">\n</span><span class="s3">%s&quot;</span><span class="s2">, </span><span class="s1">self._testMethodName</span><span class="s2">, </span><span class="s1">tf_opt_hlo)</span>
+
+        <span class="s2">raise</span>
+
+    <span class="s0"># end &quot;for mode&quot;</span>
+
+    <span class="s2">if </span><span class="s1">unexpected_successes:</span>
+      <span class="s1">msg = (</span><span class="s3">f&quot;[</span><span class="s2">{</span><span class="s1">self._testMethodName</span><span class="s2">}</span><span class="s3">] The following are unexpected &quot;</span>
+             <span class="s3">&quot;successful modes:</span><span class="s2">\n</span><span class="s3">&quot; </span><span class="s1">+ </span><span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">&quot;</span><span class="s1">.join(unexpected_successes))</span>
+      <span class="s1">logging.warning(msg)</span>
+      <span class="s0"># Uncomment the below if you want to see warnings as failures</span>
+      <span class="s0"># self.assertEmpty(msg)</span>
+    <span class="s2">return </span><span class="s1">result_jax</span><span class="s2">, </span><span class="s1">result_tf</span>
+
+  <span class="s2">def </span><span class="s1">TransformConvertAndCompare(self</span><span class="s2">, </span><span class="s1">func: Callable</span><span class="s2">, </span><span class="s1">arg</span><span class="s2">,</span>
+                                 <span class="s1">transform: Optional[str]):</span>
+    <span class="s5">&quot;&quot;&quot;Like ConvertAndCompare but first applies a transformation. 
+ 
+    `func` must be a function from one argument to one result. `arg` is 
+    the argument before the transformation. 
+ 
+    `transform` can be None, &quot;jit&quot;, &quot;jvp&quot;, &quot;grad&quot;, &quot;vmap&quot;, &quot;jvp_vmap&quot;, 
+    &quot;grad_vmap&quot; 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">transform </span><span class="s2">is None</span><span class="s1">:</span>
+      <span class="s2">return </span><span class="s1">self.ConvertAndCompare(func</span><span class="s2">, </span><span class="s1">arg)</span>
+    <span class="s2">if </span><span class="s1">transform == </span><span class="s3">&quot;jit&quot;</span><span class="s1">:</span>
+      <span class="s2">return </span><span class="s1">self.ConvertAndCompare(jax.jit(func)</span><span class="s2">, </span><span class="s1">arg)</span>
+    <span class="s2">if </span><span class="s1">transform == </span><span class="s3">&quot;jvp&quot;</span><span class="s1">:</span>
+      <span class="s1">t_func = </span><span class="s2">lambda </span><span class="s1">x</span><span class="s2">, </span><span class="s1">xt: jax.jvp(func</span><span class="s2">, </span><span class="s1">(x</span><span class="s2">,</span><span class="s1">)</span><span class="s2">, </span><span class="s1">(xt</span><span class="s2">,</span><span class="s1">))</span>
+      <span class="s2">return </span><span class="s1">self.ConvertAndCompare(t_func</span><span class="s2">, </span><span class="s1">arg</span><span class="s2">, </span><span class="s1">np.full_like(arg</span><span class="s2">, </span><span class="s4">0.1</span><span class="s1">))</span>
+    <span class="s2">if </span><span class="s1">transform == </span><span class="s3">&quot;grad&quot;</span><span class="s1">:</span>
+      <span class="s2">return </span><span class="s1">self.ConvertAndCompare(jax.grad(func)</span><span class="s2">, </span><span class="s1">arg)</span>
+    <span class="s2">if </span><span class="s1">transform == </span><span class="s3">&quot;vmap&quot;</span><span class="s1">:</span>
+      <span class="s1">t_arg = np.stack([arg] * </span><span class="s4">4</span><span class="s1">)</span>
+      <span class="s2">return </span><span class="s1">self.ConvertAndCompare(jax.vmap(func)</span><span class="s2">, </span><span class="s1">t_arg)</span>
+    <span class="s2">if </span><span class="s1">transform == </span><span class="s3">&quot;jvp_vmap&quot;</span><span class="s1">:</span>
+      <span class="s1">jvp_func = </span><span class="s2">lambda </span><span class="s1">x</span><span class="s2">, </span><span class="s1">xt: jax.jvp(jax.vmap(func)</span><span class="s2">, </span><span class="s1">(x</span><span class="s2">,</span><span class="s1">)</span><span class="s2">, </span><span class="s1">(xt</span><span class="s2">,</span><span class="s1">))</span>
+      <span class="s1">t_arg = np.stack([arg] * </span><span class="s4">4</span><span class="s1">)</span>
+      <span class="s2">return </span><span class="s1">self.ConvertAndCompare(jvp_func</span><span class="s2">, </span><span class="s1">t_arg</span><span class="s2">, </span><span class="s1">np.full_like(t_arg</span><span class="s2">, </span><span class="s4">0.1</span><span class="s1">))</span>
+    <span class="s2">if </span><span class="s1">transform == </span><span class="s3">&quot;grad_vmap&quot;</span><span class="s1">:</span>
+      <span class="s1">grad_func = jax.grad(</span><span class="s2">lambda </span><span class="s1">x: jnp.sum(jax.vmap(func)(x)))</span>
+      <span class="s1">t_arg = np.stack([arg] * </span><span class="s4">4</span><span class="s1">)</span>
+      <span class="s2">return </span><span class="s1">self.ConvertAndCompare(grad_func</span><span class="s2">, </span><span class="s1">t_arg)</span>
+    <span class="s2">assert False, </span><span class="s1">transform</span>
+
+  <span class="s2">def </span><span class="s1">TfToHlo(self</span><span class="s2">, </span><span class="s1">tf_fun: Callable</span><span class="s2">, </span><span class="s1">*args):</span>
+    <span class="s0"># Converts a tf.function to HLO text which we can inspect for occurrence of</span>
+    <span class="s0"># substrings. This works whether we use native serialization or not.</span>
+    <span class="s1">tf_function = tf.function(tf_fun</span><span class="s2">, </span><span class="s1">autograph=</span><span class="s2">False, </span><span class="s1">jit_compile=</span><span class="s2">True</span><span class="s1">)</span>
+    <span class="s1">device_name = </span><span class="s3">f&quot;/device:</span><span class="s2">{</span><span class="s1">jtu.device_under_test().upper()</span><span class="s2">}</span><span class="s3">:0&quot;</span>
+    <span class="s2">return </span><span class="s1">tf_function.experimental_get_compiler_ir(*args)(stage=</span><span class="s3">&quot;hlo&quot;</span><span class="s2">,</span>
+                                                           <span class="s1">device_name=device_name)</span>
+
+  <span class="s2">def </span><span class="s1">FindLargeTfConstants(self</span><span class="s2">, </span><span class="s1">tf_fun: Callable</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">,</span>
+                           <span class="s1">at_least=</span><span class="s4">256</span><span class="s1">):</span>
+    <span class="s0"># A hacky way to find the &quot;large&quot; constants that are embedded in the</span>
+    <span class="s0"># graph. We count the number of characters in the textual representation</span>
+    <span class="s0"># of the constant.</span>
+    <span class="s1">f_tf_graph = tf.function(tf_fun</span><span class="s2">, </span><span class="s1">autograph=</span><span class="s2">False</span><span class="s1">).get_concrete_function(*args).graph.as_graph_def()</span>
+    <span class="s2">if </span><span class="s1">config.jax2tf_default_native_serialization:</span>
+      <span class="s0"># This way of finding constants may be brittle, if the constant representation</span>
+      <span class="s0"># contains &gt;. It seems tobe hex-encoded, so this may be safe.</span>
+      <span class="s1">large_consts = [m </span><span class="s2">for </span><span class="s1">m </span><span class="s2">in </span><span class="s1">re.findall(</span><span class="s3">r&quot;dense&lt;([^&gt;]+)&gt;&quot;</span><span class="s2">, </span><span class="s1">str(f_tf_graph)) </span><span class="s2">if </span><span class="s1">len(m) &gt;= at_least]</span>
+    <span class="s2">else</span><span class="s1">:</span>
+      <span class="s0"># We cannot find the constants just with string matching because their</span>
+      <span class="s0"># representation may contain escaped &quot;</span>
+      <span class="s1">large_consts = [str(n) </span><span class="s2">for </span><span class="s1">n </span><span class="s2">in </span><span class="s1">f_tf_graph.node </span><span class="s2">if </span><span class="s1">n.op == </span><span class="s3">&quot;Const&quot; </span><span class="s2">and </span><span class="s1">len(str(n)) &gt;= at_least]</span>
+    <span class="s2">return </span><span class="s1">large_consts</span>
+
+  <span class="s2">def </span><span class="s1">CheckOpMetadata(self</span><span class="s2">, </span><span class="s1">jax_fun</span><span class="s2">, </span><span class="s1">x</span><span class="s2">,</span>
+                      <span class="s1">expected: Sequence[OpMetadataGraph]</span><span class="s2">,</span>
+                      <span class="s1">include_xla_op_metadata=</span><span class="s2">True</span><span class="s1">):</span>
+    <span class="s5">&quot;&quot;&quot;Checks that the tf.Graph obtained by converting `jax_fun` for argument 
+    `x` contains all the given OpMetadata. 
+ 
+    If `not include_xla_op_metadata` then disable the generation of the 
+    OpMetadata attributes, and check that we don't find any ops with 
+    metadata. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">f_tf = tf.function(</span>
+        <span class="s1">jax2tf.convert(jax_fun</span><span class="s2">,</span>
+                       <span class="s1">include_xla_op_metadata=include_xla_op_metadata)</span><span class="s2">,</span>
+        <span class="s1">autograph=</span><span class="s2">False,</span>
+        <span class="s1">input_signature=[tf.TensorSpec(x.shape</span><span class="s2">, </span><span class="s1">x.dtype)])</span>
+    <span class="s0"># Trace the TF function to a graph</span>
+    <span class="s1">f_tf_concrete = f_tf.get_concrete_function(tf.convert_to_tensor(x))</span>
+
+    <span class="s1">found_tf_ops = []</span>
+    <span class="s2">def </span><span class="s1">iter_nested_graph(graph: tf.Graph):</span>
+      <span class="s2">for </span><span class="s1">n </span><span class="s2">in </span><span class="s1">graph._nodes_by_id.values():</span>
+        <span class="s2">try</span><span class="s1">:</span>
+          <span class="s1">op_metadata = n.get_attr(</span><span class="s3">&quot;_XlaOpMetadata&quot;</span><span class="s1">)</span>
+          <span class="s1">op_metadata_proto = xla_data_pb2.OpMetadata()</span>
+          <span class="s1">op_metadata_proto.ParseFromString(op_metadata)</span>
+          <span class="s1">found_tf_ops.append(</span>
+              <span class="s1">OpMetadataGraph(</span>
+                  <span class="s1">tf_type=n.type</span><span class="s2">,</span>
+                  <span class="s1">op_name=op_metadata_proto.op_name</span><span class="s2">,</span>
+                  <span class="s1">op_type=op_metadata_proto.op_type</span><span class="s2">,</span>
+                  <span class="s1">source_file=op_metadata_proto.source_file</span><span class="s2">,</span>
+                  <span class="s1">source_line=op_metadata_proto.source_line))</span>
+        <span class="s2">except </span><span class="s1">ValueError:</span>
+          <span class="s2">continue</span>
+
+        <span class="s0"># Look for nested graphs. There probably is a better way!</span>
+        <span class="s2">if </span><span class="s1">n.type == </span><span class="s3">&quot;StatelessWhile&quot;</span><span class="s1">:</span>
+          <span class="s1">iter_nested_graph(n._body_graph)</span>
+          <span class="s1">iter_nested_graph(n._cond_graph)</span>
+        <span class="s2">if </span><span class="s1">n.type == </span><span class="s3">&quot;StatelessCase&quot;</span><span class="s1">:</span>
+          <span class="s2">for </span><span class="s1">idx </span><span class="s2">in </span><span class="s1">range(</span><span class="s4">10</span><span class="s1">):  </span><span class="s0"># How can I tell how many cases there are?</span>
+            <span class="s1">branch = getattr(n</span><span class="s2">, </span><span class="s3">f&quot;_branch_graph_</span><span class="s2">{</span><span class="s1">idx</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s2">, None</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">branch </span><span class="s2">is None</span><span class="s1">:</span>
+              <span class="s2">break</span>
+            <span class="s1">iter_nested_graph(branch)</span>
+
+    <span class="s1">iter_nested_graph(f_tf_concrete.graph)</span>
+    <span class="s2">try</span><span class="s1">:</span>
+      <span class="s2">if </span><span class="s1">include_xla_op_metadata:</span>
+        <span class="s1">self.assertContainsSubset(expected</span><span class="s2">, </span><span class="s1">found_tf_ops)</span>
+      <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">self.assertEmpty(found_tf_ops)</span>
+    <span class="s2">except </span><span class="s1">Exception:</span>
+      <span class="s1">print(</span><span class="s3">&quot;Found nodes:</span><span class="s2">\n  </span><span class="s3">&quot;</span><span class="s2">, </span><span class="s3">&quot;</span><span class="s2">\n   </span><span class="s3">&quot;</span><span class="s1">.join([str(md) </span><span class="s2">for </span><span class="s1">md </span><span class="s2">in </span><span class="s1">found_tf_ops]))</span>
+      <span class="s2">raise</span>
+</pre>
+</body>
+</html>

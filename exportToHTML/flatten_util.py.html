@@ -1,0 +1,111 @@
+<html>
+<head>
+<title>flatten_util.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #629755; font-style: italic;}
+.s4 { color: #6897bb;}
+.s5 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+flatten_util.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2018 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s2">import </span><span class="s1">warnings</span>
+
+<span class="s2">import </span><span class="s1">numpy </span><span class="s2">as </span><span class="s1">np</span>
+
+<span class="s2">from </span><span class="s1">jax._src.tree_util </span><span class="s2">import </span><span class="s1">tree_flatten</span><span class="s2">, </span><span class="s1">tree_unflatten</span>
+<span class="s2">from </span><span class="s1">jax._src.util </span><span class="s2">import </span><span class="s1">safe_zip</span><span class="s2">, </span><span class="s1">unzip2</span><span class="s2">, </span><span class="s1">HashablePartial</span>
+
+<span class="s2">import </span><span class="s1">jax.numpy </span><span class="s2">as </span><span class="s1">jnp</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">dtypes</span>
+<span class="s2">from </span><span class="s1">jax </span><span class="s2">import </span><span class="s1">lax</span>
+
+<span class="s1">zip = safe_zip</span>
+
+
+<span class="s2">def </span><span class="s1">ravel_pytree(pytree):</span>
+  <span class="s3">&quot;&quot;&quot;Ravel (flatten) a pytree of arrays down to a 1D array. 
+ 
+  Args: 
+    pytree: a pytree of arrays and scalars to ravel. 
+ 
+  Returns: 
+    A pair where the first element is a 1D array representing the flattened and 
+    concatenated leaf values, with dtype determined by promoting the dtypes of 
+    leaf values, and the second element is a callable for unflattening a 1D 
+    vector of the same length back to a pytree of of the same structure as the 
+    input ``pytree``. If the input pytree is empty (i.e. has no leaves) then as 
+    a convention a 1D empty array of dtype float32 is returned in the first 
+    component of the output. 
+ 
+  For details on dtype promotion, see 
+  https://jax.readthedocs.io/en/latest/type_promotion.html. 
+ 
+  &quot;&quot;&quot;</span>
+  <span class="s1">leaves</span><span class="s2">, </span><span class="s1">treedef = tree_flatten(pytree)</span>
+  <span class="s1">flat</span><span class="s2">, </span><span class="s1">unravel_list = _ravel_list(leaves)</span>
+  <span class="s2">return </span><span class="s1">flat</span><span class="s2">, </span><span class="s1">HashablePartial(unravel_pytree</span><span class="s2">, </span><span class="s1">treedef</span><span class="s2">, </span><span class="s1">unravel_list)</span>
+
+<span class="s2">def </span><span class="s1">unravel_pytree(treedef</span><span class="s2">, </span><span class="s1">unravel_list</span><span class="s2">, </span><span class="s1">flat):</span>
+  <span class="s2">return </span><span class="s1">tree_unflatten(treedef</span><span class="s2">, </span><span class="s1">unravel_list(flat))</span>
+
+<span class="s2">def </span><span class="s1">_ravel_list(lst):</span>
+  <span class="s2">if not </span><span class="s1">lst: </span><span class="s2">return </span><span class="s1">jnp.array([]</span><span class="s2">, </span><span class="s1">jnp.float32)</span><span class="s2">, lambda </span><span class="s1">_: []</span>
+  <span class="s1">from_dtypes = tuple(dtypes.dtype(l) </span><span class="s2">for </span><span class="s1">l </span><span class="s2">in </span><span class="s1">lst)</span>
+  <span class="s1">to_dtype = dtypes.result_type(*from_dtypes)</span>
+  <span class="s1">sizes</span><span class="s2">, </span><span class="s1">shapes = unzip2((jnp.size(x)</span><span class="s2">, </span><span class="s1">jnp.shape(x)) </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">lst)</span>
+  <span class="s1">indices = tuple(np.cumsum(sizes))</span>
+
+  <span class="s2">if </span><span class="s1">all(dt == to_dtype </span><span class="s2">for </span><span class="s1">dt </span><span class="s2">in </span><span class="s1">from_dtypes):</span>
+    <span class="s0"># Skip any dtype conversion, resulting in a dtype-polymorphic `unravel`.</span>
+    <span class="s0"># See https://github.com/google/jax/issues/7809.</span>
+    <span class="s2">del </span><span class="s1">from_dtypes</span><span class="s2">, </span><span class="s1">to_dtype</span>
+    <span class="s1">raveled = jnp.concatenate([jnp.ravel(e) </span><span class="s2">for </span><span class="s1">e </span><span class="s2">in </span><span class="s1">lst])</span>
+    <span class="s2">return </span><span class="s1">raveled</span><span class="s2">, </span><span class="s1">HashablePartial(_unravel_list_single_dtype</span><span class="s2">, </span><span class="s1">indices</span><span class="s2">, </span><span class="s1">shapes)</span>
+
+  <span class="s0"># When there is more than one distinct input dtype, we perform type</span>
+  <span class="s0"># conversions and produce a dtype-specific unravel function.</span>
+  <span class="s1">ravel = </span><span class="s2">lambda </span><span class="s1">e: jnp.ravel(lax.convert_element_type(e</span><span class="s2">, </span><span class="s1">to_dtype))</span>
+  <span class="s1">raveled = jnp.concatenate([ravel(e) </span><span class="s2">for </span><span class="s1">e </span><span class="s2">in </span><span class="s1">lst])</span>
+  <span class="s1">unrav = HashablePartial(_unravel_list</span><span class="s2">, </span><span class="s1">indices</span><span class="s2">, </span><span class="s1">shapes</span><span class="s2">, </span><span class="s1">from_dtypes</span><span class="s2">, </span><span class="s1">to_dtype)</span>
+  <span class="s2">return </span><span class="s1">raveled</span><span class="s2">, </span><span class="s1">unrav</span>
+
+<span class="s2">def </span><span class="s1">_unravel_list_single_dtype(indices</span><span class="s2">, </span><span class="s1">shapes</span><span class="s2">, </span><span class="s1">arr):</span>
+  <span class="s1">chunks = jnp.split(arr</span><span class="s2">, </span><span class="s1">indices[:-</span><span class="s4">1</span><span class="s1">])</span>
+  <span class="s2">return </span><span class="s1">[chunk.reshape(shape) </span><span class="s2">for </span><span class="s1">chunk</span><span class="s2">, </span><span class="s1">shape </span><span class="s2">in </span><span class="s1">zip(chunks</span><span class="s2">, </span><span class="s1">shapes)]</span>
+
+<span class="s2">def </span><span class="s1">_unravel_list(indices</span><span class="s2">, </span><span class="s1">shapes</span><span class="s2">, </span><span class="s1">from_dtypes</span><span class="s2">, </span><span class="s1">to_dtype</span><span class="s2">, </span><span class="s1">arr):</span>
+  <span class="s1">arr_dtype = dtypes.dtype(arr)</span>
+  <span class="s2">if </span><span class="s1">arr_dtype != to_dtype:</span>
+    <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s5">f&quot;unravel function given array of dtype </span><span class="s2">{</span><span class="s1">arr_dtype</span><span class="s2">}</span><span class="s5">, &quot;</span>
+                    <span class="s5">f&quot;but expected dtype </span><span class="s2">{</span><span class="s1">to_dtype</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s1">)</span>
+  <span class="s1">chunks = jnp.split(arr</span><span class="s2">, </span><span class="s1">indices[:-</span><span class="s4">1</span><span class="s1">])</span>
+  <span class="s2">with </span><span class="s1">warnings.catch_warnings():</span>
+    <span class="s1">warnings.simplefilter(</span><span class="s5">&quot;ignore&quot;</span><span class="s1">)  </span><span class="s0"># ignore complex-to-real cast warning</span>
+    <span class="s2">return </span><span class="s1">[lax.convert_element_type(chunk.reshape(shape)</span><span class="s2">, </span><span class="s1">dtype)</span>
+            <span class="s2">for </span><span class="s1">chunk</span><span class="s2">, </span><span class="s1">shape</span><span class="s2">, </span><span class="s1">dtype </span><span class="s2">in </span><span class="s1">zip(chunks</span><span class="s2">, </span><span class="s1">shapes</span><span class="s2">, </span><span class="s1">from_dtypes)]</span>
+</pre>
+</body>
+</html>

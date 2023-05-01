@@ -1,0 +1,623 @@
+<html>
+<head>
+<title>debugging.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+debugging.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2022 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+<span class="s2">&quot;&quot;&quot;Module for JAX debugging primitives and related functionality.&quot;&quot;&quot;</span>
+
+<span class="s3">import </span><span class="s1">functools</span>
+<span class="s3">import </span><span class="s1">string</span>
+<span class="s3">import </span><span class="s1">sys</span>
+<span class="s3">from </span><span class="s1">typing </span><span class="s3">import </span><span class="s1">Any</span><span class="s3">, </span><span class="s1">Dict</span><span class="s3">, </span><span class="s1">Callable</span><span class="s3">, </span><span class="s1">Optional</span><span class="s3">, </span><span class="s1">Sequence</span><span class="s3">, </span><span class="s1">Set</span><span class="s3">, </span><span class="s1">Tuple</span><span class="s3">, </span><span class="s1">Union</span>
+<span class="s3">import </span><span class="s1">weakref</span>
+
+<span class="s3">import </span><span class="s1">numpy </span><span class="s3">as </span><span class="s1">np</span>
+
+<span class="s3">import </span><span class="s1">jax.numpy </span><span class="s3">as </span><span class="s1">jnp</span>
+<span class="s3">from </span><span class="s1">jax </span><span class="s3">import </span><span class="s1">tree_util</span>
+<span class="s3">from </span><span class="s1">jax </span><span class="s3">import </span><span class="s1">lax</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">core</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">effects</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">linear_util </span><span class="s3">as </span><span class="s1">lu</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">mesh </span><span class="s3">as </span><span class="s1">mesh_lib</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">pjit</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">util</span>
+<span class="s3">from </span><span class="s1">jax._src.interpreters </span><span class="s3">import </span><span class="s1">ad</span>
+<span class="s3">from </span><span class="s1">jax._src.interpreters </span><span class="s3">import </span><span class="s1">batching</span>
+<span class="s3">from </span><span class="s1">jax._src.interpreters </span><span class="s3">import </span><span class="s1">mlir</span>
+<span class="s3">from </span><span class="s1">jax._src.lib </span><span class="s3">import </span><span class="s1">xla_client </span><span class="s3">as </span><span class="s1">xc</span>
+<span class="s3">from </span><span class="s1">jax._src.lib.mlir </span><span class="s3">import </span><span class="s1">ir</span>
+<span class="s3">from </span><span class="s1">jax._src.lib.mlir.dialects </span><span class="s3">import </span><span class="s1">hlo</span>
+<span class="s3">from </span><span class="s1">jax._src.sharding </span><span class="s3">import </span><span class="s1">Sharding</span>
+<span class="s3">from </span><span class="s1">jax._src.sharding_impls </span><span class="s3">import </span><span class="s1">GSPMDSharding</span><span class="s3">, </span><span class="s1">NamedSharding</span>
+<span class="s3">from </span><span class="s1">jax._src.interpreters </span><span class="s3">import </span><span class="s1">partial_eval </span><span class="s3">as </span><span class="s1">pe</span>
+
+<span class="s0"># pytype: disable=import-error</span>
+<span class="s3">try</span><span class="s1">:</span>
+  <span class="s3">import </span><span class="s1">rich</span>
+  <span class="s3">import </span><span class="s1">rich.align</span>
+  <span class="s3">import </span><span class="s1">rich.box</span>
+  <span class="s3">import </span><span class="s1">rich.console</span>
+  <span class="s3">import </span><span class="s1">rich.padding</span>
+  <span class="s3">import </span><span class="s1">rich.style</span>
+  <span class="s3">import </span><span class="s1">rich.table</span>
+  <span class="s1">RICH_ENABLED = </span><span class="s3">True</span>
+<span class="s3">except</span><span class="s1">:</span>
+  <span class="s1">RICH_ENABLED = </span><span class="s3">False</span>
+<span class="s0"># pytype: enable=import-error</span>
+
+<span class="s3">class </span><span class="s1">DebugEffect(effects.Effect):</span>
+  <span class="s1">__str__ = </span><span class="s3">lambda </span><span class="s1">self: </span><span class="s4">&quot;Debug&quot;</span>
+<span class="s1">debug_effect = DebugEffect()</span>
+
+<span class="s3">class </span><span class="s1">OrderedDebugEffect(effects.Effect):</span>
+  <span class="s1">__str__ = </span><span class="s3">lambda </span><span class="s1">self: </span><span class="s4">&quot;OrderedDebug&quot;</span>
+<span class="s1">ordered_debug_effect = OrderedDebugEffect()</span>
+
+<span class="s1">effects.ordered_effects.add_type(OrderedDebugEffect)</span>
+<span class="s1">effects.lowerable_effects.add_type(DebugEffect)</span>
+<span class="s1">effects.lowerable_effects.add_type(OrderedDebugEffect)</span>
+<span class="s1">effects.control_flow_allowed_effects.add_type(DebugEffect)</span>
+<span class="s1">effects.control_flow_allowed_effects.add_type(OrderedDebugEffect)</span>
+<span class="s1">effects.remat_allowed_effects.add_type(DebugEffect)</span>
+<span class="s1">effects.remat_allowed_effects.add_type(OrderedDebugEffect)</span>
+<span class="s1">effects.custom_derivatives_allowed_effects.add_type(DebugEffect)</span>
+<span class="s1">effects.custom_derivatives_allowed_effects.add_type(OrderedDebugEffect)</span>
+
+<span class="s0"># `debug_callback_p` is the main primitive for staging out Python callbacks.</span>
+<span class="s1">debug_callback_p = core.Primitive(</span><span class="s4">'debug_callback'</span><span class="s1">)</span>
+<span class="s1">debug_callback_p.multiple_results = </span><span class="s3">True</span>
+
+<span class="s1">map</span><span class="s3">, </span><span class="s1">unsafe_map = util.safe_map</span><span class="s3">, </span><span class="s1">map</span>
+
+<span class="s1">@debug_callback_p.def_impl</span>
+<span class="s3">def </span><span class="s1">debug_callback_impl(*args</span><span class="s3">, </span><span class="s1">callback: Callable[...</span><span class="s3">, </span><span class="s1">Any]</span><span class="s3">,</span>
+                        <span class="s1">effect: DebugEffect):</span>
+  <span class="s3">del </span><span class="s1">effect</span>
+  <span class="s3">return </span><span class="s1">callback(*args)</span>
+
+<span class="s1">@debug_callback_p.def_effectful_abstract_eval</span>
+<span class="s3">def </span><span class="s1">debug_callback_abstract_eval(*flat_avals</span><span class="s3">, </span><span class="s1">callback: Callable[...</span><span class="s3">, </span><span class="s1">Any]</span><span class="s3">,</span>
+                                 <span class="s1">effect: DebugEffect):</span>
+  <span class="s3">del </span><span class="s1">flat_avals</span><span class="s3">, </span><span class="s1">callback</span>
+  <span class="s3">return </span><span class="s1">[]</span><span class="s3">, </span><span class="s1">{effect}</span>
+
+<span class="s3">def </span><span class="s1">debug_callback_batching_rule(args</span><span class="s3">, </span><span class="s1">dims</span><span class="s3">, </span><span class="s1">**params):</span>
+  <span class="s2">&quot;&quot;&quot;Unrolls the debug callback across the mapped axis.&quot;&quot;&quot;</span>
+  <span class="s1">axis_size = next(x.shape[i] </span><span class="s3">for </span><span class="s1">x</span><span class="s3">, </span><span class="s1">i </span><span class="s3">in </span><span class="s1">zip(args</span><span class="s3">, </span><span class="s1">dims)</span>
+                   <span class="s3">if </span><span class="s1">i </span><span class="s3">is not None</span><span class="s1">)</span>
+  <span class="s0"># TODO(sharadmv): implement in terms of rolled loop unstead of</span>
+  <span class="s0"># unrolled.</span>
+  <span class="s3">def </span><span class="s1">get_arg_at_dim(i</span><span class="s3">, </span><span class="s1">dim</span><span class="s3">, </span><span class="s1">arg):</span>
+    <span class="s3">if </span><span class="s1">dim </span><span class="s3">is </span><span class="s1">batching.not_mapped:</span>
+      <span class="s0"># Broadcast unmapped argument</span>
+      <span class="s3">return </span><span class="s1">arg</span>
+    <span class="s3">return </span><span class="s1">lax.index_in_dim(arg</span><span class="s3">, </span><span class="s1">i</span><span class="s3">, </span><span class="s1">axis=dim</span><span class="s3">, </span><span class="s1">keepdims=</span><span class="s3">False</span><span class="s1">)</span>
+  <span class="s1">outs = []</span>
+  <span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">range(axis_size):</span>
+    <span class="s1">args_idx = map(functools.partial(get_arg_at_dim</span><span class="s3">, </span><span class="s1">i)</span><span class="s3">, </span><span class="s1">dims</span><span class="s3">, </span><span class="s1">args)</span>
+    <span class="s1">outs.append(debug_callback_p.bind(*args_idx</span><span class="s3">, </span><span class="s1">**params))</span>
+  <span class="s1">outs = [jnp.stack(xs) </span><span class="s3">for </span><span class="s1">xs </span><span class="s3">in </span><span class="s1">zip(*outs)]</span>
+  <span class="s3">return </span><span class="s1">outs</span><span class="s3">, </span><span class="s1">(</span><span class="s5">0</span><span class="s3">,</span><span class="s1">) * len(outs)</span>
+<span class="s1">batching.primitive_batchers[debug_callback_p] = debug_callback_batching_rule</span>
+
+<span class="s3">def </span><span class="s1">debug_callback_jvp_rule(primals</span><span class="s3">, </span><span class="s1">tangents</span><span class="s3">, </span><span class="s1">**params):</span>
+  <span class="s3">return </span><span class="s1">debug_callback_p.bind(*primals</span><span class="s3">, </span><span class="s1">**params)</span><span class="s3">, </span><span class="s1">[]</span>
+<span class="s1">ad.primitive_jvps[debug_callback_p] = debug_callback_jvp_rule</span>
+
+<span class="s3">def </span><span class="s1">debug_callback_transpose_rule(*flat_args</span><span class="s3">, </span><span class="s1">callback: Callable[...</span><span class="s3">, </span><span class="s1">Any]</span><span class="s3">,</span>
+    <span class="s1">effect: DebugEffect):</span>
+  <span class="s3">del </span><span class="s1">flat_args</span><span class="s3">, </span><span class="s1">callback</span><span class="s3">, </span><span class="s1">effect</span>
+  <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Transpose doesn't support debugging callbacks.&quot;</span><span class="s1">)</span>
+<span class="s1">ad.primitive_transposes[debug_callback_p] = debug_callback_transpose_rule</span>
+
+<span class="s3">def </span><span class="s1">debug_callback_lowering(ctx</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">effect</span><span class="s3">, </span><span class="s1">callback</span><span class="s3">, </span><span class="s1">**params):</span>
+
+  <span class="s1">axis_context = ctx.module_context.axis_context</span>
+  <span class="s3">if </span><span class="s1">(isinstance(axis_context</span><span class="s3">, </span><span class="s1">mlir.SPMDAxisContext) </span><span class="s3">and</span>
+        <span class="s1">set(axis_context.manual_axes) == set(axis_context.mesh.axis_names)):</span>
+    <span class="s0"># If we have fully manual sharding during lowering, that means the JAX</span>
+    <span class="s0"># program has per-device semantics, so we run the callback on each device.</span>
+    <span class="s1">sharding = xc.OpSharding()</span>
+    <span class="s1">sharding.type = xc.OpSharding.Type.MANUAL</span>
+  <span class="s3">elif </span><span class="s1">isinstance(axis_context</span><span class="s3">, </span><span class="s1">(mlir.ShardingContext</span><span class="s3">, </span><span class="s1">mlir.SPMDAxisContext)):</span>
+    <span class="s0"># If we have fully automatic sharding during lowering, that means the JAX</span>
+    <span class="s0"># program has bulk array semantics, so we run the callback with a MAXIMAL</span>
+    <span class="s0"># sharding and hence execute it only once on the full logical value).</span>
+    <span class="s0"># If we have partially automatic sharding, we do this too... not sure why!</span>
+    <span class="s1">sharding = xc.OpSharding()</span>
+    <span class="s1">sharding.type = xc.OpSharding.Type.MAXIMAL</span>
+    <span class="s1">sharding.tile_assignment_dimensions = [</span><span class="s5">1</span><span class="s1">]</span>
+    <span class="s1">sharding.tile_assignment_devices = [</span><span class="s5">0</span><span class="s1">]</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s0"># When there's no SPMD partitioning going on, don't annotate a sharding.</span>
+    <span class="s1">sharding = </span><span class="s3">None</span>
+
+  <span class="s3">def </span><span class="s1">_callback(*flat_args):</span>
+    <span class="s3">return </span><span class="s1">tuple(</span>
+        <span class="s1">debug_callback_p.impl(</span>
+            <span class="s1">*flat_args</span><span class="s3">, </span><span class="s1">effect=effect</span><span class="s3">, </span><span class="s1">callback=callback</span><span class="s3">, </span><span class="s1">**params))</span>
+  <span class="s3">if </span><span class="s1">effects.ordered_effects.contains(effect):</span>
+    <span class="s1">token = ctx.tokens_in.get(effect)[</span><span class="s5">0</span><span class="s1">]</span>
+    <span class="s1">result</span><span class="s3">, </span><span class="s1">token</span><span class="s3">, </span><span class="s1">keepalive = mlir.emit_python_callback(</span>
+        <span class="s1">ctx</span><span class="s3">, </span><span class="s1">_callback</span><span class="s3">, </span><span class="s1">token</span><span class="s3">, </span><span class="s1">list(args)</span><span class="s3">, </span><span class="s1">ctx.avals_in</span><span class="s3">, </span><span class="s1">ctx.avals_out</span><span class="s3">, True</span><span class="s1">)</span>
+    <span class="s1">ctx.set_tokens_out(mlir.TokenSet({effect: (token</span><span class="s3">,</span><span class="s1">)}))</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s1">result</span><span class="s3">, </span><span class="s1">token</span><span class="s3">, </span><span class="s1">keepalive = mlir.emit_python_callback(</span>
+        <span class="s1">ctx</span><span class="s3">, </span><span class="s1">_callback</span><span class="s3">, None, </span><span class="s1">list(args)</span><span class="s3">, </span><span class="s1">ctx.avals_in</span><span class="s3">, </span><span class="s1">ctx.avals_out</span><span class="s3">, True,</span>
+        <span class="s1">sharding=sharding)</span>
+  <span class="s1">ctx.module_context.add_keepalive(keepalive)</span>
+  <span class="s3">return </span><span class="s1">result</span>
+<span class="s1">mlir.register_lowering(debug_callback_p</span><span class="s3">, </span><span class="s1">debug_callback_lowering</span><span class="s3">,</span>
+                       <span class="s1">platform=</span><span class="s4">&quot;cpu&quot;</span><span class="s1">)</span>
+<span class="s1">mlir.register_lowering(</span>
+    <span class="s1">debug_callback_p</span><span class="s3">, </span><span class="s1">debug_callback_lowering</span><span class="s3">, </span><span class="s1">platform=</span><span class="s4">&quot;gpu&quot;</span><span class="s1">)</span>
+<span class="s1">mlir.register_lowering(</span>
+    <span class="s1">debug_callback_p</span><span class="s3">, </span><span class="s1">debug_callback_lowering</span><span class="s3">, </span><span class="s1">platform=</span><span class="s4">&quot;tpu&quot;</span><span class="s1">)</span>
+
+<span class="s3">def </span><span class="s1">_debug_callback_partial_eval_custom(saveable</span><span class="s3">, </span><span class="s1">unks_in</span><span class="s3">, </span><span class="s1">inst_in</span><span class="s3">, </span><span class="s1">eqn):</span>
+  <span class="s0"># The default behavior for effectful primitives is to not stage them if</span>
+  <span class="s0"># possible. For debug callback, we actually want it to be staged to</span>
+  <span class="s0"># provide more information to the user. This rule bypasses partial_eval's</span>
+  <span class="s0"># regular behavior to do that. Specifically, we will stage the callback</span>
+  <span class="s0"># if:</span>
+  <span class="s0"># 1) the policy says debug_callbacks are not saveable</span>
+  <span class="s0"># 2) the policy says debug_callbacks are saveable BUT all of the input</span>
+  <span class="s0">#    values are instantiated.</span>
+  <span class="s0"># The purpose is to call back with as much information as possible while</span>
+  <span class="s0"># avoiding unnecessarily staging out other values.</span>
+  <span class="s3">if </span><span class="s1">any(unks_in):</span>
+    <span class="s0"># The usual case (if we have any unknowns, we need to stage it out)</span>
+    <span class="s1">res = [v </span><span class="s3">for </span><span class="s1">v</span><span class="s3">, </span><span class="s1">inst </span><span class="s3">in </span><span class="s1">zip(eqn.invars</span><span class="s3">, </span><span class="s1">inst_in) </span><span class="s3">if not </span><span class="s1">inst]</span>
+    <span class="s3">return None, </span><span class="s1">eqn</span><span class="s3">, </span><span class="s1">[]</span><span class="s3">, </span><span class="s1">[]</span><span class="s3">, </span><span class="s1">res</span>
+  <span class="s3">if </span><span class="s1">saveable(debug_callback_p</span><span class="s3">, </span><span class="s1">*[v.aval </span><span class="s3">for </span><span class="s1">v </span><span class="s3">in </span><span class="s1">eqn.invars]</span><span class="s3">, </span><span class="s1">**eqn.params):</span>
+    <span class="s0"># The policy is telling us we can save the debug callback.</span>
+    <span class="s3">if </span><span class="s1">all(inst_in):</span>
+      <span class="s0"># If all of the inputs are instantiated, we also stage out the</span>
+      <span class="s0"># debug_callback.</span>
+      <span class="s3">return </span><span class="s1">eqn</span><span class="s3">, </span><span class="s1">eqn</span><span class="s3">, </span><span class="s1">[]</span><span class="s3">, </span><span class="s1">[]</span><span class="s3">, </span><span class="s1">[]</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s0"># If any are not instantiated, we don't do any extra staging to avoid</span>
+      <span class="s0"># affecting the computation.</span>
+      <span class="s3">return </span><span class="s1">eqn</span><span class="s3">, None, </span><span class="s1">[]</span><span class="s3">, </span><span class="s1">[]</span><span class="s3">, </span><span class="s1">[]</span>
+  <span class="s0"># If we can't save the debug callback (thanks to the policy) we listen to</span>
+  <span class="s0"># the policy and stage out the debug callback.</span>
+  <span class="s3">return </span><span class="s1">eqn</span><span class="s3">, </span><span class="s1">eqn</span><span class="s3">, </span><span class="s1">[]</span><span class="s3">, </span><span class="s1">[]</span><span class="s3">, </span><span class="s1">[]</span>
+<span class="s1">pe.partial_eval_jaxpr_custom_rules[debug_callback_p] = (</span>
+    <span class="s1">_debug_callback_partial_eval_custom)</span>
+
+<span class="s3">def </span><span class="s1">debug_callback(callback: Callable[...</span><span class="s3">, </span><span class="s1">Any]</span><span class="s3">, </span><span class="s1">*args: Any</span><span class="s3">,</span>
+                   <span class="s1">ordered: bool = </span><span class="s3">False, </span><span class="s1">**kwargs: Any):</span>
+  <span class="s2">&quot;&quot;&quot;Calls a stageable Python callback. 
+ 
+  `debug_callback` enables you to pass in a Python function that can be called 
+  inside of a staged JAX program. A `debug_callback` follows existing JAX 
+  transformation *pure* operational semantics, which are therefore unaware of 
+  side-effects. This means the effect could be dropped, duplicated, or 
+  potentially reordered in the presence of higher-order primitives and 
+  transformations. 
+ 
+  We want this behavior because we'd like `debug_callback` to be &quot;innocuous&quot;, 
+  i.e. we want these primitives to change the JAX computation as little as 
+  possible while revealing as much about them as possible, such as which parts 
+  of the computation are duplicated or dropped. 
+ 
+  Args: 
+    callback: A Python callable. Its return value will be ignored. 
+    *args: The positional arguments to the callback. 
+    ordered: A keyword only argument used to indicate whether or not the 
+      staged out computation will enforce ordering of this callback w.r.t. 
+      other ordered callbacks. 
+    **kwargs: The keyword arguments to the callback. 
+  Returns: 
+    The value of `callback(*args, **kwargs)`. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">flat_args</span><span class="s3">, </span><span class="s1">in_tree = tree_util.tree_flatten((args</span><span class="s3">, </span><span class="s1">kwargs))</span>
+  <span class="s1">effect = ordered_debug_effect </span><span class="s3">if </span><span class="s1">ordered </span><span class="s3">else </span><span class="s1">debug_effect</span>
+  <span class="s3">def </span><span class="s1">_flat_callback(*flat_args):</span>
+    <span class="s1">args</span><span class="s3">, </span><span class="s1">kwargs = tree_util.tree_unflatten(in_tree</span><span class="s3">, </span><span class="s1">flat_args)</span>
+    <span class="s1">callback(*args</span><span class="s3">, </span><span class="s1">**kwargs)</span>
+    <span class="s3">return </span><span class="s1">[]</span>
+  <span class="s3">return </span><span class="s1">debug_callback_p.bind(*flat_args</span><span class="s3">, </span><span class="s1">callback=_flat_callback</span><span class="s3">,</span>
+                               <span class="s1">effect=effect)</span>
+
+<span class="s3">class </span><span class="s1">_DebugPrintFormatChecker(string.Formatter):</span>
+
+  <span class="s3">def </span><span class="s1">check_unused_args(self</span><span class="s3">, </span><span class="s1">used_args</span><span class="s3">, </span><span class="s1">args</span><span class="s3">, </span><span class="s1">kwargs):</span>
+    <span class="s1">unused_args = [arg </span><span class="s3">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">arg </span><span class="s3">in </span><span class="s1">enumerate(args) </span><span class="s3">if </span><span class="s1">i </span><span class="s3">not in </span><span class="s1">used_args]</span>
+    <span class="s1">unused_kwargs = [k </span><span class="s3">for </span><span class="s1">k </span><span class="s3">in </span><span class="s1">kwargs </span><span class="s3">if </span><span class="s1">k </span><span class="s3">not in </span><span class="s1">used_args]</span>
+    <span class="s3">if </span><span class="s1">unused_args:</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span>
+          <span class="s4">f&quot;Unused positional arguments to `jax.debug.print`: </span><span class="s3">{</span><span class="s1">unused_args</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+    <span class="s3">if </span><span class="s1">unused_kwargs:</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span>
+          <span class="s4">f&quot;Unused keyword arguments to `jax.debug.print`: </span><span class="s3">{</span><span class="s1">unused_kwargs</span><span class="s3">}</span><span class="s4">. &quot;</span>
+          <span class="s4">&quot;You may be passing an f-string (i.e, `f</span><span class="s3">\&quot;</span><span class="s4">{x}</span><span class="s3">\&quot;</span><span class="s4">`) into &quot;</span>
+          <span class="s4">&quot;`jax.debug.print` and instead should pass in a regular string.&quot;</span><span class="s1">)</span>
+
+<span class="s1">formatter = _DebugPrintFormatChecker()</span>
+
+<span class="s3">def </span><span class="s1">_format_print_callback(fmt: str</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+  <span class="s1">sys.stdout.write(fmt.format(*args</span><span class="s3">, </span><span class="s1">**kwargs) + </span><span class="s4">&quot;</span><span class="s3">\n</span><span class="s4">&quot;</span><span class="s1">)</span>
+
+<span class="s3">def </span><span class="s1">debug_print(fmt: str</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">ordered: bool = </span><span class="s3">False, </span><span class="s1">**kwargs) -&gt; </span><span class="s3">None</span><span class="s1">:</span>
+  <span class="s2">&quot;&quot;&quot;Prints values and works in staged out JAX functions. 
+ 
+  Note: This function does *not* work with f-strings because the formatting is 
+  done lazily. 
+ 
+  Args: 
+    fmt: A format string, e.g. ``&quot;hello {x}&quot;``, that will be used to format 
+      input arguments. 
+    *args: A list of positional arguments to be formatted. 
+    ordered: A keyword only argument used to indicate whether or not the 
+      staged out computation will enforce ordering of this ``debug_print`` 
+      w.r.t. other ordered ``debug_print`` calls. 
+    **kwargs: Additional keyword arguments to be formatted. 
+  &quot;&quot;&quot;</span>
+  <span class="s0"># Check that we provide the correct arguments to be formatted</span>
+  <span class="s1">formatter.format(fmt</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">**kwargs)</span>
+
+  <span class="s1">debug_callback(functools.partial(_format_print_callback</span><span class="s3">, </span><span class="s1">fmt)</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">,</span>
+                 <span class="s1">**kwargs</span><span class="s3">, </span><span class="s1">ordered=ordered)</span>
+
+
+<span class="s0"># Sharding visualization</span>
+
+<span class="s1">inspect_sharding_p = core.Primitive(</span><span class="s4">&quot;inspect_sharding&quot;</span><span class="s1">)</span>
+<span class="s1">inspect_sharding_p.multiple_results = </span><span class="s3">True</span>
+
+<span class="s3">def </span><span class="s1">_inspect_sharding_impl(value</span><span class="s3">, </span><span class="s1">*</span><span class="s3">, </span><span class="s1">callback):</span>
+  <span class="s1">callback(value.sharding)</span>
+  <span class="s3">return </span><span class="s1">[]</span>
+<span class="s1">inspect_sharding_p.def_impl(_inspect_sharding_impl)</span>
+
+<span class="s3">def </span><span class="s1">_inspect_sharding_abstract_eval(aval</span><span class="s3">, </span><span class="s1">**_):</span>
+  <span class="s3">del </span><span class="s1">aval</span>
+  <span class="s0"># Effectful abstract avoids DCE</span>
+  <span class="s3">return </span><span class="s1">[]</span><span class="s3">, </span><span class="s1">{debug_effect}</span>
+<span class="s1">inspect_sharding_p.def_effectful_abstract_eval(_inspect_sharding_abstract_eval)</span>
+
+<span class="s3">def </span><span class="s1">_inspect_sharding_batching_rule(args</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">*</span><span class="s3">, </span><span class="s1">callback):</span>
+  <span class="s1">value</span><span class="s3">, </span><span class="s1">= args</span>
+  <span class="s1">inspect_sharding_p.bind(value</span><span class="s3">, </span><span class="s1">callback=callback)</span>
+  <span class="s3">return </span><span class="s1">[]</span><span class="s3">, </span><span class="s1">[]</span>
+<span class="s1">batching.primitive_batchers[inspect_sharding_p] = (</span>
+    <span class="s1">_inspect_sharding_batching_rule)</span>
+
+<span class="s3">def </span><span class="s1">_inspect_sharding_jvp_rule(primals</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">**params):</span>
+  <span class="s3">return </span><span class="s1">inspect_sharding_p.bind(*primals</span><span class="s3">, </span><span class="s1">**params)</span><span class="s3">, </span><span class="s1">[]</span>
+<span class="s1">ad.primitive_jvps[inspect_sharding_p] = _inspect_sharding_jvp_rule</span>
+
+<span class="s1">sharding_callbacks = weakref.WeakValueDictionary()  </span><span class="s0"># type: ignore</span>
+<span class="s1">_INSPECT_SHARDING_CALL_NAME = </span><span class="s4">&quot;InspectSharding&quot;</span>
+
+<span class="s3">class </span><span class="s1">ShardingCallbackInfo:</span>
+  <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">callback</span><span class="s3">, </span><span class="s1">module_context):</span>
+    <span class="s1">self.callback = callback</span>
+    <span class="s1">self.module_context = module_context</span>
+
+<span class="s3">def </span><span class="s1">_inspect_sharding_lowering_rule(ctx: mlir.LoweringRuleContext</span><span class="s3">, </span><span class="s1">value</span><span class="s3">, </span><span class="s1">*</span><span class="s3">,</span>
+                                    <span class="s1">callback):</span>
+
+  <span class="s1">mesh = mesh_lib.thread_resources.env.physical_mesh</span>
+  <span class="s1">axis_context = ctx.module_context.axis_context</span>
+
+  <span class="s3">if </span><span class="s1">isinstance(axis_context</span><span class="s3">, </span><span class="s1">mlir.ShardingContext):</span>
+    <span class="s1">devices = axis_context.device_assignment</span>
+  <span class="s3">elif </span><span class="s1">isinstance(axis_context</span><span class="s3">, </span><span class="s1">mlir.SPMDAxisContext):</span>
+    <span class="s1">devices = list(axis_context.mesh.devices.flat)</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError(type(axis_context))</span>
+
+  <span class="s3">def </span><span class="s1">_op_sharding_callback(op_sharding: xc.OpSharding):</span>
+    <span class="s3">if </span><span class="s1">mesh.empty:</span>
+      <span class="s3">return </span><span class="s1">callback(GSPMDSharding(</span>
+        <span class="s1">devices</span><span class="s3">, </span><span class="s1">op_sharding))</span>
+    <span class="s1">pspec = pjit.parse_flatten_op_sharding(</span>
+        <span class="s1">op_sharding</span><span class="s3">, </span><span class="s1">mesh)[</span><span class="s5">0</span><span class="s1">].get_partition_spec()</span>
+    <span class="s3">return </span><span class="s1">callback(NamedSharding(mesh</span><span class="s3">, </span><span class="s1">pspec))</span>
+
+  <span class="s3">if </span><span class="s1">len(devices) == </span><span class="s5">1</span><span class="s1">:</span>
+    <span class="s0"># If we only have one device in our computation, we can construct a trivial</span>
+    <span class="s0"># OpSharding and call it right now.</span>
+    <span class="s1">trivial_sharding = xc.OpSharding()</span>
+    <span class="s1">trivial_sharding.type = xc.OpSharding.Type.REPLICATED</span>
+    <span class="s1">_op_sharding_callback(trivial_sharding)</span>
+    <span class="s3">return </span><span class="s1">[]</span>
+
+  <span class="s0"># If we have a nontrivial parallel computation, we need to wait until the SPMD</span>
+  <span class="s0"># partitioner calls back with the `HloSharding.</span>
+  <span class="s3">def </span><span class="s1">_hlo_sharding_callback(hlo_sharding):</span>
+    <span class="s1">op_sharding = hlo_sharding.to_proto()</span>
+    <span class="s3">return </span><span class="s1">_op_sharding_callback(op_sharding)</span>
+
+  <span class="s0"># Here we store information in a container that we store globally so the</span>
+  <span class="s0"># custom partitioning code can access it.</span>
+  <span class="s1">sharding_callback_info = ShardingCallbackInfo(_hlo_sharding_callback</span><span class="s3">,</span>
+                                                <span class="s1">ctx.module_context)</span>
+  <span class="s1">key = str(id(sharding_callback_info))</span>
+  <span class="s1">sharding_callbacks[key] = sharding_callback_info</span>
+  <span class="s0"># We need to make sure `sharding_callback_info` is still alive when the SPMD</span>
+  <span class="s0"># partitioner runs so we keep it alive by attaching it to the executable.</span>
+  <span class="s1">ctx.module_context.add_keepalive(sharding_callback_info)</span>
+
+  <span class="s1">hlo.CustomCallOp([value.type]</span><span class="s3">, </span><span class="s1">[value]</span><span class="s3">,</span>
+                   <span class="s1">call_target_name=ir.StringAttr.get(</span>
+                     <span class="s1">_INSPECT_SHARDING_CALL_NAME)</span><span class="s3">,</span>
+                   <span class="s1">has_side_effect=ir.BoolAttr.get(</span><span class="s3">True</span><span class="s1">)</span><span class="s3">,</span>
+                   <span class="s1">api_version=mlir.i32_attr(</span><span class="s5">1</span><span class="s1">)</span><span class="s3">,</span>
+                   <span class="s1">called_computations=ir.ArrayAttr.get([])</span><span class="s3">,</span>
+                   <span class="s1">backend_config=ir.StringAttr.get(key)</span><span class="s3">,</span>
+                   <span class="s1">operand_layouts=</span><span class="s3">None,</span>
+                   <span class="s1">result_layouts=</span><span class="s3">None</span><span class="s1">)</span>
+  <span class="s3">return </span><span class="s1">[]</span>
+<span class="s1">mlir.register_lowering(inspect_sharding_p</span><span class="s3">, </span><span class="s1">_inspect_sharding_lowering_rule)</span>
+
+<span class="s3">def </span><span class="s1">inspect_sharding_prop_user_sharding(sharding</span><span class="s3">, </span><span class="s1">backend_string):</span>
+  <span class="s3">del </span><span class="s1">sharding</span><span class="s3">, </span><span class="s1">backend_string</span>
+  <span class="s3">return </span><span class="s1">[]</span>
+
+<span class="s3">def </span><span class="s1">inspect_sharding_partition(shapes</span><span class="s3">, </span><span class="s1">arg_shardings</span><span class="s3">, </span><span class="s1">result_shape</span><span class="s3">,</span>
+                               <span class="s1">result_sharding</span><span class="s3">, </span><span class="s1">backend_string):</span>
+  <span class="s3">del </span><span class="s1">result_shape</span><span class="s3">, </span><span class="s1">result_sharding</span>
+  <span class="s1">sharding_callback_info = sharding_callbacks[backend_string]</span>
+  <span class="s1">sharding_callback = sharding_callback_info.callback</span>
+  <span class="s1">module_context = sharding_callback_info.module_context</span>
+
+  <span class="s0"># Execute callback</span>
+  <span class="s1">hlo_sharding</span><span class="s3">, </span><span class="s1">= arg_shardings</span>
+  <span class="s1">sharding_callback(hlo_sharding)</span>
+
+  <span class="s1">tiled_args = [p.tile(s) </span><span class="s3">for </span><span class="s1">s</span><span class="s3">, </span><span class="s1">p </span><span class="s3">in </span><span class="s1">zip(shapes</span><span class="s3">, </span><span class="s1">arg_shardings)]</span>
+  <span class="s1">in_avals = [core.ShapedArray(arg.dimensions()</span><span class="s3">, </span><span class="s1">arg.numpy_dtype())</span>
+              <span class="s3">for </span><span class="s1">arg </span><span class="s3">in </span><span class="s1">tiled_args]</span>
+  <span class="s1">fun = lu.wrap_init(</span><span class="s3">lambda </span><span class="s1">*args: [])</span>
+  <span class="s1">jaxpr</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">consts = pe.trace_to_jaxpr_dynamic(fun</span><span class="s3">, </span><span class="s1">in_avals)</span>
+  <span class="s1">closed_jaxpr = core.ClosedJaxpr(jaxpr</span><span class="s3">, </span><span class="s1">consts)</span>
+  <span class="s1">trivial_comp = mlir.build_xla_computation_helper(closed_jaxpr</span><span class="s3">,</span>
+      <span class="s1">name=</span><span class="s4">&quot;tmp_xla_computation&quot;</span><span class="s3">, </span><span class="s1">platform=module_context.platform</span><span class="s3">,</span>
+      <span class="s1">backend_or_name=module_context.backend_or_name</span><span class="s3">,</span>
+      <span class="s1">axis_context=module_context.axis_context)</span>
+  <span class="s0"># The trivial computation built here has a dummy tuple as the result,</span>
+  <span class="s0"># so use sharding compatible with it for the result sharding.</span>
+  <span class="s1">empty_tuple_sharding = xc.OpSharding()</span>
+  <span class="s1">empty_tuple_sharding.type = xc.OpSharding.Type.TUPLE</span>
+  <span class="s1">result_sharding = xc.HloSharding.from_proto(empty_tuple_sharding)</span>
+  <span class="s3">return </span><span class="s1">trivial_comp</span><span class="s3">, </span><span class="s1">arg_shardings</span><span class="s3">, </span><span class="s1">result_sharding</span>
+
+<span class="s3">def </span><span class="s1">inspect_sharding_infer_sharding_from_operands(arg_shapes</span><span class="s3">, </span><span class="s1">arg_shardings</span><span class="s3">,</span>
+                                                  <span class="s1">shape</span><span class="s3">, </span><span class="s1">backend_string):</span>
+  <span class="s3">del </span><span class="s1">arg_shapes</span><span class="s3">, </span><span class="s1">shape</span><span class="s3">, </span><span class="s1">backend_string</span>
+  <span class="s3">return </span><span class="s1">arg_shardings[</span><span class="s5">0</span><span class="s1">]</span>
+
+<span class="s1">xc.register_custom_call_partitioner(  </span><span class="s0"># pytype: disable=module-attr</span>
+    <span class="s1">_INSPECT_SHARDING_CALL_NAME</span><span class="s3">, </span><span class="s1">inspect_sharding_prop_user_sharding</span><span class="s3">,</span>
+    <span class="s1">inspect_sharding_partition</span><span class="s3">, </span><span class="s1">inspect_sharding_infer_sharding_from_operands</span><span class="s3">,</span>
+    <span class="s3">True</span><span class="s1">)</span>
+
+<span class="s3">def </span><span class="s1">_slice_to_chunk_idx(size: int</span><span class="s3">, </span><span class="s1">slc: slice) -&gt; int:</span>
+  <span class="s3">if </span><span class="s1">slc.stop == slc.start == </span><span class="s3">None</span><span class="s1">:</span>
+    <span class="s3">return </span><span class="s5">0</span>
+  <span class="s1">slice_size = slc.stop - slc.start</span>
+  <span class="s3">assert </span><span class="s1">slc.start % slice_size == </span><span class="s5">0</span>
+  <span class="s3">assert </span><span class="s1">size % slice_size == </span><span class="s5">0</span>
+  <span class="s3">return </span><span class="s1">slc.start // slice_size</span>
+
+<span class="s3">def </span><span class="s1">_raise_to_slice(slc: Union[slice</span><span class="s3">, </span><span class="s1">int]):</span>
+  <span class="s3">if </span><span class="s1">isinstance(slc</span><span class="s3">, </span><span class="s1">int):</span>
+    <span class="s3">return </span><span class="s1">slice(slc</span><span class="s3">, </span><span class="s1">slc + </span><span class="s5">1</span><span class="s1">)</span>
+  <span class="s3">return </span><span class="s1">slc</span>
+
+<span class="s1">Color = Union[Tuple[float</span><span class="s3">, </span><span class="s1">float</span><span class="s3">, </span><span class="s1">float]</span><span class="s3">, </span><span class="s1">str]</span>
+<span class="s1">ColorMap = Callable[[float]</span><span class="s3">, </span><span class="s1">Tuple[float</span><span class="s3">, </span><span class="s1">float</span><span class="s3">, </span><span class="s1">float</span><span class="s3">, </span><span class="s1">float]]</span>
+
+<span class="s3">def </span><span class="s1">_canonicalize_color(color: Color) -&gt; str:</span>
+  <span class="s3">if </span><span class="s1">isinstance(color</span><span class="s3">, </span><span class="s1">str):</span>
+    <span class="s3">return </span><span class="s1">color</span>
+  <span class="s1">r</span><span class="s3">, </span><span class="s1">g</span><span class="s3">, </span><span class="s1">b = (int(a * </span><span class="s5">255</span><span class="s1">) </span><span class="s3">for </span><span class="s1">a </span><span class="s3">in </span><span class="s1">color)</span>
+  <span class="s3">return </span><span class="s4">f&quot;#</span><span class="s3">{</span><span class="s1">r</span><span class="s3">:</span><span class="s4">02X</span><span class="s3">}{</span><span class="s1">g</span><span class="s3">:</span><span class="s4">02X</span><span class="s3">}{</span><span class="s1">b</span><span class="s3">:</span><span class="s4">02X</span><span class="s3">}</span><span class="s4">&quot;</span>
+
+<span class="s3">def </span><span class="s1">_get_text_color(color: str) -&gt; str:</span>
+  <span class="s1">r</span><span class="s3">, </span><span class="s1">g</span><span class="s3">, </span><span class="s1">b = map(</span><span class="s3">lambda </span><span class="s1">x: int(x</span><span class="s3">, </span><span class="s5">16</span><span class="s1">)</span><span class="s3">, </span><span class="s1">(color[</span><span class="s5">1</span><span class="s1">:</span><span class="s5">3</span><span class="s1">]</span><span class="s3">, </span><span class="s1">color[</span><span class="s5">3</span><span class="s1">:</span><span class="s5">5</span><span class="s1">]</span><span class="s3">, </span><span class="s1">color[</span><span class="s5">5</span><span class="s1">:</span><span class="s5">7</span><span class="s1">]))</span>
+  <span class="s3">if </span><span class="s1">(r * </span><span class="s5">0.299 </span><span class="s1">+ g * </span><span class="s5">0.587 </span><span class="s1">+ b * </span><span class="s5">0.114</span><span class="s1">) &gt; </span><span class="s5">186</span><span class="s1">:</span>
+    <span class="s3">return </span><span class="s4">&quot;#000000&quot;</span>
+  <span class="s3">return </span><span class="s4">&quot;#ffffff&quot;</span>
+
+<span class="s3">def </span><span class="s1">make_color_iter(color_map</span><span class="s3">, </span><span class="s1">num_rows</span><span class="s3">, </span><span class="s1">num_cols):</span>
+  <span class="s1">num_colors = num_rows * num_cols</span>
+  <span class="s1">color_values = np.linspace(</span><span class="s5">0</span><span class="s3">, </span><span class="s5">1</span><span class="s3">, </span><span class="s1">num_colors)</span>
+  <span class="s1">idx = </span><span class="s5">0</span>
+  <span class="s3">for </span><span class="s1">_ </span><span class="s3">in </span><span class="s1">range(num_colors):</span>
+    <span class="s3">yield </span><span class="s1">color_map(color_values[idx])</span>
+    <span class="s1">idx = (idx + num_colors // </span><span class="s5">2 </span><span class="s1">+ bool(num_colors % </span><span class="s5">2 </span><span class="s1">== </span><span class="s5">0</span><span class="s1">)) % num_colors</span>
+
+<span class="s3">def </span><span class="s1">visualize_sharding(shape: Sequence[int]</span><span class="s3">, </span><span class="s1">sharding: Sharding</span><span class="s3">, </span><span class="s1">*</span><span class="s3">,</span>
+                       <span class="s1">use_color: bool = </span><span class="s3">True, </span><span class="s1">scale: float = </span><span class="s5">1.</span><span class="s3">,</span>
+                       <span class="s1">min_width: int = </span><span class="s5">9</span><span class="s3">, </span><span class="s1">max_width: int = </span><span class="s5">80</span><span class="s3">,</span>
+                       <span class="s1">color_map: Optional[ColorMap] = </span><span class="s3">None</span><span class="s1">):</span>
+  <span class="s2">&quot;&quot;&quot;Visualizes a ``Sharding`` using ``rich``.&quot;&quot;&quot;</span>
+  <span class="s3">if not </span><span class="s1">RICH_ENABLED:</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;`visualize_sharding` requires `rich` to be installed.&quot;</span><span class="s1">)</span>
+  <span class="s3">if </span><span class="s1">len(shape) &gt; </span><span class="s5">2 </span><span class="s3">or </span><span class="s1">len(shape) &lt; </span><span class="s5">1</span><span class="s1">:</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span>
+        <span class="s4">&quot;`visualize_sharding` only works for shapes with 1 and 2 dimensions.&quot;</span><span class="s1">)</span>
+  <span class="s1">console = rich.console.Console(width=max_width)</span>
+  <span class="s1">use_color = use_color </span><span class="s3">and </span><span class="s1">console.color_system </span><span class="s3">is not None</span>
+  <span class="s3">if </span><span class="s1">use_color </span><span class="s3">and not </span><span class="s1">color_map:</span>
+    <span class="s3">try</span><span class="s1">:</span>
+      <span class="s3">import </span><span class="s1">matplotlib </span><span class="s3">as </span><span class="s1">mpl  </span><span class="s0"># pytype: disable=import-error</span>
+      <span class="s1">color_map = mpl.colormaps[</span><span class="s4">&quot;tab20b&quot;</span><span class="s1">]</span>
+    <span class="s3">except </span><span class="s1">ModuleNotFoundError:</span>
+      <span class="s1">use_color = </span><span class="s3">False</span>
+
+  <span class="s1">base_height = int(</span><span class="s5">10 </span><span class="s1">* scale)</span>
+  <span class="s1">aspect_ratio = (shape[</span><span class="s5">1</span><span class="s1">] </span><span class="s3">if </span><span class="s1">len(shape) == </span><span class="s5">2 </span><span class="s3">else </span><span class="s5">1</span><span class="s1">) / shape[</span><span class="s5">0</span><span class="s1">]</span>
+  <span class="s1">base_width = int(base_height * aspect_ratio)</span>
+  <span class="s1">height_to_width_ratio = </span><span class="s5">2.5</span>
+
+  <span class="s0"># Grab the device kind from the first device</span>
+  <span class="s1">device_kind = next(iter(sharding.device_set)).platform.upper()</span>
+
+  <span class="s1">device_indices_map = sharding.devices_indices_map(tuple(shape))</span>
+  <span class="s1">slices: Dict[Tuple[int</span><span class="s3">, </span><span class="s1">...]</span><span class="s3">, </span><span class="s1">Set[int]] = {}</span>
+  <span class="s1">heights: Dict[Tuple[int</span><span class="s3">, </span><span class="s1">...]</span><span class="s3">, </span><span class="s1">Optional[float]] = {}</span>
+  <span class="s1">widths: Dict[Tuple[int</span><span class="s3">, </span><span class="s1">...]</span><span class="s3">, </span><span class="s1">float] = {}</span>
+
+  <span class="s3">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">(dev</span><span class="s3">, </span><span class="s1">slcs) </span><span class="s3">in </span><span class="s1">enumerate(device_indices_map.items()):</span>
+    <span class="s3">assert </span><span class="s1">slcs </span><span class="s3">is not None</span>
+    <span class="s1">slcs = tuple(map(_raise_to_slice</span><span class="s3">, </span><span class="s1">slcs))</span>
+    <span class="s1">chunk_idxs = tuple(map(_slice_to_chunk_idx</span><span class="s3">, </span><span class="s1">shape</span><span class="s3">, </span><span class="s1">slcs))</span>
+    <span class="s3">if </span><span class="s1">slcs </span><span class="s3">is None</span><span class="s1">:</span>
+      <span class="s3">raise </span><span class="s1">NotImplementedError</span>
+    <span class="s3">if </span><span class="s1">len(slcs) == </span><span class="s5">2</span><span class="s1">:</span>
+      <span class="s1">vert</span><span class="s3">, </span><span class="s1">horiz = slcs</span>
+      <span class="s1">vert_size  = ((vert.stop  - vert.start ) </span><span class="s3">if </span><span class="s1">vert.stop  </span><span class="s3">is not None</span>
+                    <span class="s3">else </span><span class="s1">shape[</span><span class="s5">0</span><span class="s1">])</span>
+      <span class="s1">horiz_size = ((horiz.stop - horiz.start) </span><span class="s3">if </span><span class="s1">horiz.stop </span><span class="s3">is not None</span>
+                    <span class="s3">else </span><span class="s1">shape[</span><span class="s5">1</span><span class="s1">])</span>
+      <span class="s1">chunk_height = vert_size / shape[</span><span class="s5">0</span><span class="s1">]</span>
+      <span class="s1">chunk_width = horiz_size / shape[</span><span class="s5">1</span><span class="s1">]</span>
+      <span class="s1">heights[chunk_idxs] = chunk_height</span>
+      <span class="s1">widths[chunk_idxs] = chunk_width</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s0"># In the 1D case, we set the height to 1.</span>
+      <span class="s1">horiz</span><span class="s3">, </span><span class="s1">= slcs</span>
+      <span class="s1">vert = slice(</span><span class="s5">0</span><span class="s3">, </span><span class="s5">1</span><span class="s3">, None</span><span class="s1">)</span>
+      <span class="s1">horiz_size = (</span>
+          <span class="s1">(horiz.stop - horiz.start) </span><span class="s3">if </span><span class="s1">horiz.stop </span><span class="s3">is not None else </span><span class="s1">shape[</span><span class="s5">0</span><span class="s1">])</span>
+      <span class="s1">chunk_idxs = (</span><span class="s5">0</span><span class="s3">, </span><span class="s1">*chunk_idxs)</span>
+      <span class="s1">heights[chunk_idxs] = </span><span class="s3">None</span>
+      <span class="s1">widths[chunk_idxs]  = horiz_size / shape[</span><span class="s5">0</span><span class="s1">]</span>
+    <span class="s1">slices.setdefault(chunk_idxs</span><span class="s3">, </span><span class="s1">set()).add(dev.id)</span>
+  <span class="s1">num_rows = max([a[</span><span class="s5">0</span><span class="s1">] </span><span class="s3">for </span><span class="s1">a </span><span class="s3">in </span><span class="s1">slices.keys()]) + </span><span class="s5">1</span>
+  <span class="s3">if </span><span class="s1">len(list(slices.keys())[</span><span class="s5">0</span><span class="s1">]) == </span><span class="s5">1</span><span class="s1">:</span>
+    <span class="s1">num_cols = </span><span class="s5">1</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s1">num_cols = max([a[</span><span class="s5">1</span><span class="s1">] </span><span class="s3">for </span><span class="s1">a </span><span class="s3">in </span><span class="s1">slices.keys()]) + </span><span class="s5">1</span>
+
+  <span class="s1">color_iter = make_color_iter(color_map</span><span class="s3">, </span><span class="s1">num_rows</span><span class="s3">, </span><span class="s1">num_cols)</span>
+  <span class="s1">table = rich.table.Table(show_header=</span><span class="s3">False, </span><span class="s1">show_lines=</span><span class="s3">not </span><span class="s1">use_color</span><span class="s3">,</span>
+                           <span class="s1">padding=</span><span class="s5">0</span><span class="s3">,</span>
+                           <span class="s1">highlight=</span><span class="s3">not </span><span class="s1">use_color</span><span class="s3">, </span><span class="s1">pad_edge=</span><span class="s3">False,</span>
+                           <span class="s1">box=rich.box.SQUARE </span><span class="s3">if not </span><span class="s1">use_color </span><span class="s3">else None</span><span class="s1">)</span>
+  <span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">range(num_rows):</span>
+    <span class="s1">col = []</span>
+    <span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">range(num_cols):</span>
+      <span class="s1">entry = </span><span class="s4">f&quot;</span><span class="s3">{</span><span class="s1">device_kind</span><span class="s3">} </span><span class="s4">&quot;</span><span class="s1">+</span><span class="s4">&quot;,&quot;</span><span class="s1">.join([str(s) </span><span class="s3">for </span><span class="s1">s </span><span class="s3">in </span><span class="s1">sorted(slices[i</span><span class="s3">, </span><span class="s1">j])])</span>
+      <span class="s1">width</span><span class="s3">, </span><span class="s1">maybe_height = widths[i</span><span class="s3">, </span><span class="s1">j]</span><span class="s3">, </span><span class="s1">heights[i</span><span class="s3">, </span><span class="s1">j]</span>
+      <span class="s1">width = int(width * base_width * height_to_width_ratio)</span>
+      <span class="s3">if </span><span class="s1">maybe_height </span><span class="s3">is None</span><span class="s1">:</span>
+        <span class="s1">height = </span><span class="s5">1</span>
+      <span class="s3">else</span><span class="s1">:</span>
+        <span class="s1">height = int(maybe_height * base_height)</span>
+      <span class="s1">width = min(max(width</span><span class="s3">, </span><span class="s1">min_width)</span><span class="s3">, </span><span class="s1">max_width)</span>
+      <span class="s1">left_padding</span><span class="s3">, </span><span class="s1">remainder = divmod(width - len(entry) - </span><span class="s5">2</span><span class="s3">, </span><span class="s5">2</span><span class="s1">)</span>
+      <span class="s1">right_padding = left_padding + remainder</span>
+      <span class="s1">top_padding</span><span class="s3">, </span><span class="s1">remainder = divmod(height - </span><span class="s5">2</span><span class="s3">, </span><span class="s5">2</span><span class="s1">)</span>
+      <span class="s1">bottom_padding = top_padding + remainder</span>
+      <span class="s3">if </span><span class="s1">use_color:</span>
+        <span class="s1">color = _canonicalize_color(next(color_iter)[:</span><span class="s5">3</span><span class="s1">])</span>
+        <span class="s1">text_color = _get_text_color(color)</span>
+        <span class="s1">top_padding += </span><span class="s5">1</span>
+        <span class="s1">bottom_padding += </span><span class="s5">1</span>
+        <span class="s1">left_padding += </span><span class="s5">1</span>
+        <span class="s1">right_padding += </span><span class="s5">1</span>
+      <span class="s3">else</span><span class="s1">:</span>
+        <span class="s1">color = </span><span class="s3">None</span>
+        <span class="s1">text_color = </span><span class="s3">None</span>
+      <span class="s1">padding = (top_padding</span><span class="s3">, </span><span class="s1">right_padding</span><span class="s3">, </span><span class="s1">bottom_padding</span><span class="s3">, </span><span class="s1">left_padding)</span>
+      <span class="s1">padding = tuple(max(x</span><span class="s3">, </span><span class="s5">0</span><span class="s1">) </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">padding)  </span><span class="s0"># type: ignore</span>
+      <span class="s1">col.append(</span>
+          <span class="s1">rich.padding.Padding(</span>
+            <span class="s1">rich.align.Align(entry</span><span class="s3">, </span><span class="s4">&quot;center&quot;</span><span class="s3">, </span><span class="s1">vertical=</span><span class="s4">&quot;middle&quot;</span><span class="s1">)</span><span class="s3">, </span><span class="s1">padding</span><span class="s3">,</span>
+            <span class="s1">style=rich.style.Style(bgcolor=color</span><span class="s3">,</span>
+              <span class="s1">color=text_color)))</span>
+    <span class="s1">table.add_row(*col)</span>
+  <span class="s1">console.print(table</span><span class="s3">, </span><span class="s1">end=</span><span class="s4">'</span><span class="s3">\n\n</span><span class="s4">'</span><span class="s1">)</span>
+
+<span class="s3">def </span><span class="s1">inspect_array_sharding(value</span><span class="s3">, </span><span class="s1">*</span><span class="s3">, </span><span class="s1">callback: Callable[[Sharding]</span><span class="s3">, None</span><span class="s1">]):</span>
+  <span class="s2">&quot;&quot;&quot;Enables inspecting array sharding inside JIT-ted functions. 
+ 
+  This function, when provided with a Pytree of arrays, calls back with each of 
+  their shardings and works in ``pjit``-ted computations, enabling inspecting 
+  the chosen intermediate shardings. 
+ 
+  The policy for when ``callback`` is called is *as early as possible* when the 
+  sharding information is available. This means if ``inspect_array_callback`` is 
+  called without any transformations, the callback will happen immediately 
+  since we have the array and its sharding readily available. Inside of a 
+  ``jax.jit``, the callback will happen at lowering time, meaning you can 
+  trigger the callback using the AOT API (``jit(f).lower(...)``). When inside of 
+  a ``pjit``, the callback happens *at compile time* since the sharding is 
+  determined by XLA. You can trigger the callback by using JAX's AOT API 
+  (``pjit(f).lower(...).compile()``). In all cases, the callback will be 
+  triggered by running the function, since running a function entails lowering 
+  and compiling it first. However, once the function is compiled and cached, 
+  the callback will no longer occur. 
+ 
+  This function is experimental and its behavior may change in the future. 
+ 
+  Args: 
+    value: A Pytree of JAX arrays. 
+    callback: A callable that takes in a ``Sharding`` and doesn't return a value. 
+ 
+  In the following example, we print out the sharding of an intermediate value 
+  in a ``pjit``-ted computation: 
+ 
+  &gt;&gt;&gt; import jax 
+  &gt;&gt;&gt; import jax.numpy as jnp 
+  &gt;&gt;&gt; from jax.experimental.pjit import pjit 
+  &gt;&gt;&gt; from jax.sharding import Mesh, PartitionSpec 
+  &gt;&gt;&gt; 
+  &gt;&gt;&gt; x = jnp.arange(8, dtype=jnp.float32) 
+  &gt;&gt;&gt; def f_(x): 
+  ...   x = jnp.sin(x) 
+  ...   jax.debug.inspect_array_sharding(x, callback=print) 
+  ...   return jnp.square(x) 
+  &gt;&gt;&gt; f = pjit(f_, in_shardings=PartitionSpec('dev'), 
+  ...          out_shardings=PartitionSpec('dev')) 
+  &gt;&gt;&gt; with Mesh(jax.devices(), ('dev',)): 
+  ...   f.lower(x).compile()  # doctest: +SKIP 
+  ... 
+  NamedSharding(mesh={'dev': 8}, partition_spec=PartitionSpec(('dev',),)) 
+  &quot;&quot;&quot;</span>
+  <span class="s3">def </span><span class="s1">_inspect(val):</span>
+    <span class="s1">inspect_sharding_p.bind(val</span><span class="s3">, </span><span class="s1">callback=callback)</span>
+  <span class="s1">tree_util.tree_map(_inspect</span><span class="s3">, </span><span class="s1">value)</span>
+
+<span class="s3">def </span><span class="s1">visualize_array_sharding(arr</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+  <span class="s2">&quot;&quot;&quot;Visualizes an array's sharding.&quot;&quot;&quot;</span>
+  <span class="s3">def </span><span class="s1">_visualize(sharding):</span>
+    <span class="s3">return </span><span class="s1">visualize_sharding(arr.shape</span><span class="s3">, </span><span class="s1">sharding</span><span class="s3">, </span><span class="s1">**kwargs)</span>
+  <span class="s1">inspect_array_sharding(arr</span><span class="s3">, </span><span class="s1">callback=_visualize)</span>
+</pre>
+</body>
+</html>

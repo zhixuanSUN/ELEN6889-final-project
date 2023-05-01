@@ -1,0 +1,894 @@
+<html>
+<head>
+<title>conditionals.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+conditionals.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2022 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+<span class="s2">&quot;&quot;&quot;Module for conditional control flow primitives.&quot;&quot;&quot;</span>
+<span class="s3">import </span><span class="s1">collections</span>
+<span class="s3">import </span><span class="s1">functools</span>
+<span class="s3">from </span><span class="s1">functools </span><span class="s3">import </span><span class="s1">partial</span>
+<span class="s3">import </span><span class="s1">inspect</span>
+<span class="s3">import </span><span class="s1">itertools</span>
+<span class="s3">import </span><span class="s1">operator</span>
+
+<span class="s3">from </span><span class="s1">typing </span><span class="s3">import </span><span class="s1">Callable</span><span class="s3">, </span><span class="s1">Sequence</span><span class="s3">, </span><span class="s1">List</span><span class="s3">, </span><span class="s1">Tuple</span>
+
+<span class="s3">from </span><span class="s1">jax.config </span><span class="s3">import </span><span class="s1">config</span>
+<span class="s3">from </span><span class="s1">jax.tree_util </span><span class="s3">import </span><span class="s1">tree_flatten</span><span class="s3">, </span><span class="s1">tree_unflatten</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">ad_util</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">core</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">dispatch</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">dtypes</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">effects</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">linear_util </span><span class="s3">as </span><span class="s1">lu</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">source_info_util</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">util</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">state</span>
+<span class="s3">from </span><span class="s1">jax._src.core </span><span class="s3">import </span><span class="s1">ConcreteArray</span><span class="s3">, </span><span class="s1">raise_to_shaped</span><span class="s3">, </span><span class="s1">replace_jaxpr_effects</span>
+<span class="s3">from </span><span class="s1">jax._src.interpreters </span><span class="s3">import </span><span class="s1">ad</span>
+<span class="s3">from </span><span class="s1">jax._src.interpreters </span><span class="s3">import </span><span class="s1">batching</span>
+<span class="s3">from </span><span class="s1">jax._src.interpreters </span><span class="s3">import </span><span class="s1">mlir</span>
+<span class="s3">from </span><span class="s1">jax._src.interpreters </span><span class="s3">import </span><span class="s1">partial_eval </span><span class="s3">as </span><span class="s1">pe</span>
+<span class="s3">from </span><span class="s1">jax._src.interpreters </span><span class="s3">import </span><span class="s1">xla</span>
+<span class="s3">from </span><span class="s1">jax._src.lax </span><span class="s3">import </span><span class="s1">lax</span>
+<span class="s3">from </span><span class="s1">jax._src.traceback_util </span><span class="s3">import </span><span class="s1">api_boundary</span>
+<span class="s3">from </span><span class="s1">jax._src.util </span><span class="s3">import </span><span class="s1">(safe_map</span><span class="s3">, </span><span class="s1">split_list</span><span class="s3">, </span><span class="s1">partition_list)</span>
+<span class="s3">from </span><span class="s1">jax._src.lib.mlir </span><span class="s3">import </span><span class="s1">ir</span>
+<span class="s3">from </span><span class="s1">jax._src.lib.mlir.dialects </span><span class="s3">import </span><span class="s1">hlo</span>
+<span class="s3">import </span><span class="s1">numpy </span><span class="s3">as </span><span class="s1">np</span>
+
+<span class="s3">from </span><span class="s1">jax._src.lax.control_flow.common </span><span class="s3">import </span><span class="s1">(</span>
+    <span class="s1">_abstractify</span><span class="s3">,</span>
+    <span class="s1">_avals_short</span><span class="s3">,</span>
+    <span class="s1">_check_tree_and_avals</span><span class="s3">,</span>
+    <span class="s1">_initial_style_jaxprs_with_common_consts</span><span class="s3">,</span>
+    <span class="s1">_make_closed_jaxpr</span><span class="s3">,</span>
+    <span class="s1">_prune_zeros</span><span class="s3">,</span>
+    <span class="s1">_typecheck_param</span><span class="s3">,</span>
+    <span class="s1">allowed_effects</span><span class="s3">,</span>
+    <span class="s1">)</span>
+
+<span class="s1">map</span><span class="s3">, </span><span class="s1">unsafe_map = safe_map</span><span class="s3">, </span><span class="s1">map</span>
+
+
+<span class="s0"># For backward compatibility with a previous switch/cond calling convention,</span>
+<span class="s0"># we allow a single (pytree) `operand` argument to be passed by keyword. We use</span>
+<span class="s0"># a sentinel object as its default value to indicate when it is _not_ passed.</span>
+<span class="s1">_no_operand_sentinel = object()</span>
+
+<span class="s1">@api_boundary</span>
+<span class="s3">def </span><span class="s1">switch(index</span><span class="s3">, </span><span class="s1">branches: Sequence[Callable]</span><span class="s3">, </span><span class="s1">*operands</span><span class="s3">,</span>
+           <span class="s1">operand=_no_operand_sentinel):</span>
+  <span class="s2">&quot;&quot;&quot;Apply exactly one of ``branches`` given by ``index``. 
+ 
+  If ``index`` is out of bounds, it is clamped to within bounds. 
+ 
+  Has the semantics of the following Python:: 
+ 
+    def switch(index, branches, *operands): 
+      index = clamp(0, index, len(branches) - 1) 
+      return branches[index](*operands) 
+ 
+  Args: 
+    index: Integer scalar type, indicating which branch function to apply. 
+    branches: Sequence of functions (A -&gt; B) to be applied based on ``index``. 
+    operands: Operands (A) input to whichever branch is applied. 
+ 
+  Returns: 
+    Value (B) of ``branch(*operands)`` for the branch that was selected based 
+    on ``index``. 
+  &quot;&quot;&quot;</span>
+  <span class="s3">if not </span><span class="s1">all(callable(branch) </span><span class="s3">for </span><span class="s1">branch </span><span class="s3">in </span><span class="s1">branches):</span>
+    <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;lax.switch: branches argument should be a sequence of callables.&quot;</span><span class="s1">)</span>
+  <span class="s3">if </span><span class="s1">operand </span><span class="s3">is not </span><span class="s1">_no_operand_sentinel:</span>
+    <span class="s3">if </span><span class="s1">operands:</span>
+      <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;if 'operand' keyword is passed then no positional &quot;</span>
+                      <span class="s4">f&quot;operands can be passed, got </span><span class="s3">{</span><span class="s1">operand=</span><span class="s3">} </span><span class="s4">&quot;</span>
+                      <span class="s4">f&quot;and positional operands </span><span class="s3">{</span><span class="s1">operands</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+    <span class="s1">operands = (operand</span><span class="s3">,</span><span class="s1">)</span>
+  <span class="s3">del </span><span class="s1">operand</span>
+
+  <span class="s3">if </span><span class="s1">len(np.shape(index)) != </span><span class="s5">0</span><span class="s1">:</span>
+    <span class="s3">raise </span><span class="s1">TypeError(</span>
+        <span class="s4">f&quot;Branch index must be scalar, &quot;</span>
+        <span class="s4">f&quot;got </span><span class="s3">{</span><span class="s1">index</span><span class="s3">} </span><span class="s4">of shape </span><span class="s3">{</span><span class="s1">np.shape(index)</span><span class="s3">}</span><span class="s4">.&quot;</span><span class="s1">)</span>
+
+  <span class="s3">try</span><span class="s1">:</span>
+    <span class="s1">index_dtype = dtypes.result_type(index)</span>
+  <span class="s3">except </span><span class="s1">TypeError </span><span class="s3">as </span><span class="s1">err:</span>
+    <span class="s1">msg = </span><span class="s4">f&quot;Index type must be an integer, got </span><span class="s3">{</span><span class="s1">index</span><span class="s3">}</span><span class="s4">.&quot;</span>
+    <span class="s3">raise </span><span class="s1">TypeError(msg) </span><span class="s3">from </span><span class="s1">err</span>
+
+  <span class="s3">if </span><span class="s1">index_dtype.kind </span><span class="s3">not in </span><span class="s4">'iu'</span><span class="s1">:</span>
+    <span class="s3">raise </span><span class="s1">TypeError(</span>
+        <span class="s4">f&quot;Index type must be an integer, got </span><span class="s3">{</span><span class="s1">index</span><span class="s3">} </span><span class="s4">as </span><span class="s3">{</span><span class="s1">index_dtype</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+
+  <span class="s1">branches = tuple(branches)</span>
+
+  <span class="s3">if </span><span class="s1">len(branches) == </span><span class="s5">0</span><span class="s1">:</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Empty branch sequence&quot;</span><span class="s1">)</span>
+  <span class="s3">elif </span><span class="s1">len(branches) == </span><span class="s5">1</span><span class="s1">:</span>
+    <span class="s3">return </span><span class="s1">branches[</span><span class="s5">0</span><span class="s1">](*operands)</span>
+
+  <span class="s1">index = lax.convert_element_type(index</span><span class="s3">, </span><span class="s1">np.int32)</span>
+  <span class="s1">lo = np.array(</span><span class="s5">0</span><span class="s3">, </span><span class="s1">np.int32)</span>
+  <span class="s1">hi = np.array(len(branches) - </span><span class="s5">1</span><span class="s3">, </span><span class="s1">np.int32)</span>
+  <span class="s1">index = lax.clamp(lo</span><span class="s3">, </span><span class="s1">index</span><span class="s3">, </span><span class="s1">hi)</span>
+
+  <span class="s3">if </span><span class="s1">(config.jax_disable_jit </span><span class="s3">and</span>
+      <span class="s1">isinstance(core.get_aval(index)</span><span class="s3">, </span><span class="s1">ConcreteArray)):</span>
+    <span class="s3">return </span><span class="s1">branches[int(index)](*operands)</span>
+
+  <span class="s1">ops</span><span class="s3">, </span><span class="s1">ops_tree = tree_flatten(operands)</span>
+  <span class="s1">ops_avals = tuple(map(_abstractify</span><span class="s3">, </span><span class="s1">ops))</span>
+
+  <span class="s1">jaxprs</span><span class="s3">, </span><span class="s1">consts</span><span class="s3">, </span><span class="s1">out_trees = _initial_style_jaxprs_with_common_consts(</span>
+      <span class="s1">branches</span><span class="s3">, </span><span class="s1">ops_tree</span><span class="s3">, </span><span class="s1">ops_avals</span><span class="s3">, </span><span class="s1">primitive_name=</span><span class="s4">'switch'</span><span class="s1">)</span>
+  <span class="s3">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">(out_tree</span><span class="s3">, </span><span class="s1">jaxpr) </span><span class="s3">in </span><span class="s1">enumerate(zip(out_trees[</span><span class="s5">1</span><span class="s1">:]</span><span class="s3">, </span><span class="s1">jaxprs[</span><span class="s5">1</span><span class="s1">:])):</span>
+    <span class="s1">_check_tree_and_avals(</span><span class="s4">f&quot;branch 0 and </span><span class="s3">{</span><span class="s1">i + </span><span class="s5">1</span><span class="s3">} </span><span class="s4">outputs&quot;</span><span class="s3">,</span>
+                          <span class="s1">out_trees[</span><span class="s5">0</span><span class="s1">]</span><span class="s3">, </span><span class="s1">jaxprs[</span><span class="s5">0</span><span class="s1">].out_avals</span><span class="s3">,</span>
+                          <span class="s1">out_tree</span><span class="s3">, </span><span class="s1">jaxpr.out_avals)</span>
+  <span class="s1">joined_effects = core.join_effects(*(jaxpr.effects </span><span class="s3">for </span><span class="s1">jaxpr </span><span class="s3">in </span><span class="s1">jaxprs))</span>
+  <span class="s1">disallowed_effects = allowed_effects.filter_not_in(joined_effects)</span>
+  <span class="s3">if </span><span class="s1">disallowed_effects:</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError(</span>
+        <span class="s4">f'Effects not supported in `switch`: </span><span class="s3">{</span><span class="s1">disallowed_effects</span><span class="s3">}</span><span class="s4">'</span><span class="s1">)</span>
+  <span class="s3">if </span><span class="s1">joined_effects:</span>
+    <span class="s0"># Raise index in case of effects to allow data-dependence-based discharging</span>
+    <span class="s0"># of those effects (even if they don't have an explicit data dependence).</span>
+    <span class="s1">index = core.raise_as_much_as_possible(index)</span>
+
+  <span class="s1">linear = (</span><span class="s3">False,</span><span class="s1">) * (len(consts) + len(ops))</span>
+  <span class="s1">out = cond_p.bind(</span>
+      <span class="s1">index</span><span class="s3">, </span><span class="s1">*consts</span><span class="s3">, </span><span class="s1">*ops</span><span class="s3">, </span><span class="s1">branches=tuple(jaxprs)</span><span class="s3">, </span><span class="s1">linear=linear)</span>
+  <span class="s3">return </span><span class="s1">tree_unflatten(out_trees[</span><span class="s5">0</span><span class="s1">]</span><span class="s3">, </span><span class="s1">out)</span>
+
+
+<span class="s3">def </span><span class="s1">_cond(pred</span><span class="s3">, </span><span class="s1">true_fun: Callable</span><span class="s3">, </span><span class="s1">false_fun: Callable</span><span class="s3">, </span><span class="s1">*operands</span><span class="s3">,</span>
+          <span class="s1">operand=_no_operand_sentinel</span><span class="s3">, </span><span class="s1">linear=</span><span class="s3">None</span><span class="s1">):</span>
+  <span class="s2">&quot;&quot;&quot;Conditionally apply ``true_fun`` or ``false_fun``. 
+ 
+  Wraps XLA's `Conditional 
+  &lt;https://www.tensorflow.org/xla/operation_semantics#conditional&gt;`_ 
+  operator. 
+ 
+  Provided arguments are correctly typed, ``cond()`` has equivalent 
+  semantics to this Python implementation, where ``pred`` must be a 
+  scalar type:: 
+ 
+    def cond(pred, true_fun, false_fun, *operands): 
+      if pred: 
+        return true_fun(*operands) 
+      else: 
+        return false_fun(*operands) 
+ 
+ 
+  In contrast with :func:`jax.lax.select`, using ``cond`` indicates that only one of 
+  the two branches is executed (up to compiler rewrites and optimizations). 
+  However, when transformed with :func:`~jax.vmap` to operate over a batch of 
+  predicates, ``cond`` is converted to :func:`~jax.lax.select`. 
+ 
+  Args: 
+    pred: Boolean scalar type, indicating which branch function to apply. 
+    true_fun: Function (A -&gt; B), to be applied if ``pred`` is True. 
+    false_fun: Function (A -&gt; B), to be applied if ``pred`` is False. 
+    operands: Operands (A) input to either branch depending on ``pred``. The 
+      type can be a scalar, array, or any pytree (nested Python tuple/list/dict) 
+      thereof. 
+ 
+  Returns: 
+    Value (B) of either ``true_fun(*operands)`` or ``false_fun(*operands)``, 
+    depending on the value of ``pred``. The type can be a scalar, array, or any 
+    pytree (nested Python tuple/list/dict) thereof. 
+  &quot;&quot;&quot;</span>
+  <span class="s3">if not </span><span class="s1">(callable(true_fun) </span><span class="s3">and </span><span class="s1">callable(false_fun)):</span>
+    <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;lax.cond: true_fun and false_fun arguments should be callable.&quot;</span><span class="s1">)</span>
+  <span class="s3">if </span><span class="s1">operand </span><span class="s3">is not </span><span class="s1">_no_operand_sentinel:</span>
+    <span class="s3">if </span><span class="s1">operands:</span>
+      <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;if 'operand' keyword is passed then no positional &quot;</span>
+                      <span class="s4">f&quot;operands can be passed, got </span><span class="s3">{</span><span class="s1">operand=</span><span class="s3">} </span><span class="s4">&quot;</span>
+                      <span class="s4">f&quot;and positional operands </span><span class="s3">{</span><span class="s1">operands</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+    <span class="s1">operands = (operand</span><span class="s3">,</span><span class="s1">)</span>
+  <span class="s3">del </span><span class="s1">operand</span>
+
+  <span class="s3">if </span><span class="s1">pred </span><span class="s3">is None</span><span class="s1">:</span>
+    <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;cond predicate is None&quot;</span><span class="s1">)</span>
+  <span class="s3">if </span><span class="s1">isinstance(pred</span><span class="s3">, </span><span class="s1">Sequence) </span><span class="s3">or </span><span class="s1">np.ndim(pred) != </span><span class="s5">0</span><span class="s1">:</span>
+    <span class="s3">raise </span><span class="s1">TypeError(</span>
+        <span class="s4">f&quot;Pred must be a scalar, got </span><span class="s3">{</span><span class="s1">pred</span><span class="s3">} </span><span class="s4">of &quot; </span><span class="s1">+</span>
+        <span class="s1">(</span><span class="s4">f&quot;type </span><span class="s3">{</span><span class="s1">type(pred)</span><span class="s3">}</span><span class="s4">&quot; </span><span class="s3">if </span><span class="s1">isinstance(pred</span><span class="s3">, </span><span class="s1">Sequence)</span>
+         <span class="s3">else </span><span class="s4">f&quot;shape </span><span class="s3">{</span><span class="s1">np.shape(pred)</span><span class="s3">}</span><span class="s4">.&quot;</span><span class="s1">))</span>
+
+  <span class="s3">try</span><span class="s1">:</span>
+    <span class="s1">pred_dtype = dtypes.result_type(pred)</span>
+  <span class="s3">except </span><span class="s1">TypeError </span><span class="s3">as </span><span class="s1">err:</span>
+    <span class="s1">msg = (</span><span class="s4">&quot;Pred type must be either boolean or number, got {}.&quot;</span><span class="s1">)</span>
+    <span class="s3">raise </span><span class="s1">TypeError(msg.format(pred)) </span><span class="s3">from </span><span class="s1">err</span>
+
+  <span class="s3">if </span><span class="s1">pred_dtype.kind != </span><span class="s4">'b'</span><span class="s1">:</span>
+    <span class="s3">if </span><span class="s1">pred_dtype.kind </span><span class="s3">in </span><span class="s4">'iuf'</span><span class="s1">:</span>
+      <span class="s1">pred = pred != </span><span class="s5">0</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s1">msg = (</span><span class="s4">&quot;Pred type must be either boolean or number, got {}.&quot;</span><span class="s1">)</span>
+      <span class="s3">raise </span><span class="s1">TypeError(msg.format(pred_dtype))</span>
+
+  <span class="s3">if </span><span class="s1">config.jax_disable_jit </span><span class="s3">and </span><span class="s1">isinstance(core.get_aval(pred)</span><span class="s3">, </span><span class="s1">ConcreteArray):</span>
+    <span class="s3">if </span><span class="s1">pred:</span>
+      <span class="s3">return </span><span class="s1">true_fun(*operands)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s3">return </span><span class="s1">false_fun(*operands)</span>
+
+  <span class="s1">ops</span><span class="s3">, </span><span class="s1">ops_tree = tree_flatten(operands)</span>
+  <span class="s3">if </span><span class="s1">linear </span><span class="s3">is None</span><span class="s1">:</span>
+    <span class="s1">linear_ops = [</span><span class="s3">False</span><span class="s1">] * len(ops)</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s1">linear_ops</span><span class="s3">, </span><span class="s1">ops_tree2 = tree_flatten(linear)</span>
+    <span class="s3">if </span><span class="s1">ops_tree != ops_tree2:</span>
+      <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s4">'linear tree and operand tree mismatch'</span><span class="s1">)</span>
+  <span class="s1">ops_avals = tuple(map(_abstractify</span><span class="s3">, </span><span class="s1">ops))</span>
+
+  <span class="s1">jaxprs</span><span class="s3">, </span><span class="s1">consts</span><span class="s3">, </span><span class="s1">out_trees = _initial_style_jaxprs_with_common_consts(</span>
+      <span class="s1">(true_fun</span><span class="s3">, </span><span class="s1">false_fun)</span><span class="s3">, </span><span class="s1">ops_tree</span><span class="s3">, </span><span class="s1">ops_avals</span><span class="s3">, </span><span class="s4">'cond'</span><span class="s1">)</span>
+  <span class="s3">if </span><span class="s1">any(isinstance(op_aval</span><span class="s3">, </span><span class="s1">state.AbstractRef) </span><span class="s3">for </span><span class="s1">op_aval </span><span class="s3">in </span><span class="s1">ops_avals):</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Cannot pass `Ref`s into `cond`.&quot;</span><span class="s1">)</span>
+  <span class="s1">true_jaxpr</span><span class="s3">, </span><span class="s1">false_jaxpr = jaxprs</span>
+  <span class="s1">out_tree</span><span class="s3">, </span><span class="s1">false_out_tree = out_trees</span>
+
+  <span class="s1">_check_tree_and_avals(</span><span class="s4">&quot;true_fun and false_fun output&quot;</span><span class="s3">,</span>
+                        <span class="s1">out_tree</span><span class="s3">, </span><span class="s1">true_jaxpr.out_avals</span><span class="s3">,</span>
+                        <span class="s1">false_out_tree</span><span class="s3">, </span><span class="s1">false_jaxpr.out_avals)</span>
+  <span class="s1">joined_effects = core.join_effects(true_jaxpr.effects</span><span class="s3">, </span><span class="s1">false_jaxpr.effects)</span>
+  <span class="s1">disallowed_effects = allowed_effects.filter_not_in(joined_effects)</span>
+  <span class="s3">if </span><span class="s1">disallowed_effects:</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError(</span>
+        <span class="s4">f'Effects not supported in `cond`: </span><span class="s3">{</span><span class="s1">disallowed_effects</span><span class="s3">}</span><span class="s4">'</span><span class="s1">)</span>
+
+  <span class="s1">index = lax.convert_element_type(pred</span><span class="s3">, </span><span class="s1">np.int32)</span>
+  <span class="s3">if </span><span class="s1">joined_effects:</span>
+    <span class="s0"># Raise index in case of effects to allow data-dependence-based discharging</span>
+    <span class="s0"># of those effects (even if they don't have an explicit data dependence).</span>
+    <span class="s1">index = core.raise_as_much_as_possible(index)</span>
+  <span class="s1">false_jaxpr = replace_jaxpr_effects(false_jaxpr</span><span class="s3">, </span><span class="s1">joined_effects)</span>
+  <span class="s1">true_jaxpr = replace_jaxpr_effects(true_jaxpr</span><span class="s3">, </span><span class="s1">joined_effects)</span>
+
+  <span class="s1">linear = [</span><span class="s3">False</span><span class="s1">] * len(consts) + linear_ops</span>
+  <span class="s1">out = cond_p.bind(</span>
+      <span class="s1">index</span><span class="s3">, </span><span class="s1">*consts</span><span class="s3">, </span><span class="s1">*ops</span><span class="s3">,</span>
+      <span class="s1">branches=(false_jaxpr</span><span class="s3">, </span><span class="s1">true_jaxpr)</span><span class="s3">, </span><span class="s1">linear=tuple(linear))</span>
+  <span class="s3">return </span><span class="s1">tree_unflatten(out_tree</span><span class="s3">, </span><span class="s1">out)</span>
+
+<span class="s1">@api_boundary</span>
+<span class="s1">@functools.wraps(_cond)</span>
+<span class="s3">def </span><span class="s1">cond(*args</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+  <span class="s0"># detect an attempt to call the former, deprecated cond</span>
+  <span class="s3">try</span><span class="s1">:</span>
+    <span class="s1">ba = inspect.signature(_cond_with_per_branch_args).bind(*args</span><span class="s3">, </span><span class="s1">**kwargs)</span>
+  <span class="s3">except </span><span class="s1">TypeError:</span>
+    <span class="s3">pass</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s3">assert not </span><span class="s1">ba.kwargs  </span><span class="s0"># no catch-all **kwargs in _cond_with_per_branch</span>
+    <span class="s1">_</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">maybe_true_fun</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">maybe_false_fun = ba.args</span>
+    <span class="s3">if </span><span class="s1">callable(maybe_true_fun) </span><span class="s3">and </span><span class="s1">callable(maybe_false_fun):</span>
+      <span class="s3">return </span><span class="s1">_cond_with_per_branch_args(*ba.args)</span>
+
+  <span class="s3">return </span><span class="s1">_cond(*args</span><span class="s3">, </span><span class="s1">**kwargs)</span>
+
+<span class="s3">def </span><span class="s1">_cond_with_per_branch_args(pred</span><span class="s3">,</span>
+                               <span class="s1">true_operand</span><span class="s3">, </span><span class="s1">true_fun: Callable</span><span class="s3">,</span>
+                               <span class="s1">false_operand</span><span class="s3">, </span><span class="s1">false_fun: Callable):</span>
+  <span class="s2">&quot;&quot;&quot;Conditionally apply ``true_fun`` or ``false_fun``. 
+ 
+  Has equivalent semantics to this Python implementation:: 
+ 
+    def cond(pred, true_operand, true_fun, false_operand, false_fun): 
+      if pred: 
+        return true_fun(true_operand) 
+      else: 
+        return false_fun(false_operand) 
+ 
+  Pred has to be a scalar type, collection types (list, tuple) are not supported 
+  &quot;&quot;&quot;</span>
+  <span class="s3">if not </span><span class="s1">(callable(true_fun) </span><span class="s3">and </span><span class="s1">callable(false_fun)):</span>
+    <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;lax.cond: true_fun and false_fun arguments should be callable.&quot;</span><span class="s1">)</span>
+  <span class="s3">return </span><span class="s1">_cond(pred</span><span class="s3">,</span>
+               <span class="s3">lambda </span><span class="s1">op: true_fun(op[</span><span class="s5">0</span><span class="s1">])</span><span class="s3">,</span>
+               <span class="s3">lambda </span><span class="s1">op: false_fun(op[</span><span class="s5">1</span><span class="s1">])</span><span class="s3">,</span>
+               <span class="s1">(true_operand</span><span class="s3">, </span><span class="s1">false_operand))</span>
+
+<span class="s3">def </span><span class="s1">_join_cond_effects(branches: Sequence[core.Jaxpr]) -&gt; effects.Effects:</span>
+  <span class="s1">joined_effects = set()</span>
+  <span class="s3">for </span><span class="s1">b </span><span class="s3">in </span><span class="s1">branches:</span>
+    <span class="s3">for </span><span class="s1">eff </span><span class="s3">in </span><span class="s1">b.effects:</span>
+      <span class="s3">if </span><span class="s1">isinstance(eff</span><span class="s3">, </span><span class="s1">effects.JaxprInputEffect):</span>
+        <span class="s0"># Offset index to handle predicate</span>
+        <span class="s1">eff = eff.replace(input_index=eff.input_index + </span><span class="s5">1</span><span class="s1">)</span>
+      <span class="s1">joined_effects.add(eff)</span>
+  <span class="s3">return </span><span class="s1">joined_effects</span>
+
+<span class="s3">def </span><span class="s1">_cond_abstract_eval(*avals</span><span class="s3">, </span><span class="s1">branches</span><span class="s3">, </span><span class="s1">**_):</span>
+  <span class="s1">joined_effects = _join_cond_effects(branches)</span>
+  <span class="s1">disallowed_effects = allowed_effects.filter_not_in(joined_effects)</span>
+  <span class="s3">if </span><span class="s1">disallowed_effects:</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError(</span>
+        <span class="s4">f'Effects not supported in `cond`: </span><span class="s3">{</span><span class="s1">disallowed_effects</span><span class="s3">}</span><span class="s4">'</span><span class="s1">)</span>
+  <span class="s3">return </span><span class="s1">map(raise_to_shaped</span><span class="s3">, </span><span class="s1">branches[</span><span class="s5">0</span><span class="s1">].out_avals)</span><span class="s3">, </span><span class="s1">joined_effects</span>
+
+<span class="s3">def </span><span class="s1">_bcast_select(pred</span><span class="s3">, </span><span class="s1">on_true</span><span class="s3">, </span><span class="s1">on_false):</span>
+  <span class="s3">if </span><span class="s1">np.ndim(pred) != np.ndim(on_true):</span>
+    <span class="s1">idx = list(range(np.ndim(pred)))</span>
+    <span class="s1">pred = lax.broadcast_in_dim(pred</span><span class="s3">, </span><span class="s1">np.shape(on_true)</span><span class="s3">, </span><span class="s1">idx)</span>
+  <span class="s3">return </span><span class="s1">lax.select(pred</span><span class="s3">, </span><span class="s1">on_true</span><span class="s3">, </span><span class="s1">on_false)</span>
+
+<span class="s3">def </span><span class="s1">_bcast_select_n(pred</span><span class="s3">, </span><span class="s1">*cases):</span>
+  <span class="s3">if </span><span class="s1">np.ndim(pred) != np.ndim(cases[</span><span class="s5">0</span><span class="s1">]):</span>
+    <span class="s1">idx = list(range(np.ndim(pred)))</span>
+    <span class="s1">pred = lax.broadcast_in_dim(pred</span><span class="s3">, </span><span class="s1">np.shape(cases[</span><span class="s5">0</span><span class="s1">])</span><span class="s3">, </span><span class="s1">idx)</span>
+  <span class="s3">return </span><span class="s1">lax.select_n(pred</span><span class="s3">, </span><span class="s1">*cases)</span>
+
+<span class="s3">def </span><span class="s1">_cond_batching_rule(spmd_axis_name</span><span class="s3">, </span><span class="s1">axis_size</span><span class="s3">, </span><span class="s1">axis_name</span><span class="s3">, </span><span class="s1">main_type</span><span class="s3">, </span><span class="s1">args</span><span class="s3">,</span>
+                        <span class="s1">dims</span><span class="s3">, </span><span class="s1">branches</span><span class="s3">, </span><span class="s1">linear):</span>
+  <span class="s1">index</span><span class="s3">, </span><span class="s1">*ops = args</span>
+  <span class="s1">index_dim</span><span class="s3">, </span><span class="s1">*op_dims = dims</span>
+  <span class="s0"># TODO(sharadmv): clean this up by adding a specific blocklist</span>
+  <span class="s3">if </span><span class="s1">any(isinstance(eff</span><span class="s3">, </span><span class="s1">state.RefEffect) </span><span class="s3">for </span><span class="s1">branch </span><span class="s3">in </span><span class="s1">branches </span><span class="s3">for </span><span class="s1">eff </span><span class="s3">in</span>
+      <span class="s1">branch.jaxpr.effects):</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError(</span>
+        <span class="s4">&quot;State effect not supported in vmap-of-cond.&quot;</span><span class="s1">)</span>
+  <span class="s3">from </span><span class="s1">jax._src.callback </span><span class="s3">import </span><span class="s1">_IOEffect</span><span class="s3">, </span><span class="s1">_OrderedIOEffect</span>
+  <span class="s3">if </span><span class="s1">any(eff </span><span class="s3">in </span><span class="s1">branch.effects </span><span class="s3">for </span><span class="s1">eff </span><span class="s3">in </span><span class="s1">[_IOEffect</span><span class="s3">, </span><span class="s1">_OrderedIOEffect]</span>
+      <span class="s3">for </span><span class="s1">branch </span><span class="s3">in </span><span class="s1">branches):</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError(</span>
+        <span class="s4">&quot;IO effect not supported in vmap-of-cond.&quot;</span><span class="s1">)</span>
+
+
+  <span class="s3">if </span><span class="s1">index_dim </span><span class="s3">is not </span><span class="s1">batching.not_mapped:</span>
+    <span class="s0"># Convert to a lax.select. While we could get away with not broadcasting</span>
+    <span class="s0"># some operands yet, because all outputs must be broadcast together anyway</span>
+    <span class="s0"># for the select we broadcast the input operands for simplicity and leave</span>
+    <span class="s0"># optimizations to XLA.</span>
+    <span class="s0"># TODO(mattjj,frostig): assumes branches are side-effect-free, revise!</span>
+    <span class="s1">index</span><span class="s3">, </span><span class="s1">*ops = (</span>
+        <span class="s1">batching.bdim_at_front(x</span><span class="s3">, </span><span class="s1">d</span><span class="s3">, </span><span class="s1">axis_size) </span><span class="s3">for </span><span class="s1">x</span><span class="s3">, </span><span class="s1">d </span><span class="s3">in </span><span class="s1">zip(args</span><span class="s3">, </span><span class="s1">dims))</span>
+
+    <span class="s1">in_batched  = [</span><span class="s3">True</span><span class="s1">] * len(branches[</span><span class="s5">0</span><span class="s1">].in_avals)</span>
+    <span class="s1">out_batched = [</span><span class="s3">True</span><span class="s1">] * len(branches[</span><span class="s5">0</span><span class="s1">].out_avals)</span>
+
+    <span class="s1">branches_batched = [</span>
+        <span class="s1">batching.batch_jaxpr(</span>
+            <span class="s1">jaxpr</span><span class="s3">, </span><span class="s1">axis_size</span><span class="s3">, </span><span class="s1">in_batched</span><span class="s3">, </span><span class="s1">out_batched</span><span class="s3">, </span><span class="s1">axis_name</span><span class="s3">, </span><span class="s1">spmd_axis_name</span><span class="s3">,</span>
+            <span class="s1">main_type)[</span><span class="s5">0</span><span class="s1">]</span>
+        <span class="s3">for </span><span class="s1">jaxpr </span><span class="s3">in </span><span class="s1">branches]</span>
+
+    <span class="s1">branch_outs = []</span>
+    <span class="s3">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">jaxpr </span><span class="s3">in </span><span class="s1">enumerate(branches_batched):</span>
+      <span class="s0"># Perform a select on the inputs for safety of reverse-mode autodiff; see</span>
+      <span class="s0"># https://github.com/google/jax/issues/1052</span>
+      <span class="s1">predicate = lax.eq(index</span><span class="s3">, </span><span class="s1">lax._const(index</span><span class="s3">, </span><span class="s1">i))</span>
+      <span class="s1">ops_ = [_bcast_select(predicate</span><span class="s3">, </span><span class="s1">x</span><span class="s3">, </span><span class="s1">lax.stop_gradient(x)) </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">ops]</span>
+      <span class="s1">branch_outs.append(core.jaxpr_as_fun(jaxpr)(*ops_))</span>
+    <span class="s1">out = [_bcast_select_n(index</span><span class="s3">, </span><span class="s1">*outs) </span><span class="s3">for </span><span class="s1">outs </span><span class="s3">in </span><span class="s1">zip(*branch_outs)]</span>
+    <span class="s3">return </span><span class="s1">out</span><span class="s3">, </span><span class="s1">[</span><span class="s5">0 </span><span class="s3">if </span><span class="s1">b </span><span class="s3">else None for </span><span class="s1">b </span><span class="s3">in </span><span class="s1">out_batched]</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s1">ops_bat = [d </span><span class="s3">is not </span><span class="s1">batching.not_mapped </span><span class="s3">for </span><span class="s1">d </span><span class="s3">in </span><span class="s1">op_dims]</span>
+    <span class="s1">ops = [batching.moveaxis(x</span><span class="s3">, </span><span class="s1">d</span><span class="s3">, </span><span class="s5">0</span><span class="s1">) </span><span class="s3">if </span><span class="s1">b </span><span class="s3">else </span><span class="s1">x</span>
+           <span class="s3">for </span><span class="s1">b</span><span class="s3">, </span><span class="s1">x</span><span class="s3">, </span><span class="s1">d </span><span class="s3">in </span><span class="s1">zip(ops_bat</span><span class="s3">, </span><span class="s1">ops</span><span class="s3">, </span><span class="s1">op_dims)]</span>
+
+    <span class="s1">branches_out_bat = [</span>
+        <span class="s1">batching.batch_jaxpr(jaxpr</span><span class="s3">, </span><span class="s1">axis_size</span><span class="s3">, </span><span class="s1">ops_bat</span><span class="s3">, False, </span><span class="s1">axis_name</span><span class="s3">,</span>
+                             <span class="s1">spmd_axis_name</span><span class="s3">, </span><span class="s1">main_type)[</span><span class="s5">1</span><span class="s1">]</span>
+        <span class="s3">for </span><span class="s1">jaxpr </span><span class="s3">in </span><span class="s1">branches]</span>
+    <span class="s1">out_bat = [any(bat) </span><span class="s3">for </span><span class="s1">bat </span><span class="s3">in </span><span class="s1">zip(*branches_out_bat)]</span>
+    <span class="s1">branches_batched = tuple(</span>
+        <span class="s1">batching.batch_jaxpr(jaxpr</span><span class="s3">, </span><span class="s1">axis_size</span><span class="s3">, </span><span class="s1">ops_bat</span><span class="s3">, </span><span class="s1">out_bat</span><span class="s3">, </span><span class="s1">axis_name</span><span class="s3">,</span>
+                             <span class="s1">spmd_axis_name</span><span class="s3">, </span><span class="s1">main_type)[</span><span class="s5">0</span><span class="s1">]</span>
+        <span class="s3">for </span><span class="s1">jaxpr </span><span class="s3">in </span><span class="s1">branches)</span>
+
+    <span class="s1">out_dims = [</span><span class="s5">0 </span><span class="s3">if </span><span class="s1">b </span><span class="s3">else </span><span class="s1">batching.not_mapped </span><span class="s3">for </span><span class="s1">b </span><span class="s3">in </span><span class="s1">out_bat]</span>
+    <span class="s1">out = cond_p.bind(</span>
+        <span class="s1">index</span><span class="s3">, </span><span class="s1">*ops</span><span class="s3">, </span><span class="s1">branches=branches_batched</span><span class="s3">, </span><span class="s1">linear=linear)</span>
+    <span class="s3">return </span><span class="s1">out</span><span class="s3">, </span><span class="s1">out_dims</span>
+
+<span class="s3">def </span><span class="s1">_cond_jvp(primals</span><span class="s3">, </span><span class="s1">tangents</span><span class="s3">, </span><span class="s1">branches</span><span class="s3">, </span><span class="s1">linear):</span>
+  <span class="s1">nonzeros = [type(t) </span><span class="s3">is not </span><span class="s1">ad_util.Zero </span><span class="s3">for </span><span class="s1">t </span><span class="s3">in </span><span class="s1">tangents]</span>
+
+  <span class="s1">index_nz</span><span class="s3">, </span><span class="s1">*ops_nz = nonzeros</span>
+  <span class="s3">assert </span><span class="s1">index_nz </span><span class="s3">is False</span>
+
+  <span class="s1">branches_out_nz = [ad.jvp_jaxpr(jaxpr</span><span class="s3">, </span><span class="s1">ops_nz</span><span class="s3">, </span><span class="s1">instantiate=</span><span class="s3">False</span><span class="s1">)[</span><span class="s5">1</span><span class="s1">]</span>
+                     <span class="s3">for </span><span class="s1">jaxpr </span><span class="s3">in </span><span class="s1">branches]</span>
+  <span class="s1">out_nz = [any(nz) </span><span class="s3">for </span><span class="s1">nz </span><span class="s3">in </span><span class="s1">zip(*branches_out_nz)]</span>
+
+  <span class="s1">branches_jvp = tuple(ad.jvp_jaxpr(jaxpr</span><span class="s3">, </span><span class="s1">ops_nz</span><span class="s3">, </span><span class="s1">instantiate=out_nz)[</span><span class="s5">0</span><span class="s1">]</span>
+                       <span class="s3">for </span><span class="s1">jaxpr </span><span class="s3">in </span><span class="s1">branches)</span>
+
+  <span class="s1">index</span><span class="s3">, </span><span class="s1">*ops = primals</span>
+  <span class="s1">_</span><span class="s3">, </span><span class="s1">*ops_dot = tangents</span>
+  <span class="s1">ops_dot = _prune_zeros(ops_dot)</span>
+
+  <span class="s1">ops_lin = tuple(linear)</span>
+  <span class="s1">linear_jvp = ops_lin + (</span><span class="s3">True,</span><span class="s1">) * len(ops_dot)</span>
+  <span class="s1">out = cond_p.bind(</span>
+      <span class="s1">index</span><span class="s3">, </span><span class="s1">*ops</span><span class="s3">, </span><span class="s1">*ops_dot</span><span class="s3">, </span><span class="s1">branches=branches_jvp</span><span class="s3">, </span><span class="s1">linear=linear_jvp)</span>
+  <span class="s1">out_primals</span><span class="s3">, </span><span class="s1">out_tangents = split_list(out</span><span class="s3">, </span><span class="s1">[len(out_nz)])</span>
+  <span class="s1">out_tangents_iter = iter(out_tangents)</span>
+  <span class="s1">out_tangents = [next(out_tangents_iter) </span><span class="s3">if </span><span class="s1">nz </span><span class="s3">else </span><span class="s1">ad_util.Zero.from_value(p)</span>
+                  <span class="s3">for </span><span class="s1">p</span><span class="s3">, </span><span class="s1">nz </span><span class="s3">in </span><span class="s1">zip(out_primals</span><span class="s3">, </span><span class="s1">out_nz)]</span>
+  <span class="s3">return </span><span class="s1">out_primals</span><span class="s3">, </span><span class="s1">out_tangents</span>
+
+<span class="s3">def </span><span class="s1">_cond_partial_eval(trace</span><span class="s3">, </span><span class="s1">*tracers</span><span class="s3">, </span><span class="s1">branches</span><span class="s3">, </span><span class="s1">linear):</span>
+  <span class="s1">in_unknowns = [t.pval[</span><span class="s5">0</span><span class="s1">] </span><span class="s3">is not None for </span><span class="s1">t </span><span class="s3">in </span><span class="s1">tracers]</span>
+  <span class="s1">index_uk</span><span class="s3">, </span><span class="s1">*ops_uk = in_unknowns</span>
+  <span class="s3">if </span><span class="s1">any(isinstance(eff</span><span class="s3">, </span><span class="s1">state.RefEffect) </span><span class="s3">for </span><span class="s1">branch </span><span class="s3">in </span><span class="s1">branches </span><span class="s3">for </span><span class="s1">eff </span><span class="s3">in</span>
+      <span class="s1">branch.jaxpr.effects):</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError(</span>
+        <span class="s4">&quot;State effect not supported in cond partial-eval.&quot;</span><span class="s1">)</span>
+
+  <span class="s3">if </span><span class="s1">index_uk:</span>
+    <span class="s0"># When the branch index is unknown, we stage out the whole cond.</span>
+    <span class="s0"># TODO(mattjj): remove this path when old remat is removed</span>
+    <span class="s1">params = dict(branches=branches</span><span class="s3">, </span><span class="s1">linear=linear)</span>
+    <span class="s3">return </span><span class="s1">trace.default_process_primitive(cond_p</span><span class="s3">, </span><span class="s1">tracers</span><span class="s3">, </span><span class="s1">params)</span>
+
+  <span class="s1">branches_out_uks = []</span>
+  <span class="s3">for </span><span class="s1">branch_jaxpr </span><span class="s3">in </span><span class="s1">branches:</span>
+    <span class="s1">_</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">out_uks</span><span class="s3">, </span><span class="s1">_ = pe.partial_eval_jaxpr_nounits(</span>
+        <span class="s1">branch_jaxpr</span><span class="s3">, </span><span class="s1">ops_uk</span><span class="s3">, </span><span class="s1">instantiate=</span><span class="s3">False</span><span class="s1">)</span>
+    <span class="s1">branches_out_uks.append(out_uks)</span>
+  <span class="s1">out_uks = [any(uks) </span><span class="s3">for </span><span class="s1">uks </span><span class="s3">in </span><span class="s1">zip(*branches_out_uks)]</span>
+
+  <span class="s1">branches_known</span><span class="s3">, </span><span class="s1">branches_unknown</span><span class="s3">, </span><span class="s1">branch_res_avals = []</span><span class="s3">, </span><span class="s1">[]</span><span class="s3">, </span><span class="s1">[]</span>
+  <span class="s3">for </span><span class="s1">branch_jaxpr </span><span class="s3">in </span><span class="s1">branches:</span>
+    <span class="s1">branch_jaxpr_known</span><span class="s3">, </span><span class="s1">branch_jaxpr_unknown</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">res_avals = \</span>
+        <span class="s1">pe.partial_eval_jaxpr_nounits(branch_jaxpr</span><span class="s3">, </span><span class="s1">ops_uk</span><span class="s3">, </span><span class="s1">instantiate=out_uks)</span>
+    <span class="s1">branches_known.append(branch_jaxpr_known)</span>
+    <span class="s1">branches_unknown.append(branch_jaxpr_unknown)</span>
+    <span class="s1">branch_res_avals.append(res_avals)</span>
+
+  <span class="s1">all_res_avals</span><span class="s3">, </span><span class="s1">res_avals_per_branch = _merge_branch_residuals(branch_res_avals)</span>
+  <span class="s1">num_res = len(all_res_avals)</span>
+
+  <span class="s1">num_known_outs = len(out_uks) - sum(out_uks)</span>
+  <span class="s1">branches_known = _join_cond_outputs(</span>
+      <span class="s1">branches_known</span><span class="s3">, </span><span class="s1">all_res_avals</span><span class="s3">, </span><span class="s1">res_avals_per_branch</span><span class="s3">, </span><span class="s1">num_known_outs)</span>
+  <span class="s1">branches_unknown = _join_cond_pe_staged_jaxpr_inputs(</span>
+      <span class="s1">branches_unknown</span><span class="s3">, </span><span class="s1">all_res_avals</span><span class="s3">, </span><span class="s1">res_avals_per_branch)</span>
+  <span class="s3">assert </span><span class="s1">all(all(map(core.typematch</span><span class="s3">, </span><span class="s1">j.out_avals</span><span class="s3">, </span><span class="s1">branches_known[</span><span class="s5">0</span><span class="s1">].out_avals))</span>
+             <span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">branches_known[</span><span class="s5">1</span><span class="s1">:])</span>
+
+  <span class="s1">in_consts = [t.pval.get_known() </span><span class="s3">for </span><span class="s1">t </span><span class="s3">in </span><span class="s1">tracers </span><span class="s3">if </span><span class="s1">t.pval.is_known()]</span>
+  <span class="s1">linear_known = [l </span><span class="s3">for </span><span class="s1">l</span><span class="s3">, </span><span class="s1">uk </span><span class="s3">in </span><span class="s1">zip(linear</span><span class="s3">, </span><span class="s1">ops_uk) </span><span class="s3">if not </span><span class="s1">uk]</span>
+  <span class="s1">out_consts_res = cond_p.bind(*in_consts</span><span class="s3">, </span><span class="s1">branches=branches_known</span><span class="s3">,</span>
+                               <span class="s1">linear=tuple(linear_known))</span>
+  <span class="s1">out_consts</span><span class="s3">, </span><span class="s1">res = split_list(out_consts_res</span><span class="s3">, </span><span class="s1">[len(out_consts_res) - num_res])</span>
+
+  <span class="s1">index_tracer = trace.instantiate_const(tracers[</span><span class="s5">0</span><span class="s1">])</span>
+  <span class="s1">ops_tracers = [trace.instantiate_const(t)</span>
+                 <span class="s3">for </span><span class="s1">uk</span><span class="s3">, </span><span class="s1">t </span><span class="s3">in </span><span class="s1">zip(in_unknowns[</span><span class="s5">1</span><span class="s1">:]</span><span class="s3">, </span><span class="s1">tracers[</span><span class="s5">1</span><span class="s1">:]) </span><span class="s3">if </span><span class="s1">uk]</span>
+  <span class="s1">res_tracers = map(trace.new_instantiated_const</span><span class="s3">, </span><span class="s1">res)</span>
+  <span class="s1">out_tracers = [pe.JaxprTracer(trace</span><span class="s3">, </span><span class="s1">pe.PartialVal.unknown(aval)</span><span class="s3">, None</span><span class="s1">)</span>
+                 <span class="s3">for </span><span class="s1">aval </span><span class="s3">in </span><span class="s1">branches_unknown[</span><span class="s5">0</span><span class="s1">].out_avals]</span>
+  <span class="s1">linear_unknown = ([</span><span class="s3">False</span><span class="s1">] * num_res +</span>
+                    <span class="s1">[l </span><span class="s3">for </span><span class="s1">l</span><span class="s3">, </span><span class="s1">uk </span><span class="s3">in </span><span class="s1">zip(linear</span><span class="s3">, </span><span class="s1">in_unknowns[</span><span class="s5">1</span><span class="s1">:]) </span><span class="s3">if </span><span class="s1">uk])</span>
+  <span class="s1">params = dict(branches=branches_unknown</span><span class="s3">, </span><span class="s1">linear=tuple(linear_unknown))</span>
+  <span class="s1">name_stack = source_info_util.current_name_stack()[len(trace.name_stack):]</span>
+  <span class="s1">source = source_info_util.current().replace(name_stack=name_stack)</span>
+  <span class="s1">eqn = pe.new_eqn_recipe(</span>
+      <span class="s1">[index_tracer] + res_tracers + ops_tracers</span><span class="s3">, </span><span class="s1">out_tracers</span><span class="s3">, </span><span class="s1">cond_p</span><span class="s3">, </span><span class="s1">params</span><span class="s3">,</span>
+      <span class="s1">core.join_effects(*(j.effects </span><span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">branches_unknown))</span><span class="s3">, </span><span class="s1">source)</span>
+  <span class="s3">for </span><span class="s1">t </span><span class="s3">in </span><span class="s1">out_tracers: t.recipe = eqn</span>
+  <span class="s3">return </span><span class="s1">util.merge_lists(out_uks</span><span class="s3">, </span><span class="s1">out_consts</span><span class="s3">, </span><span class="s1">out_tracers)</span>
+
+<span class="s0"># TODO(mattjj): de-duplicate with _cond_partial_eval</span>
+<span class="s3">def </span><span class="s1">_cond_partial_eval_custom(saveable</span><span class="s3">, </span><span class="s1">unks_in</span><span class="s3">, </span><span class="s1">inst_in</span><span class="s3">, </span><span class="s1">eqn):</span>
+  <span class="s1">index_uk</span><span class="s3">, </span><span class="s1">*ops_uk = unks_in</span>
+  <span class="s1">branches = eqn.params[</span><span class="s4">'branches'</span><span class="s1">]</span>
+
+  <span class="s0"># Instantiate all inputs (b/c jaxpr_staged will take all inputs).</span>
+  <span class="s1">new_inst = [x </span><span class="s3">for </span><span class="s1">x</span><span class="s3">, </span><span class="s1">inst </span><span class="s3">in </span><span class="s1">zip(eqn.invars</span><span class="s3">, </span><span class="s1">inst_in)</span>
+              <span class="s3">if </span><span class="s1">type(x) </span><span class="s3">is </span><span class="s1">core.Var </span><span class="s3">and not </span><span class="s1">inst]</span>
+  <span class="s3">del </span><span class="s1">inst_in</span>
+
+  <span class="s0"># NOTE(mattjj): I think it should be impossible for the index to be unknown,</span>
+  <span class="s0"># but asserting that caused a test failure in diffrax. So we handle it: if it</span>
+  <span class="s0"># is unknown, stage out the whole cond.</span>
+  <span class="s3">if </span><span class="s1">index_uk:</span>
+    <span class="s1">all_true = [</span><span class="s3">True</span><span class="s1">] * len(branches[</span><span class="s5">0</span><span class="s1">].out_avals)</span>
+    <span class="s3">return None, </span><span class="s1">eqn</span><span class="s3">, </span><span class="s1">all_true</span><span class="s3">, </span><span class="s1">all_true</span><span class="s3">, </span><span class="s1">new_inst</span>
+
+  <span class="s0"># First, compute output unknowns (unks_out), where an output of the cond is</span>
+  <span class="s0"># unknown if it would be unknown on any of the branches.</span>
+  <span class="s1">unks_out: List[bool] = [</span><span class="s3">False</span><span class="s1">] * len(eqn.outvars)</span>
+  <span class="s3">for </span><span class="s1">jaxpr </span><span class="s3">in </span><span class="s1">branches:</span>
+    <span class="s1">_</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">unks_out_</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">_ = pe.partial_eval_jaxpr_custom(</span>
+        <span class="s1">jaxpr.jaxpr</span><span class="s3">, </span><span class="s1">in_unknowns=ops_uk</span><span class="s3">, </span><span class="s1">in_inst=</span><span class="s3">True,</span>
+        <span class="s1">ensure_out_unknowns=</span><span class="s3">False, </span><span class="s1">ensure_out_inst=</span><span class="s3">True, </span><span class="s1">saveable=saveable)</span>
+    <span class="s1">unks_out = map(operator.or_</span><span class="s3">, </span><span class="s1">unks_out</span><span class="s3">, </span><span class="s1">unks_out_)</span>
+
+  <span class="s0"># Next, use the computed output unknowns to build a known jaxpr and a staged</span>
+  <span class="s0"># jaxpr for each branch.</span>
+  <span class="s1">branches_known_ : List[core.ClosedJaxpr] = []</span>
+  <span class="s1">branches_staged_: List[core.ClosedJaxpr] = []</span>
+  <span class="s1">branch_res_avals: List[core.AbstractValue] = []</span>
+  <span class="s3">for </span><span class="s1">jaxpr </span><span class="s3">in </span><span class="s1">branches:</span>
+    <span class="s1">jaxpr_known</span><span class="s3">, </span><span class="s1">jaxpr_staged</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">inst_out</span><span class="s3">, </span><span class="s1">num_res = \</span>
+        <span class="s1">pe.partial_eval_jaxpr_custom(</span>
+            <span class="s1">jaxpr.jaxpr</span><span class="s3">, </span><span class="s1">in_unknowns=ops_uk</span><span class="s3">, </span><span class="s1">in_inst=</span><span class="s3">True,</span>
+            <span class="s1">ensure_out_unknowns=unks_out</span><span class="s3">, </span><span class="s1">ensure_out_inst=</span><span class="s3">True,</span>
+            <span class="s1">saveable=saveable)</span>
+    <span class="s1">branches_known_.append( core.ClosedJaxpr(jaxpr_known</span><span class="s3">,  </span><span class="s1">jaxpr.consts))</span>
+    <span class="s1">branches_staged_.append(core.ClosedJaxpr(jaxpr_staged</span><span class="s3">, </span><span class="s1">jaxpr.consts))</span>
+    <span class="s1">branch_res_avals.append(branches_staged_[-</span><span class="s5">1</span><span class="s1">].in_avals[:num_res])</span>
+
+  <span class="s0"># Residuals may differ across branches, so we merge them, then use the merged</span>
+  <span class="s0"># residuals to join the outputs of all branches to the same type.</span>
+  <span class="s1">all_res_avals</span><span class="s3">, </span><span class="s1">res_avals_per_branch = _merge_branch_residuals(branch_res_avals)</span>
+  <span class="s1">num_res = len(all_res_avals)</span>
+  <span class="s1">num_known_outs = len(unks_out) - sum(unks_out)</span>
+  <span class="s1">branches_known = _join_cond_outputs(</span>
+      <span class="s1">branches_known_</span><span class="s3">, </span><span class="s1">all_res_avals</span><span class="s3">, </span><span class="s1">res_avals_per_branch</span><span class="s3">, </span><span class="s1">num_known_outs)</span>
+  <span class="s1">branches_staged = _join_cond_pe_staged_jaxpr_inputs(</span>
+      <span class="s1">branches_staged_</span><span class="s3">, </span><span class="s1">all_res_avals</span><span class="s3">, </span><span class="s1">res_avals_per_branch)</span>
+  <span class="s3">assert </span><span class="s1">all(all(map(core.typematch</span><span class="s3">, </span><span class="s1">j.out_avals</span><span class="s3">, </span><span class="s1">branches_known[</span><span class="s5">0</span><span class="s1">].out_avals))</span>
+             <span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">branches_known[</span><span class="s5">1</span><span class="s1">:])</span>
+
+  <span class="s0"># Create residual variables.</span>
+  <span class="s1">newvar = core.gensym()</span>
+  <span class="s1">res_binders = map(newvar</span><span class="s3">, </span><span class="s1">all_res_avals)</span>
+
+  <span class="s0"># Build the known eqn.</span>
+  <span class="s1">ins_known</span><span class="s3">, </span><span class="s1">_ = partition_list(unks_in</span><span class="s3">, </span><span class="s1">eqn.invars)  </span><span class="s0"># includes index invar</span>
+  <span class="s1">out_binders_known</span><span class="s3">, </span><span class="s1">_ = partition_list(unks_out</span><span class="s3">, </span><span class="s1">eqn.outvars)</span>
+  <span class="s1">linear_known = [l </span><span class="s3">for </span><span class="s1">l</span><span class="s3">, </span><span class="s1">uk </span><span class="s3">in </span><span class="s1">zip(eqn.params[</span><span class="s4">'linear'</span><span class="s1">]</span><span class="s3">, </span><span class="s1">ops_uk) </span><span class="s3">if not </span><span class="s1">uk]</span>
+  <span class="s1">params_known = dict(branches=branches_known</span><span class="s3">, </span><span class="s1">linear=tuple(linear_known))</span>
+  <span class="s1">effects_known = _join_cond_effects(branches_known)</span>
+  <span class="s1">eqn_known = pe.new_jaxpr_eqn(</span>
+      <span class="s1">ins_known</span><span class="s3">, </span><span class="s1">[*out_binders_known</span><span class="s3">, </span><span class="s1">*res_binders]</span><span class="s3">, </span><span class="s1">cond_p</span><span class="s3">, </span><span class="s1">params_known</span><span class="s3">,</span>
+      <span class="s1">effects_known</span><span class="s3">, </span><span class="s1">eqn.source_info)</span>
+
+  <span class="s0"># Build the staged eqn.</span>
+  <span class="s1">_</span><span class="s3">, </span><span class="s1">out_binders_staged = partition_list(inst_out</span><span class="s3">, </span><span class="s1">eqn.outvars)</span>
+  <span class="s1">linear_staged = [</span><span class="s3">False</span><span class="s1">] * len(res_binders) + list(eqn.params[</span><span class="s4">'linear'</span><span class="s1">])</span>
+  <span class="s1">params_staged = dict(branches=branches_staged</span><span class="s3">, </span><span class="s1">linear=tuple(linear_staged))</span>
+  <span class="s1">effects_staged = _join_cond_effects(branches_staged)</span>
+  <span class="s1">eqn_staged = pe.new_jaxpr_eqn(</span>
+      <span class="s1">[eqn.invars[</span><span class="s5">0</span><span class="s1">]</span><span class="s3">, </span><span class="s1">*res_binders</span><span class="s3">, </span><span class="s1">*eqn.invars[</span><span class="s5">1</span><span class="s1">:]]</span><span class="s3">, </span><span class="s1">out_binders_staged</span><span class="s3">,</span>
+      <span class="s1">cond_p</span><span class="s3">, </span><span class="s1">params_staged</span><span class="s3">, </span><span class="s1">effects_staged</span><span class="s3">, </span><span class="s1">eqn.source_info)</span>
+
+  <span class="s1">new_vars = [*new_inst</span><span class="s3">, </span><span class="s1">*res_binders]</span>
+  <span class="s3">return </span><span class="s1">eqn_known</span><span class="s3">, </span><span class="s1">eqn_staged</span><span class="s3">, </span><span class="s1">unks_out</span><span class="s3">, </span><span class="s1">inst_out</span><span class="s3">, </span><span class="s1">new_vars</span>
+
+<span class="s0"># When partially evaluating conditionals, each branch produces residuals</span>
+<span class="s0"># depending on the computation carried out by the branch, and a corresponding</span>
+<span class="s0"># staged jaxpr that accepts those residuals as its first few inputs. The</span>
+<span class="s0"># residual-producing branches are staged as jaxprs and bound right away in a</span>
+<span class="s0"># conditional. The residual-consuming jaxprs are assembled together in a jaxpr</span>
+<span class="s0"># conditional. The following helper functions ensure that both collections of</span>
+<span class="s0"># jaxprs (those evaluated and those staged) are valid for joint use under their</span>
+<span class="s0"># respective conditionals.</span>
+<span class="s0">#</span>
+<span class="s0"># In particular, the residuals derived from each original branch may have</span>
+<span class="s0"># distinct types. Because the branches of conditionals must have identical type</span>
+<span class="s0"># signatures, we join residuals together across branches into a common format.</span>
+
+<span class="s0"># In order to set up a type signature that all branches can conform to, it would</span>
+<span class="s0"># suffice to concatenate all branches' residuals. But concatenation can result</span>
+<span class="s0"># in redundant inputs and outputs, and might lead to memory allocation that</span>
+<span class="s0"># scales unnecessarily with the branch count. This function finds common</span>
+<span class="s0"># residual types across branches for reuse, so as to avoid redundant</span>
+<span class="s0"># allocation. It returns a list L of types (avals) representing the collection</span>
+<span class="s0"># of residuals merged according to type, and, for each branch, a lookup table to</span>
+<span class="s0"># match its residuals to their positions/types in L. Example input/output:</span>
+<span class="s0">#</span>
+<span class="s0"># [x], [y], [x, x]             -&gt; [x, y, x],    [[0], [1], [0, 2]]</span>
+<span class="s0"># [x], [x], [x, x]             -&gt; [x, x],       [[0], [0], [0, 1]]</span>
+<span class="s0"># [y, x, x], [x, z, y], [z, x] -&gt; [y, x, x, z], [[0, 1, 2], [1, 3, 0], [3, 1]]</span>
+<span class="s3">def </span><span class="s1">_merge_branch_residuals(branch_res_avals):</span>
+  <span class="s3">def </span><span class="s1">enumerate_equal(xs):</span>
+    <span class="s1">counts = {v: itertools.count() </span><span class="s3">for </span><span class="s1">v </span><span class="s3">in </span><span class="s1">set(xs)}</span>
+    <span class="s3">return </span><span class="s1">[(x</span><span class="s3">, </span><span class="s1">next(counts[x])) </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">xs]</span>
+  <span class="s1">branch_res_tagged_avals = map(enumerate_equal</span><span class="s3">, </span><span class="s1">branch_res_avals)</span>
+  <span class="s1">all_tagged_avals = _ordered_unique(util.concatenate(branch_res_tagged_avals))</span>
+  <span class="s1">indices = {v: i </span><span class="s3">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">v </span><span class="s3">in </span><span class="s1">enumerate(all_tagged_avals)}</span>
+  <span class="s1">branch_indices = [</span>
+      <span class="s1">[indices[aval] </span><span class="s3">for </span><span class="s1">aval </span><span class="s3">in </span><span class="s1">avals] </span><span class="s3">for </span><span class="s1">avals </span><span class="s3">in </span><span class="s1">branch_res_tagged_avals]</span>
+  <span class="s1">all_avals = [x </span><span class="s3">for </span><span class="s1">x</span><span class="s3">, </span><span class="s1">_ </span><span class="s3">in </span><span class="s1">all_tagged_avals]</span>
+  <span class="s3">return </span><span class="s1">all_avals</span><span class="s3">, </span><span class="s1">branch_indices</span>
+
+<span class="s0"># This function augments branch outputs to agree with the merged residual</span>
+<span class="s0"># format: each branch is made to return zero-filled values in the places of</span>
+<span class="s0"># residual outputs that it does not populate.</span>
+<span class="s3">def </span><span class="s1">_join_cond_outputs(jaxprs</span><span class="s3">, </span><span class="s1">all_res_avals</span><span class="s3">, </span><span class="s1">res_aval_indices_per_jaxpr</span><span class="s3">,</span>
+                       <span class="s1">num_non_res_outputs):</span>
+  <span class="s3">def </span><span class="s1">augment_jaxpr(jaxpr</span><span class="s3">, </span><span class="s1">res_indices):</span>
+    <span class="s1">@lu.wrap_init</span>
+    <span class="s3">def </span><span class="s1">f_aug(*args):</span>
+      <span class="s1">outs_and_residuals = core.jaxpr_as_fun(jaxpr)(*args)</span>
+      <span class="s1">outs</span><span class="s3">, </span><span class="s1">residuals = split_list(outs_and_residuals</span><span class="s3">, </span><span class="s1">[num_non_res_outputs])</span>
+      <span class="s1">aug_residuals = map(ad_util.zeros_like_aval</span><span class="s3">, </span><span class="s1">all_res_avals)</span>
+      <span class="s1">aug_residuals = util.subvals(aug_residuals</span><span class="s3">, </span><span class="s1">zip(res_indices</span><span class="s3">, </span><span class="s1">residuals))</span>
+      <span class="s3">return </span><span class="s1">outs + list(aug_residuals)</span>
+
+    <span class="s3">return </span><span class="s1">_make_closed_jaxpr(f_aug</span><span class="s3">, </span><span class="s1">jaxpr.in_avals)</span>
+
+  <span class="s3">return </span><span class="s1">tuple(map(augment_jaxpr</span><span class="s3">, </span><span class="s1">jaxprs</span><span class="s3">, </span><span class="s1">res_aval_indices_per_jaxpr))</span>
+
+<span class="s0"># This function augments branch inputs to agree with the merged residual format:</span>
+<span class="s0"># each branch is made to accept all residuals, even though it will ignore those</span>
+<span class="s0"># that it does not read.</span>
+<span class="s3">def </span><span class="s1">_join_cond_pe_staged_jaxpr_inputs(jaxprs</span><span class="s3">, </span><span class="s1">all_res_avals</span><span class="s3">,</span>
+                                      <span class="s1">res_aval_indices_per_jaxpr):</span>
+  <span class="s1">newvar = core.gensym([j.jaxpr </span><span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">jaxprs]</span><span class="s3">, </span><span class="s1">suffix=</span><span class="s4">'_'</span><span class="s1">)</span>
+  <span class="s1">all_res_vars = map(newvar</span><span class="s3">, </span><span class="s1">all_res_avals)</span>
+
+  <span class="s3">def </span><span class="s1">augment_jaxpr(jaxpr</span><span class="s3">, </span><span class="s1">res_indices):</span>
+    <span class="s1">num_res = len(res_indices)</span>
+    <span class="s1">res_vars = jaxpr.jaxpr.invars[:num_res]</span>
+    <span class="s1">non_res_vars = jaxpr.jaxpr.invars[num_res:]</span>
+
+    <span class="s1">aug_res_vars = list(util.subvals(all_res_vars</span><span class="s3">, </span><span class="s1">zip(res_indices</span><span class="s3">, </span><span class="s1">res_vars)))</span>
+    <span class="s1">aug_invars = aug_res_vars + non_res_vars</span>
+    <span class="s1">jaxpr_aug = core.Jaxpr(jaxpr.jaxpr.constvars</span><span class="s3">, </span><span class="s1">aug_invars</span><span class="s3">,</span>
+                           <span class="s1">jaxpr.jaxpr.outvars</span><span class="s3">, </span><span class="s1">jaxpr.jaxpr.eqns</span><span class="s3">,</span>
+                           <span class="s1">jaxpr.jaxpr.effects)</span>
+    <span class="s1">jaxpr_aug = core.ClosedJaxpr(jaxpr_aug</span><span class="s3">, </span><span class="s1">jaxpr.consts)</span>
+    <span class="s3">return </span><span class="s1">jaxpr_aug</span>
+
+  <span class="s3">return </span><span class="s1">tuple(map(augment_jaxpr</span><span class="s3">, </span><span class="s1">jaxprs</span><span class="s3">, </span><span class="s1">res_aval_indices_per_jaxpr))</span>
+
+<span class="s3">def </span><span class="s1">_ordered_unique(xs):</span>
+  <span class="s1">d = collections.OrderedDict((x</span><span class="s3">, None</span><span class="s1">) </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">xs)</span>
+  <span class="s3">return </span><span class="s1">list(d.keys())</span>
+
+<span class="s3">def </span><span class="s1">_cond_dce_rule(used_outputs: List[bool]</span><span class="s3">, </span><span class="s1">eqn: core.JaxprEqn</span><span class="s3">,</span>
+                   <span class="s1">) -&gt; Tuple[List[bool]</span><span class="s3">, </span><span class="s1">core.JaxprEqn]:</span>
+  <span class="s1">closed_branches = eqn.params[</span><span class="s4">'branches'</span><span class="s1">]</span>
+  <span class="s1">branches = [closed_jaxpr.jaxpr </span><span class="s3">for </span><span class="s1">closed_jaxpr </span><span class="s3">in </span><span class="s1">closed_branches]</span>
+
+  <span class="s0"># First, compute which inputs are used in any branch (not including `pred`).</span>
+  <span class="s1">used_inputs: List[bool] = [</span><span class="s3">False</span><span class="s1">] * (len(eqn.invars) - </span><span class="s5">1</span><span class="s1">)  </span><span class="s0"># -1 for pred</span>
+  <span class="s3">for </span><span class="s1">jaxpr </span><span class="s3">in </span><span class="s1">branches:</span>
+    <span class="s1">_</span><span class="s3">, </span><span class="s1">used_inputs_ = pe.dce_jaxpr(jaxpr</span><span class="s3">, </span><span class="s1">used_outputs</span><span class="s3">, </span><span class="s1">instantiate=</span><span class="s3">False</span><span class="s1">)</span>
+    <span class="s1">used_inputs = map(operator.or_</span><span class="s3">, </span><span class="s1">used_inputs</span><span class="s3">, </span><span class="s1">used_inputs_)</span>
+
+  <span class="s0"># Next, compute DCEd branches, instantiating according to used_inputs.</span>
+  <span class="s1">dce_branches_ = [pe.dce_jaxpr(jaxpr</span><span class="s3">, </span><span class="s1">used_outputs</span><span class="s3">, </span><span class="s1">instantiate=used_inputs)[</span><span class="s5">0</span><span class="s1">]</span>
+                   <span class="s3">for </span><span class="s1">jaxpr </span><span class="s3">in </span><span class="s1">branches]</span>
+  <span class="s1">dce_branches = [core.ClosedJaxpr(jaxpr</span><span class="s3">, </span><span class="s1">closed_jaxpr.consts)</span>
+                  <span class="s3">for </span><span class="s1">closed_jaxpr</span><span class="s3">, </span><span class="s1">jaxpr </span><span class="s3">in </span><span class="s1">zip(closed_branches</span><span class="s3">, </span><span class="s1">dce_branches_)]</span>
+
+  <span class="s0"># Finally, update parameters and form the new eqn.</span>
+  <span class="s1">dce_linear = [l </span><span class="s3">for </span><span class="s1">l</span><span class="s3">, </span><span class="s1">used </span><span class="s3">in </span><span class="s1">zip(eqn.params[</span><span class="s4">'linear'</span><span class="s1">]</span><span class="s3">, </span><span class="s1">used_inputs) </span><span class="s3">if </span><span class="s1">used]</span>
+  <span class="s1">new_params = dict(eqn.params</span><span class="s3">, </span><span class="s1">branches=tuple(dce_branches)</span><span class="s3">,</span>
+                    <span class="s1">linear=tuple(dce_linear))</span>
+  <span class="s1">new_effects = core.join_effects(*(b.effects </span><span class="s3">for </span><span class="s1">b </span><span class="s3">in </span><span class="s1">dce_branches))</span>
+  <span class="s1">new_effects = _join_cond_effects(dce_branches_)</span>
+  <span class="s1">new_eqn = pe.new_jaxpr_eqn(</span>
+      <span class="s1">[v </span><span class="s3">for </span><span class="s1">v</span><span class="s3">, </span><span class="s1">used </span><span class="s3">in </span><span class="s1">zip(eqn.invars</span><span class="s3">, </span><span class="s1">[</span><span class="s3">True, </span><span class="s1">*used_inputs]) </span><span class="s3">if </span><span class="s1">used]</span><span class="s3">,</span>
+      <span class="s1">[v </span><span class="s3">for </span><span class="s1">v</span><span class="s3">, </span><span class="s1">used </span><span class="s3">in </span><span class="s1">zip(eqn.outvars</span><span class="s3">, </span><span class="s1">used_outputs) </span><span class="s3">if </span><span class="s1">used]</span><span class="s3">,</span>
+      <span class="s1">eqn.primitive</span><span class="s3">, </span><span class="s1">new_params</span><span class="s3">, </span><span class="s1">new_effects</span><span class="s3">, </span><span class="s1">eqn.source_info)</span>
+
+  <span class="s3">assert </span><span class="s1">all(len(new_eqn.invars ) == </span><span class="s5">1 </span><span class="s1">+ len(jaxpr.in_avals )</span>
+             <span class="s3">for </span><span class="s1">jaxpr </span><span class="s3">in </span><span class="s1">new_params[</span><span class="s4">'branches'</span><span class="s1">])</span>
+  <span class="s3">assert </span><span class="s1">all(len(new_eqn.outvars) == len(jaxpr.out_avals)</span>
+             <span class="s3">for </span><span class="s1">jaxpr </span><span class="s3">in </span><span class="s1">new_params[</span><span class="s4">'branches'</span><span class="s1">])</span>
+  <span class="s3">return </span><span class="s1">[</span><span class="s3">True, </span><span class="s1">*used_inputs]</span><span class="s3">, </span><span class="s1">new_eqn</span>
+
+
+<span class="s3">def </span><span class="s1">_transpose_cond_jaxpr(jaxpr</span><span class="s3">, </span><span class="s1">num_res</span><span class="s3">, </span><span class="s1">reduce_axes):</span>
+  <span class="s1">res_avals</span><span class="s3">, </span><span class="s1">primal_avals = split_list(jaxpr.in_avals</span><span class="s3">, </span><span class="s1">[num_res])</span>
+  <span class="s1">primal_avals = map(raise_to_shaped</span><span class="s3">, </span><span class="s1">primal_avals)</span>
+
+  <span class="s1">@lu.wrap_init</span>
+  <span class="s3">def </span><span class="s1">transposed(*args):</span>
+    <span class="s1">res</span><span class="s3">, </span><span class="s1">cts_out = split_list(args</span><span class="s3">, </span><span class="s1">[num_res])</span>
+    <span class="s1">primals = res + [ad.UndefinedPrimal(aval) </span><span class="s3">for </span><span class="s1">aval </span><span class="s3">in </span><span class="s1">primal_avals]</span>
+    <span class="s1">cts_in = ad.backward_pass(</span>
+        <span class="s1">jaxpr.jaxpr</span><span class="s3">, </span><span class="s1">reduce_axes</span><span class="s3">, False, </span><span class="s1">jaxpr.consts</span><span class="s3">, </span><span class="s1">primals</span><span class="s3">, </span><span class="s1">cts_out)</span>
+    <span class="s1">_</span><span class="s3">, </span><span class="s1">cts_in = split_list(cts_in</span><span class="s3">, </span><span class="s1">[num_res])</span>
+    <span class="s3">return </span><span class="s1">map(ad.instantiate_zeros_aval</span><span class="s3">, </span><span class="s1">primal_avals</span><span class="s3">, </span><span class="s1">cts_in)</span>
+
+  <span class="s3">return </span><span class="s1">_make_closed_jaxpr(transposed</span><span class="s3">, </span><span class="s1">res_avals + jaxpr.out_avals)</span>
+
+<span class="s3">def </span><span class="s1">_cond_transpose(reduce_axes</span><span class="s3">, </span><span class="s1">cts</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">branches</span><span class="s3">, </span><span class="s1">linear):</span>
+  <span class="s3">del </span><span class="s1">linear  </span><span class="s0"># could use for error checking, but see #14026</span>
+  <span class="s1">index</span><span class="s3">, </span><span class="s1">*ops = args</span>
+  <span class="s1">linear = [type(x) </span><span class="s3">is </span><span class="s1">ad.UndefinedPrimal </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">ops]</span>
+  <span class="s1">in_avals = map(raise_to_shaped</span><span class="s3">, </span><span class="s1">branches[</span><span class="s5">0</span><span class="s1">].in_avals)</span>
+  <span class="s1">num_res = len(ops) - sum(linear)</span>
+  <span class="s3">if </span><span class="s1">any(isinstance(eff</span><span class="s3">, </span><span class="s1">state.RefEffect) </span><span class="s3">for </span><span class="s1">branch </span><span class="s3">in </span><span class="s1">branches </span><span class="s3">for </span><span class="s1">eff </span><span class="s3">in</span>
+      <span class="s1">branch.jaxpr.effects):</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError(</span><span class="s4">&quot;State effect not supported in cond transpose.&quot;</span><span class="s1">)</span>
+
+  <span class="s1">branches_trans = tuple(</span>
+      <span class="s1">_transpose_cond_jaxpr(jaxpr</span><span class="s3">, </span><span class="s1">num_res</span><span class="s3">, </span><span class="s1">reduce_axes) </span><span class="s3">for </span><span class="s1">jaxpr </span><span class="s3">in </span><span class="s1">branches)</span>
+  <span class="s1">lin_in_avals = [raise_to_shaped(a</span><span class="s3">, </span><span class="s1">weak_type=</span><span class="s3">False</span><span class="s1">)</span>
+                  <span class="s3">for </span><span class="s1">a</span><span class="s3">, </span><span class="s1">l </span><span class="s3">in </span><span class="s1">zip(in_avals</span><span class="s3">, </span><span class="s1">linear) </span><span class="s3">if </span><span class="s1">l]</span>
+  <span class="s3">assert </span><span class="s1">all(core.typematch(out_aval</span><span class="s3">, </span><span class="s1">lin_in_aval)</span>
+             <span class="s3">for </span><span class="s1">jaxpr </span><span class="s3">in </span><span class="s1">branches_trans</span>
+             <span class="s3">for </span><span class="s1">out_aval</span><span class="s3">, </span><span class="s1">lin_in_aval </span><span class="s3">in </span><span class="s1">zip(jaxpr.out_avals</span><span class="s3">, </span><span class="s1">lin_in_avals))</span>
+
+  <span class="s1">res = ops[:num_res]</span>
+  <span class="s1">cts = map(ad.instantiate_zeros_aval</span><span class="s3">, </span><span class="s1">branches[</span><span class="s5">0</span><span class="s1">].out_avals</span><span class="s3">, </span><span class="s1">cts)</span>
+  <span class="s1">linear_trans = (</span><span class="s3">False,</span><span class="s1">) * num_res + (</span><span class="s3">True,</span><span class="s1">) * len(cts)</span>
+
+  <span class="s1">out = cond_p.bind(</span>
+      <span class="s1">index</span><span class="s3">, </span><span class="s1">*res</span><span class="s3">, </span><span class="s1">*cts</span><span class="s3">, </span><span class="s1">branches=branches_trans</span><span class="s3">, </span><span class="s1">linear=linear_trans)</span>
+  <span class="s3">assert </span><span class="s1">all(map(core.typecheck</span><span class="s3">, </span><span class="s1">lin_in_avals</span><span class="s3">, </span><span class="s1">out))</span>
+
+  <span class="s1">out_iter = iter(out)</span>
+  <span class="s1">out = [next(out_iter) </span><span class="s3">if </span><span class="s1">l </span><span class="s3">else None for </span><span class="s1">l </span><span class="s3">in </span><span class="s1">linear]</span>
+  <span class="s3">assert </span><span class="s1">next(out_iter</span><span class="s3">, None</span><span class="s1">) </span><span class="s3">is None</span>
+  <span class="s3">return </span><span class="s1">[</span><span class="s3">None</span><span class="s1">] + out</span>
+
+<span class="s3">def </span><span class="s1">_cond_axis_substitution(params</span><span class="s3">, </span><span class="s1">subst</span><span class="s3">, </span><span class="s1">traverse):</span>
+  <span class="s3">if not </span><span class="s1">traverse:</span>
+    <span class="s3">return </span><span class="s1">params</span>
+  <span class="s1">branches = tuple(core.subst_axis_names_jaxpr(jaxpr</span><span class="s3">, </span><span class="s1">subst) </span><span class="s3">for </span><span class="s1">jaxpr </span><span class="s3">in </span><span class="s1">params[</span><span class="s4">'branches'</span><span class="s1">])</span>
+  <span class="s3">return </span><span class="s1">dict(params</span><span class="s3">, </span><span class="s1">branches=branches)</span>
+
+<span class="s3">def </span><span class="s1">_cond_typecheck(bind_time</span><span class="s3">, </span><span class="s1">*in_atoms</span><span class="s3">, </span><span class="s1">branches</span><span class="s3">, </span><span class="s1">linear):</span>
+  <span class="s3">if not </span><span class="s1">bind_time:</span>
+    <span class="s1">_</span><span class="s3">, </span><span class="s1">*in_atoms = in_atoms</span>
+  <span class="s1">avals = [x.aval </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">in_atoms]</span>
+  <span class="s1">tc = partial(_typecheck_param</span><span class="s3">, </span><span class="s4">'cond'</span><span class="s1">)</span>
+  <span class="s1">tc(branches</span><span class="s3">, </span><span class="s4">'branches'</span><span class="s3">, </span><span class="s4">'tuple of ClosedJaxpr'</span><span class="s3">,</span>
+     <span class="s1">type(branches) </span><span class="s3">is </span><span class="s1">tuple </span><span class="s3">and</span>
+     <span class="s1">all(type(x) </span><span class="s3">is </span><span class="s1">core.ClosedJaxpr </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">branches))</span>
+  <span class="s1">tc(linear</span><span class="s3">, </span><span class="s4">'linear'</span><span class="s3">, </span><span class="s4">'tuple of bool'</span><span class="s3">,</span>
+     <span class="s1">type(linear) </span><span class="s3">is </span><span class="s1">tuple </span><span class="s3">and </span><span class="s1">all(type(x) </span><span class="s3">is </span><span class="s1">bool </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">linear))</span>
+
+  <span class="s3">if </span><span class="s1">len(branches) == </span><span class="s5">0</span><span class="s1">:</span>
+    <span class="s3">raise </span><span class="s1">core.JaxprTypeError(</span><span class="s4">'cond requires at least one branch function'</span><span class="s1">)</span>
+  <span class="s3">if </span><span class="s1">len(linear) + </span><span class="s5">1 </span><span class="s1">!= len(avals):</span>
+    <span class="s3">raise </span><span class="s1">core.JaxprTypeError(</span><span class="s4">f'cond given </span><span class="s3">{</span><span class="s1">len(linear)</span><span class="s3">} </span><span class="s4">linear flags for '</span>
+                              <span class="s4">f'</span><span class="s3">{</span><span class="s1">len(avals) - </span><span class="s5">1</span><span class="s3">} </span><span class="s4">non-predicate operands'</span><span class="s1">)</span>
+
+  <span class="s1">jaxpr0 = branches[</span><span class="s5">0</span><span class="s1">]</span>
+  <span class="s1">jaxpr0_in_avals_str = _avals_short(jaxpr0.in_avals)</span>
+  <span class="s1">jaxpr0_out_avals_str = _avals_short(jaxpr0.out_avals)</span>
+  <span class="s1">joined_effects = _join_cond_effects(branches)</span>
+  <span class="s1">disallowed_effects = allowed_effects.filter_not_in(joined_effects)</span>
+  <span class="s3">if </span><span class="s1">disallowed_effects:</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError(</span>
+        <span class="s4">f'Effects not supported in `cond`: </span><span class="s3">{</span><span class="s1">disallowed_effects</span><span class="s3">}</span><span class="s4">'</span><span class="s1">)</span>
+
+  <span class="s3">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">jaxpr </span><span class="s3">in </span><span class="s1">enumerate(branches[</span><span class="s5">1</span><span class="s1">:]):</span>
+    <span class="s3">if </span><span class="s1">len(jaxpr0.in_avals) != len(jaxpr.in_avals):</span>
+      <span class="s3">raise </span><span class="s1">core.JaxprTypeError(</span>
+        <span class="s4">f'cond branch 0 takes </span><span class="s3">{</span><span class="s1">len(jaxpr0.in_avals)</span><span class="s3">} </span><span class="s4">inputs, '</span>
+        <span class="s4">f'branch </span><span class="s3">{</span><span class="s1">i+</span><span class="s5">1</span><span class="s3">} </span><span class="s4">takes </span><span class="s3">{</span><span class="s1">len(jaxpr.in_avals)</span><span class="s3">}</span><span class="s4">'</span><span class="s1">)</span>
+    <span class="s3">if </span><span class="s1">len(jaxpr0.out_avals) != len(jaxpr.out_avals):</span>
+      <span class="s3">raise </span><span class="s1">core.JaxprTypeError(</span>
+        <span class="s4">f'cond branch 0 outputs </span><span class="s3">{</span><span class="s1">len(jaxpr0.out_avals)</span><span class="s3">} </span><span class="s4">values, '</span>
+        <span class="s4">f'branch </span><span class="s3">{</span><span class="s1">i+</span><span class="s5">1</span><span class="s3">} </span><span class="s4">outputs </span><span class="s3">{</span><span class="s1">len(jaxpr.out_avals)</span><span class="s3">}</span><span class="s4">'</span><span class="s1">)</span>
+    <span class="s3">if not </span><span class="s1">all(map(core.typematch</span><span class="s3">, </span><span class="s1">jaxpr0.in_avals</span><span class="s3">, </span><span class="s1">jaxpr.in_avals)):</span>
+      <span class="s3">raise </span><span class="s1">core.JaxprTypeError(</span>
+        <span class="s4">f'cond branches 0 and </span><span class="s3">{</span><span class="s1">i+</span><span class="s5">1</span><span class="s3">} </span><span class="s4">have mismatching input types: '</span>
+        <span class="s4">f'</span><span class="s3">{</span><span class="s1">jaxpr0_in_avals_str</span><span class="s3">} </span><span class="s4">vs </span><span class="s3">{</span><span class="s1">_avals_short(jaxpr.in_avals)</span><span class="s3">}</span><span class="s4">'</span><span class="s1">)</span>
+    <span class="s3">if not </span><span class="s1">all(map(core.typematch</span><span class="s3">, </span><span class="s1">jaxpr0.out_avals</span><span class="s3">, </span><span class="s1">jaxpr.out_avals)):</span>
+      <span class="s3">raise </span><span class="s1">core.JaxprTypeError(</span>
+        <span class="s4">f'cond branches 0 and </span><span class="s3">{</span><span class="s1">i+</span><span class="s5">1</span><span class="s3">} </span><span class="s4">have mismatching output types: '</span>
+        <span class="s4">f'</span><span class="s3">{</span><span class="s1">jaxpr0_out_avals_str</span><span class="s3">} </span><span class="s4">vs </span><span class="s3">{</span><span class="s1">_avals_short(jaxpr.out_avals)</span><span class="s3">}</span><span class="s4">'</span><span class="s1">)</span>
+
+  <span class="s3">if </span><span class="s1">len(avals) != </span><span class="s5">1 </span><span class="s1">+ len(jaxpr0.in_avals):</span>
+    <span class="s3">raise </span><span class="s1">core.JaxprTypeError(</span>
+      <span class="s4">f'cond called with </span><span class="s3">{</span><span class="s1">len(avals) - </span><span class="s5">1</span><span class="s3">} </span><span class="s4">non-predicate operands, '</span>
+      <span class="s4">f'but branches take </span><span class="s3">{</span><span class="s1">len(jaxpr0.in_avals)</span><span class="s3">} </span><span class="s4">inputs'</span><span class="s1">)</span>
+
+  <span class="s1">index_aval</span><span class="s3">, </span><span class="s1">*op_avals = avals</span>
+  <span class="s3">if </span><span class="s1">index_aval.dtype != np.int32:</span>
+    <span class="s3">raise </span><span class="s1">core.JaxprTypeError(</span>
+      <span class="s4">f'cond called with index of type </span><span class="s3">{</span><span class="s1">index_aval.dtype</span><span class="s3">} </span><span class="s4">instead of int32'</span><span class="s1">)</span>
+  <span class="s3">if not </span><span class="s1">all(map(core.typecompat</span><span class="s3">, </span><span class="s1">jaxpr0.in_avals</span><span class="s3">, </span><span class="s1">op_avals)):</span>
+    <span class="s3">raise </span><span class="s1">core.JaxprTypeError(</span>
+      <span class="s4">f'cond branches take input types </span><span class="s3">{</span><span class="s1">jaxpr0_in_avals_str</span><span class="s3">}</span><span class="s4">, '</span>
+      <span class="s4">f'called with operands of type </span><span class="s3">{</span><span class="s1">_avals_short(op_avals)</span><span class="s3">}</span><span class="s4">'</span><span class="s1">)</span>
+  <span class="s3">return </span><span class="s1">jaxpr0.out_avals</span><span class="s3">, </span><span class="s1">joined_effects</span>
+
+<span class="s3">def </span><span class="s1">cond_bind(*args</span><span class="s3">, </span><span class="s1">branches</span><span class="s3">, </span><span class="s1">linear):</span>
+  <span class="s3">if </span><span class="s1">config.jax_enable_checks:</span>
+    <span class="s1">avals = map(core.get_aval</span><span class="s3">, </span><span class="s1">args)</span>
+    <span class="s1">in_atoms = [core.Var(</span><span class="s5">0</span><span class="s3">, </span><span class="s4">''</span><span class="s3">, </span><span class="s1">a) </span><span class="s3">for </span><span class="s1">a </span><span class="s3">in </span><span class="s1">avals]  </span><span class="s0"># dummies</span>
+    <span class="s1">_cond_typecheck(</span><span class="s3">True, </span><span class="s1">*in_atoms</span><span class="s3">, </span><span class="s1">branches=branches</span><span class="s3">, </span><span class="s1">linear=linear)</span>
+    <span class="s3">for </span><span class="s1">jaxpr </span><span class="s3">in </span><span class="s1">branches:</span>
+      <span class="s1">core.check_jaxpr(jaxpr.jaxpr)</span>
+  <span class="s3">return </span><span class="s1">core.AxisPrimitive.bind(cond_p</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">branches=branches</span><span class="s3">, </span><span class="s1">linear=linear)</span>
+
+<span class="s1">cond_p = core.AxisPrimitive(</span><span class="s4">'cond'</span><span class="s1">)</span>
+<span class="s1">cond_p.multiple_results = </span><span class="s3">True</span>
+<span class="s1">cond_p.def_impl(partial(dispatch.apply_primitive</span><span class="s3">, </span><span class="s1">cond_p))</span>
+<span class="s1">cond_p.def_effectful_abstract_eval(_cond_abstract_eval)</span>
+<span class="s1">cond_p.def_custom_bind(cond_bind)</span>
+<span class="s1">ad.primitive_jvps[cond_p] = _cond_jvp</span>
+<span class="s1">ad.reducing_transposes[cond_p] = _cond_transpose</span>
+<span class="s1">pe.custom_partial_eval_rules[cond_p] = _cond_partial_eval</span>
+<span class="s1">batching.spmd_axis_primitive_batchers[cond_p] = _cond_batching_rule</span>
+<span class="s1">batching.axis_primitive_batchers[cond_p] = partial(_cond_batching_rule</span><span class="s3">, None</span><span class="s1">)</span>
+<span class="s1">xla.register_initial_style_primitive(cond_p)</span>
+<span class="s1">core.custom_typechecks[cond_p] = partial(_cond_typecheck</span><span class="s3">, False</span><span class="s1">)</span>
+<span class="s1">core.axis_substitution_rules[cond_p] = _cond_axis_substitution</span>
+<span class="s1">pe.partial_eval_jaxpr_custom_rules[cond_p] = _cond_partial_eval_custom</span>
+<span class="s1">pe.dce_rules[cond_p] = _cond_dce_rule</span>
+
+<span class="s3">def </span><span class="s1">_cond_lowering(ctx</span><span class="s3">, </span><span class="s1">index</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">branches</span><span class="s3">, </span><span class="s1">linear):</span>
+  <span class="s3">del </span><span class="s1">linear  </span><span class="s0"># Unused.</span>
+  <span class="s1">joined_effects = core.join_effects(*(branch.effects </span><span class="s3">for </span><span class="s1">branch </span><span class="s3">in </span><span class="s1">branches))</span>
+  <span class="s1">ordered_effects = list(effects.ordered_effects.filter_in(joined_effects))</span>
+  <span class="s1">num_tokens = len(ordered_effects)</span>
+  <span class="s1">tokens_in = ctx.tokens_in.subset(ordered_effects)</span>
+  <span class="s1">output_token_types = [mlir.token_type() </span><span class="s3">for </span><span class="s1">_ </span><span class="s3">in </span><span class="s1">ordered_effects]</span>
+  <span class="s1">output_types = [</span>
+      <span class="s1">*output_token_types</span><span class="s3">, </span><span class="s1">*map(mlir.aval_to_ir_types</span><span class="s3">, </span><span class="s1">ctx.avals_out)]</span>
+  <span class="s1">flat_output_types = util.flatten(output_types)</span>
+
+  <span class="s0"># CaseOp takes a single argument 'index' and the corresponding blocks</span>
+  <span class="s0"># have no arguments; the computation within the block uses implicit</span>
+  <span class="s0"># captures.</span>
+  <span class="s1">case_op = hlo.CaseOp(flat_output_types</span><span class="s3">, </span><span class="s1">index=index</span><span class="s3">,</span>
+                       <span class="s1">num_branches=len(branches))</span>
+  <span class="s1">name_stack = ctx.module_context.name_stack.extend(</span><span class="s4">'cond'</span><span class="s1">)</span>
+  <span class="s3">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">jaxpr </span><span class="s3">in </span><span class="s1">enumerate(branches):</span>
+    <span class="s1">branch = case_op.regions[i].blocks.append()</span>
+    <span class="s3">with </span><span class="s1">ir.InsertionPoint(branch):</span>
+      <span class="s1">sub_ctx = ctx.module_context.replace(</span>
+          <span class="s1">name_stack=name_stack.extend(</span><span class="s4">f'branch_</span><span class="s3">{</span><span class="s1">i</span><span class="s3">}</span><span class="s4">_fun'</span><span class="s1">))</span>
+      <span class="s1">out_vals</span><span class="s3">, </span><span class="s1">tokens_out = mlir.jaxpr_subcomp(</span>
+          <span class="s1">sub_ctx</span><span class="s3">, </span><span class="s1">jaxpr.jaxpr</span><span class="s3">, </span><span class="s1">tokens_in</span><span class="s3">,</span>
+          <span class="s1">map(mlir.ir_constants</span><span class="s3">, </span><span class="s1">jaxpr.consts)</span><span class="s3">,</span>
+          <span class="s1">*map(mlir.wrap_singleton_ir_values</span><span class="s3">, </span><span class="s1">args)</span><span class="s3">,</span>
+          <span class="s1">dim_var_values=ctx.dim_var_values)</span>
+      <span class="s1">out_tokens = [tokens_out.get(eff) </span><span class="s3">for </span><span class="s1">eff </span><span class="s3">in </span><span class="s1">ordered_effects]</span>
+      <span class="s1">out_vals = [*out_tokens</span><span class="s3">, </span><span class="s1">*out_vals]</span>
+      <span class="s1">hlo.ReturnOp(util.flatten(out_vals))</span>
+
+  <span class="s1">tokens_and_outputs = util.unflatten(case_op.results</span><span class="s3">, </span><span class="s1">map(len</span><span class="s3">, </span><span class="s1">output_types))</span>
+  <span class="s1">tokens</span><span class="s3">, </span><span class="s1">outputs = util.split_list(tokens_and_outputs</span><span class="s3">, </span><span class="s1">[num_tokens])</span>
+  <span class="s1">ctx.set_tokens_out(mlir.TokenSet(zip(ordered_effects</span><span class="s3">, </span><span class="s1">tokens)))</span>
+  <span class="s3">return </span><span class="s1">outputs</span>
+
+<span class="s1">mlir.register_lowering(cond_p</span><span class="s3">, </span><span class="s1">_cond_lowering)</span>
+
+<span class="s1">@state.register_discharge_rule(cond_p)</span>
+<span class="s3">def </span><span class="s1">_cond_state_discharge_rule(in_avals</span><span class="s3">, </span><span class="s1">out_avals</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">branches</span><span class="s3">, </span><span class="s1">linear):</span>
+  <span class="s1">discharged_branches = tuple(</span>
+      <span class="s1">core.ClosedJaxpr(state.discharge_state(branch.jaxpr</span><span class="s3">, </span><span class="s1">())[</span><span class="s5">0</span><span class="s1">]</span><span class="s3">, </span><span class="s1">())</span>
+      <span class="s3">for </span><span class="s1">branch </span><span class="s3">in </span><span class="s1">branches)</span>
+  <span class="s1">out_vals = cond_p.bind(*args</span><span class="s3">, </span><span class="s1">branches=discharged_branches</span><span class="s3">, </span><span class="s1">linear=linear)</span>
+  <span class="s1">out_ref_vals</span><span class="s3">, </span><span class="s1">out_vals = util.split_list(</span>
+      <span class="s1">out_vals</span><span class="s3">, </span><span class="s1">[len(out_vals) - len(out_avals)])</span>
+  <span class="s1">ref_val_iter = iter(out_ref_vals)</span>
+  <span class="s1">new_invals = []</span>
+  <span class="s3">for </span><span class="s1">aval </span><span class="s3">in </span><span class="s1">in_avals:</span>
+    <span class="s1">new_invals.append(</span>
+        <span class="s1">next(ref_val_iter) </span><span class="s3">if </span><span class="s1">isinstance(aval</span><span class="s3">, </span><span class="s1">state.AbstractRef) </span><span class="s3">else None</span><span class="s1">)</span>
+  <span class="s3">return </span><span class="s1">new_invals</span><span class="s3">, </span><span class="s1">out_vals</span>
+</pre>
+</body>
+</html>

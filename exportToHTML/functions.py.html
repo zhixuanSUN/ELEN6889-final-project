@@ -1,0 +1,512 @@
+<html>
+<head>
+<title>functions.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6897bb;}
+.s5 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+functions.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2019 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s2">&quot;&quot;&quot;Shared neural network activations and other functions.&quot;&quot;&quot;</span>
+
+<span class="s3">from </span><span class="s1">functools </span><span class="s3">import </span><span class="s1">partial</span>
+<span class="s3">import </span><span class="s1">operator</span>
+<span class="s3">import </span><span class="s1">warnings</span>
+<span class="s3">import </span><span class="s1">numpy </span><span class="s3">as </span><span class="s1">np</span>
+<span class="s3">from </span><span class="s1">typing </span><span class="s3">import </span><span class="s1">Any</span><span class="s3">, </span><span class="s1">Optional</span><span class="s3">, </span><span class="s1">Tuple</span><span class="s3">, </span><span class="s1">Union</span>
+
+<span class="s3">import </span><span class="s1">jax</span>
+<span class="s3">import </span><span class="s1">jax.numpy </span><span class="s3">as </span><span class="s1">jnp</span>
+<span class="s3">from </span><span class="s1">jax </span><span class="s3">import </span><span class="s1">custom_jvp</span>
+<span class="s3">from </span><span class="s1">jax </span><span class="s3">import </span><span class="s1">lax</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">core</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">dtypes</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">util</span>
+<span class="s3">from </span><span class="s1">jax._src.core </span><span class="s3">import </span><span class="s1">AxisName</span>
+<span class="s3">from </span><span class="s1">jax._src.ops.special </span><span class="s3">import </span><span class="s1">logsumexp </span><span class="s3">as </span><span class="s1">_logsumexp</span>
+
+<span class="s1">Array = Any</span>
+
+<span class="s0"># activations</span>
+
+<span class="s1">@custom_jvp</span>
+<span class="s1">@jax.jit</span>
+<span class="s3">def </span><span class="s1">relu(x: Array) -&gt; Array:</span>
+  <span class="s2">r&quot;&quot;&quot;Rectified linear unit activation function. 
+ 
+  Computes the element-wise function: 
+ 
+  .. math:: 
+    \mathrm{relu}(x) = \max(x, 0) 
+ 
+  except under differentiation, we take: 
+ 
+  .. math:: 
+    \nabla \mathrm{relu}(0) = 0 
+ 
+  For more information see 
+  `Numerical influence of ReLU’(0) on backpropagation 
+  &lt;https://openreview.net/forum?id=urrcVI-_jRm&gt;`_. 
+ 
+  Args: 
+    x : input array 
+  &quot;&quot;&quot;</span>
+  <span class="s3">return </span><span class="s1">jnp.maximum(x</span><span class="s3">, </span><span class="s4">0</span><span class="s1">)</span>
+<span class="s0"># For behavior at 0, see https://openreview.net/forum?id=urrcVI-_jRm</span>
+<span class="s1">relu.defjvps(</span><span class="s3">lambda </span><span class="s1">g</span><span class="s3">, </span><span class="s1">ans</span><span class="s3">, </span><span class="s1">x: lax.select(x &gt; </span><span class="s4">0</span><span class="s3">, </span><span class="s1">g</span><span class="s3">, </span><span class="s1">lax.full_like(g</span><span class="s3">, </span><span class="s4">0</span><span class="s1">)))</span>
+
+<span class="s1">@jax.jit</span>
+<span class="s3">def </span><span class="s1">softplus(x: Array) -&gt; Array:</span>
+  <span class="s2">r&quot;&quot;&quot;Softplus activation function. 
+ 
+  Computes the element-wise function 
+ 
+  .. math:: 
+    \mathrm{softplus}(x) = \log(1 + e^x) 
+ 
+  Args: 
+    x : input array 
+  &quot;&quot;&quot;</span>
+  <span class="s3">return </span><span class="s1">jnp.logaddexp(x</span><span class="s3">, </span><span class="s4">0</span><span class="s1">)</span>
+
+<span class="s1">@jax.jit</span>
+<span class="s3">def </span><span class="s1">soft_sign(x: Array) -&gt; Array:</span>
+  <span class="s2">r&quot;&quot;&quot;Soft-sign activation function. 
+ 
+  Computes the element-wise function 
+ 
+  .. math:: 
+    \mathrm{soft\_sign}(x) = \frac{x}{|x| + 1} 
+ 
+  Args: 
+    x : input array 
+  &quot;&quot;&quot;</span>
+  <span class="s3">return </span><span class="s1">x / (jnp.abs(x) + </span><span class="s4">1</span><span class="s1">)</span>
+
+<span class="s1">@jax.jit</span>
+<span class="s3">def </span><span class="s1">sigmoid(x: Array) -&gt; Array:</span>
+  <span class="s2">r&quot;&quot;&quot;Sigmoid activation function. 
+ 
+  Computes the element-wise function: 
+ 
+  .. math:: 
+    \mathrm{sigmoid}(x) = \frac{1}{1 + e^{-x}} 
+ 
+  Args: 
+    x : input array 
+  &quot;&quot;&quot;</span>
+  <span class="s3">return </span><span class="s1">lax.logistic(x)</span>
+
+<span class="s1">@jax.jit</span>
+<span class="s3">def </span><span class="s1">silu(x: Array) -&gt; Array:</span>
+  <span class="s2">r&quot;&quot;&quot;SiLU activation function. 
+ 
+  Computes the element-wise function: 
+ 
+  .. math:: 
+    \mathrm{silu}(x) = x \cdot \mathrm{sigmoid}(x) = \frac{x}{1 + e^{-x}} 
+ 
+  Args: 
+    x : input array 
+  &quot;&quot;&quot;</span>
+  <span class="s3">return </span><span class="s1">x * sigmoid(x)</span>
+
+<span class="s1">swish = silu</span>
+
+<span class="s1">@jax.jit</span>
+<span class="s3">def </span><span class="s1">log_sigmoid(x: Array) -&gt; Array:</span>
+  <span class="s2">r&quot;&quot;&quot;Log-sigmoid activation function. 
+ 
+  Computes the element-wise function: 
+ 
+  .. math:: 
+    \mathrm{log\_sigmoid}(x) = \log(\mathrm{sigmoid}(x)) = -\log(1 + e^{-x}) 
+ 
+  Args: 
+    x : input array 
+  &quot;&quot;&quot;</span>
+  <span class="s3">return </span><span class="s1">-softplus(-x)</span>
+
+<span class="s1">@jax.jit</span>
+<span class="s3">def </span><span class="s1">elu(x: Array</span><span class="s3">, </span><span class="s1">alpha: Array = </span><span class="s4">1.0</span><span class="s1">) -&gt; Array:</span>
+  <span class="s2">r&quot;&quot;&quot;Exponential linear unit activation function. 
+ 
+  Computes the element-wise function: 
+ 
+  .. math:: 
+    \mathrm{elu}(x) = \begin{cases} 
+      x, &amp; x &gt; 0\\ 
+      \alpha \left(\exp(x) - 1\right), &amp; x \le 0 
+    \end{cases} 
+ 
+  Args: 
+    x : input array 
+    alpha : scalar or array of alpha values (default: 1.0) 
+  &quot;&quot;&quot;</span>
+  <span class="s1">safe_x = jnp.where(x &gt; </span><span class="s4">0</span><span class="s3">, </span><span class="s4">0.</span><span class="s3">, </span><span class="s1">x)</span>
+  <span class="s3">return </span><span class="s1">jnp.where(x &gt; </span><span class="s4">0</span><span class="s3">, </span><span class="s1">x</span><span class="s3">, </span><span class="s1">alpha * jnp.expm1(safe_x))</span>
+
+<span class="s1">@jax.jit</span>
+<span class="s3">def </span><span class="s1">leaky_relu(x: Array</span><span class="s3">, </span><span class="s1">negative_slope: Array = </span><span class="s4">1e-2</span><span class="s1">) -&gt; Array:</span>
+  <span class="s2">r&quot;&quot;&quot;Leaky rectified linear unit activation function. 
+ 
+  Computes the element-wise function: 
+ 
+  .. math:: 
+    \mathrm{leaky\_relu}(x) = \begin{cases} 
+      x, &amp; x \ge 0\\ 
+      \alpha x, &amp; x &lt; 0 
+    \end{cases} 
+ 
+  where :math:`\alpha` = :code:`negative_slope`. 
+ 
+  Args: 
+    x : input array 
+    negative_slope : array or scalar specifying the negative slope (default: 0.01) 
+  &quot;&quot;&quot;</span>
+  <span class="s3">return </span><span class="s1">jnp.where(x &gt;= </span><span class="s4">0</span><span class="s3">, </span><span class="s1">x</span><span class="s3">, </span><span class="s1">negative_slope * x)</span>
+
+<span class="s1">@jax.jit</span>
+<span class="s3">def </span><span class="s1">hard_tanh(x: Array) -&gt; Array:</span>
+  <span class="s2">r&quot;&quot;&quot;Hard :math:`\mathrm{tanh}` activation function. 
+ 
+  Computes the element-wise function: 
+ 
+  .. math:: 
+    \mathrm{hard\_tanh}(x) = \begin{cases} 
+      -1, &amp; x &lt; -1\\ 
+      x, &amp; -1 \le x \le 1\\ 
+      1, &amp; 1 &lt; x 
+    \end{cases} 
+ 
+  Args: 
+    x : input array 
+  &quot;&quot;&quot;</span>
+  <span class="s3">return </span><span class="s1">jnp.where(x &gt; </span><span class="s4">1</span><span class="s3">, </span><span class="s4">1</span><span class="s3">, </span><span class="s1">jnp.where(x &lt; -</span><span class="s4">1</span><span class="s3">, </span><span class="s1">-</span><span class="s4">1</span><span class="s3">, </span><span class="s1">x))</span>
+
+<span class="s1">@jax.jit</span>
+<span class="s3">def </span><span class="s1">celu(x: Array</span><span class="s3">, </span><span class="s1">alpha: Array = </span><span class="s4">1.0</span><span class="s1">) -&gt; Array:</span>
+  <span class="s2">r&quot;&quot;&quot;Continuously-differentiable exponential linear unit activation. 
+ 
+  Computes the element-wise function: 
+ 
+  .. math:: 
+    \mathrm{celu}(x) = \begin{cases} 
+      x, &amp; x &gt; 0\\ 
+      \alpha \left(\exp(\frac{x}{\alpha}) - 1\right), &amp; x \le 0 
+    \end{cases} 
+ 
+  For more information, see 
+  `Continuously Differentiable Exponential Linear Units 
+  &lt;https://arxiv.org/pdf/1704.07483.pdf&gt;`_. 
+ 
+  Args: 
+    x : input array 
+    alpha : array or scalar (default: 1.0) 
+  &quot;&quot;&quot;</span>
+  <span class="s3">return </span><span class="s1">jnp.maximum(x</span><span class="s3">, </span><span class="s4">0.0</span><span class="s1">) + alpha * jnp.expm1(jnp.minimum(x</span><span class="s3">, </span><span class="s4">0.0</span><span class="s1">) / alpha)</span>
+
+<span class="s1">@jax.jit</span>
+<span class="s3">def </span><span class="s1">selu(x: Array) -&gt; Array:</span>
+  <span class="s2">r&quot;&quot;&quot;Scaled exponential linear unit activation. 
+ 
+  Computes the element-wise function: 
+ 
+  .. math:: 
+    \mathrm{selu}(x) = \lambda \begin{cases} 
+      x, &amp; x &gt; 0\\ 
+      \alpha e^x - \alpha, &amp; x \le 0 
+    \end{cases} 
+ 
+  where :math:`\lambda = 1.0507009873554804934193349852946` and 
+  :math:`\alpha = 1.6732632423543772848170429916717`. 
+ 
+  For more information, see 
+  `Self-Normalizing Neural Networks 
+  &lt;https://papers.nips.cc/paper/6698-self-normalizing-neural-networks.pdf&gt;`_. 
+ 
+  Args: 
+    x : input array 
+  &quot;&quot;&quot;</span>
+  <span class="s1">alpha = </span><span class="s4">1.6732632423543772848170429916717</span>
+  <span class="s1">scale = </span><span class="s4">1.0507009873554804934193349852946</span>
+  <span class="s3">return </span><span class="s1">scale * elu(x</span><span class="s3">, </span><span class="s1">alpha)</span>
+
+<span class="s0"># TODO(phawkins): this jit was found to change numerics in a test. Debug this.</span>
+<span class="s0"># @partial(jax.jit, static_argnames=(&quot;approximate&quot;,))</span>
+<span class="s3">def </span><span class="s1">gelu(x: Array</span><span class="s3">, </span><span class="s1">approximate: bool = </span><span class="s3">True</span><span class="s1">) -&gt; Array:</span>
+  <span class="s2">r&quot;&quot;&quot;Gaussian error linear unit activation function. 
+ 
+  If ``approximate=False``, computes the element-wise function: 
+ 
+  .. math:: 
+    \mathrm{gelu}(x) = \frac{x}{2} \left(1 + \mathrm{erf} \left( 
+      \frac{x}{\sqrt{2}} \right) \right) 
+ 
+  If ``approximate=True``, uses the approximate formulation of GELU: 
+ 
+  .. math:: 
+    \mathrm{gelu}(x) = \frac{x}{2} \left(1 + \mathrm{tanh} \left( 
+      \sqrt{\frac{2}{\pi}} \left(x + 0.044715 x^3 \right) \right) \right) 
+ 
+  For more information, see `Gaussian Error Linear Units (GELUs) 
+  &lt;https://arxiv.org/abs/1606.08415&gt;`_, section 2. 
+ 
+  Args: 
+    x : input array 
+    approximate: whether to use the approximate or exact formulation. 
+  &quot;&quot;&quot;</span>
+
+  <span class="s0"># Promote to nearest float-like dtype.</span>
+  <span class="s1">x = x.astype(dtypes.to_inexact_dtype(x.dtype))</span>
+
+  <span class="s3">if </span><span class="s1">approximate:</span>
+    <span class="s1">sqrt_2_over_pi = np.sqrt(</span><span class="s4">2 </span><span class="s1">/ np.pi).astype(x.dtype)</span>
+    <span class="s1">cdf = </span><span class="s4">0.5 </span><span class="s1">* (</span><span class="s4">1.0 </span><span class="s1">+ jnp.tanh(sqrt_2_over_pi * (x + </span><span class="s4">0.044715 </span><span class="s1">* (x ** </span><span class="s4">3</span><span class="s1">))))</span>
+    <span class="s3">return </span><span class="s1">x * cdf</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s1">sqrt_2 = np.sqrt(</span><span class="s4">2</span><span class="s1">).astype(x.dtype)</span>
+    <span class="s3">return </span><span class="s1">jnp.array(x * (lax.erf(x / sqrt_2) + </span><span class="s4">1</span><span class="s1">) / </span><span class="s4">2</span><span class="s3">, </span><span class="s1">dtype=x.dtype)</span>
+
+<span class="s1">@partial(jax.jit</span><span class="s3">, </span><span class="s1">static_argnames=(</span><span class="s5">&quot;axis&quot;</span><span class="s3">,</span><span class="s1">))</span>
+<span class="s3">def </span><span class="s1">glu(x: Array</span><span class="s3">, </span><span class="s1">axis: int = -</span><span class="s4">1</span><span class="s1">) -&gt; Array:</span>
+  <span class="s2">&quot;&quot;&quot;Gated linear unit activation function. 
+ 
+  Args: 
+    x : input array 
+    axis: the axis along which the split should be computed (default: -1) 
+  &quot;&quot;&quot;</span>
+  <span class="s1">size = x.shape[axis]</span>
+  <span class="s3">assert </span><span class="s1">size % </span><span class="s4">2 </span><span class="s1">== </span><span class="s4">0</span><span class="s3">, </span><span class="s5">&quot;axis size must be divisible by 2&quot;</span>
+  <span class="s1">x1</span><span class="s3">, </span><span class="s1">x2 = jnp.split(x</span><span class="s3">, </span><span class="s4">2</span><span class="s3">, </span><span class="s1">axis)</span>
+  <span class="s3">return </span><span class="s1">x1 * sigmoid(x2)</span>
+
+<span class="s0"># other functions</span>
+
+<span class="s1">logsumexp = _logsumexp</span>
+
+
+<span class="s1">@partial(jax.jit</span><span class="s3">, </span><span class="s1">static_argnames=(</span><span class="s5">&quot;axis&quot;</span><span class="s3">,</span><span class="s1">))</span>
+<span class="s3">def </span><span class="s1">log_softmax(x: Array</span><span class="s3">,</span>
+                <span class="s1">axis: Optional[Union[int</span><span class="s3">, </span><span class="s1">Tuple[int</span><span class="s3">, </span><span class="s1">...]]] = -</span><span class="s4">1</span><span class="s3">,</span>
+                <span class="s1">where: Optional[Array] = </span><span class="s3">None,</span>
+                <span class="s1">initial: Optional[Array] = </span><span class="s3">None</span><span class="s1">) -&gt; Array:</span>
+  <span class="s2">r&quot;&quot;&quot;Log-Softmax function. 
+ 
+  Computes the logarithm of the :code:`softmax` function, which rescales 
+  elements to the range :math:`[-\infty, 0)`. 
+ 
+  .. math :: 
+    \mathrm{log\_softmax}(x) = \log \left( \frac{\exp(x_i)}{\sum_j \exp(x_j)} 
+    \right) 
+ 
+  Args: 
+    x : input array 
+    axis: the axis or axes along which the :code:`log_softmax` should be 
+      computed. Either an integer or a tuple of integers. 
+    where: Elements to include in the :code:`log_softmax`. 
+    initial: The minimum value used to shift the input array. Must be present 
+      when :code:`where` is not None. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">x_max = jnp.max(x</span><span class="s3">, </span><span class="s1">axis</span><span class="s3">, </span><span class="s1">where=where</span><span class="s3">, </span><span class="s1">initial=initial</span><span class="s3">, </span><span class="s1">keepdims=</span><span class="s3">True</span><span class="s1">)</span>
+  <span class="s1">shifted = x - lax.stop_gradient(x_max)</span>
+  <span class="s1">shifted_logsumexp = jnp.log(</span>
+      <span class="s1">jnp.sum(jnp.exp(shifted)</span><span class="s3">, </span><span class="s1">axis</span><span class="s3">, </span><span class="s1">where=where</span><span class="s3">, </span><span class="s1">keepdims=</span><span class="s3">True</span><span class="s1">))</span>
+  <span class="s3">return </span><span class="s1">shifted - shifted_logsumexp</span>
+
+
+<span class="s0"># TODO(phawkins): this jit was found to change numerics in a test. Debug this.</span>
+<span class="s0">#@partial(jax.jit, static_argnames=(&quot;axis&quot;,))</span>
+<span class="s3">def </span><span class="s1">softmax(x: Array</span><span class="s3">,</span>
+            <span class="s1">axis: Optional[Union[int</span><span class="s3">, </span><span class="s1">Tuple[int</span><span class="s3">, </span><span class="s1">...]]] = -</span><span class="s4">1</span><span class="s3">,</span>
+            <span class="s1">where: Optional[Array] = </span><span class="s3">None,</span>
+            <span class="s1">initial: Optional[Array] = </span><span class="s3">None</span><span class="s1">) -&gt; Array:</span>
+  <span class="s2">r&quot;&quot;&quot;Softmax function. 
+ 
+  Computes the function which rescales elements to the range :math:`[0, 1]` 
+  such that the elements along :code:`axis` sum to :math:`1`. 
+ 
+  .. math :: 
+    \mathrm{softmax}(x) = \frac{\exp(x_i)}{\sum_j \exp(x_j)} 
+ 
+  Args: 
+    x : input array 
+    axis: the axis or axes along which the softmax should be computed. The 
+      softmax output summed across these dimensions should sum to :math:`1`. 
+      Either an integer or a tuple of integers. 
+    where: Elements to include in the :code:`softmax`. 
+    initial: The minimum value used to shift the input array. Must be present 
+      when :code:`where` is not None. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">x_max = jnp.max(x</span><span class="s3">, </span><span class="s1">axis</span><span class="s3">, </span><span class="s1">where=where</span><span class="s3">, </span><span class="s1">initial=initial</span><span class="s3">, </span><span class="s1">keepdims=</span><span class="s3">True</span><span class="s1">)</span>
+  <span class="s1">unnormalized = jnp.exp(x - lax.stop_gradient(x_max))</span>
+  <span class="s3">return </span><span class="s1">unnormalized / jnp.sum(unnormalized</span><span class="s3">, </span><span class="s1">axis</span><span class="s3">, </span><span class="s1">where=where</span><span class="s3">, </span><span class="s1">keepdims=</span><span class="s3">True</span><span class="s1">)</span>
+
+<span class="s1">@partial(jax.jit</span><span class="s3">, </span><span class="s1">static_argnames=(</span><span class="s5">&quot;axis&quot;</span><span class="s3">,</span><span class="s1">))</span>
+<span class="s3">def </span><span class="s1">standardize(x: Array</span><span class="s3">,</span>
+              <span class="s1">axis: Optional[Union[int</span><span class="s3">, </span><span class="s1">Tuple[int</span><span class="s3">, </span><span class="s1">...]]] = -</span><span class="s4">1</span><span class="s3">,</span>
+              <span class="s1">mean: Optional[Array] = </span><span class="s3">None,</span>
+              <span class="s1">variance: Optional[Array] = </span><span class="s3">None,</span>
+              <span class="s1">epsilon: Array = </span><span class="s4">1e-5</span><span class="s3">,</span>
+              <span class="s1">where: Optional[Array] = </span><span class="s3">None</span><span class="s1">) -&gt; Array:</span>
+  <span class="s2">r&quot;&quot;&quot;Normalizes an array by subtracting ``mean`` and dividing by :math:`\sqrt{\mathrm{variance}}`.&quot;&quot;&quot;</span>
+  <span class="s3">if </span><span class="s1">mean </span><span class="s3">is None</span><span class="s1">:</span>
+    <span class="s1">mean = jnp.mean(x</span><span class="s3">, </span><span class="s1">axis</span><span class="s3">, </span><span class="s1">keepdims=</span><span class="s3">True, </span><span class="s1">where=where)</span>
+  <span class="s3">if </span><span class="s1">variance </span><span class="s3">is None</span><span class="s1">:</span>
+    <span class="s0"># this definition is traditionally seen as less accurate than jnp.var's</span>
+    <span class="s0"># mean((x - mean(x))**2) but may be faster and even, given typical</span>
+    <span class="s0"># activation distributions and low-precision arithmetic, more accurate</span>
+    <span class="s0"># when used in neural network normalization layers</span>
+    <span class="s1">variance = jnp.mean(</span>
+        <span class="s1">jnp.square(x)</span><span class="s3">, </span><span class="s1">axis</span><span class="s3">, </span><span class="s1">keepdims=</span><span class="s3">True, </span><span class="s1">where=where) - jnp.square(mean)</span>
+  <span class="s3">return </span><span class="s1">(x - mean) * lax.rsqrt(variance + epsilon)</span>
+
+<span class="s3">def </span><span class="s1">normalize(x: Array</span><span class="s3">,</span>
+              <span class="s1">axis: Optional[Union[int</span><span class="s3">, </span><span class="s1">Tuple[int</span><span class="s3">, </span><span class="s1">...]]] = -</span><span class="s4">1</span><span class="s3">,</span>
+              <span class="s1">mean: Optional[Array] = </span><span class="s3">None,</span>
+              <span class="s1">variance: Optional[Array] = </span><span class="s3">None,</span>
+              <span class="s1">epsilon: Array = </span><span class="s4">1e-5</span><span class="s3">,</span>
+              <span class="s1">where: Optional[Array] = </span><span class="s3">None</span><span class="s1">) -&gt; Array:</span>
+  <span class="s2">r&quot;&quot;&quot;Normalizes an array by subtracting ``mean`` and dividing by :math:`\sqrt{\mathrm{variance}}`.&quot;&quot;&quot;</span>
+  <span class="s1">warnings.warn(</span><span class="s5">&quot;jax.nn.normalize will be deprecated. Use jax.nn.standardize instead.&quot;</span><span class="s3">, </span><span class="s1">DeprecationWarning)</span>
+  <span class="s3">return </span><span class="s1">standardize(x</span><span class="s3">, </span><span class="s1">axis</span><span class="s3">, </span><span class="s1">mean</span><span class="s3">, </span><span class="s1">variance</span><span class="s3">, </span><span class="s1">epsilon</span><span class="s3">, </span><span class="s1">where)</span>
+
+<span class="s1">@partial(jax.jit</span><span class="s3">, </span><span class="s1">static_argnames=(</span><span class="s5">&quot;num_classes&quot;</span><span class="s3">, </span><span class="s5">&quot;dtype&quot;</span><span class="s3">, </span><span class="s5">&quot;axis&quot;</span><span class="s1">))</span>
+<span class="s3">def </span><span class="s1">_one_hot(x: Array</span><span class="s3">, </span><span class="s1">num_classes: int</span><span class="s3">, </span><span class="s1">*</span><span class="s3">,</span>
+             <span class="s1">dtype: Any</span><span class="s3">, </span><span class="s1">axis: Union[int</span><span class="s3">, </span><span class="s1">AxisName]) -&gt; Array:</span>
+  <span class="s1">num_classes = core.concrete_or_error(</span>
+      <span class="s1">int</span><span class="s3">, </span><span class="s1">num_classes</span><span class="s3">,</span>
+      <span class="s5">&quot;The error arose in jax.nn.one_hot argument `num_classes`.&quot;</span><span class="s1">)</span>
+  <span class="s1">dtype = dtypes.canonicalize_dtype(dtype)</span>
+  <span class="s1">x = jnp.asarray(x)</span>
+  <span class="s3">try</span><span class="s1">:</span>
+    <span class="s1">output_pos_axis = util.canonicalize_axis(axis</span><span class="s3">, </span><span class="s1">x.ndim + </span><span class="s4">1</span><span class="s1">)</span>
+  <span class="s3">except </span><span class="s1">TypeError:</span>
+    <span class="s1">axis_size = lax.psum(</span><span class="s4">1</span><span class="s3">, </span><span class="s1">axis)</span>
+    <span class="s3">if </span><span class="s1">num_classes != axis_size:</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s5">f&quot;Expected num_classes to match the size of axis </span><span class="s3">{</span><span class="s1">axis</span><span class="s3">}</span><span class="s5">, &quot;</span>
+                       <span class="s5">f&quot;but </span><span class="s3">{</span><span class="s1">num_classes</span><span class="s3">} </span><span class="s5">!= </span><span class="s3">{</span><span class="s1">axis_size</span><span class="s3">}</span><span class="s5">&quot;</span><span class="s1">) </span><span class="s3">from None</span>
+    <span class="s1">axis_idx = lax.axis_index(axis)</span>
+    <span class="s3">return </span><span class="s1">jnp.asarray(x == axis_idx</span><span class="s3">, </span><span class="s1">dtype=dtype)</span>
+  <span class="s1">axis = operator.index(axis)  </span><span class="s0"># type: ignore[arg-type]</span>
+  <span class="s1">lhs = lax.expand_dims(x</span><span class="s3">, </span><span class="s1">(axis</span><span class="s3">,</span><span class="s1">))</span>
+  <span class="s1">rhs_shape = [</span><span class="s4">1</span><span class="s1">] * x.ndim</span>
+  <span class="s1">rhs_shape.insert(output_pos_axis</span><span class="s3">, </span><span class="s1">num_classes)</span>
+  <span class="s1">rhs = lax.broadcasted_iota(x.dtype</span><span class="s3">, </span><span class="s1">rhs_shape</span><span class="s3">, </span><span class="s1">output_pos_axis)</span>
+  <span class="s3">return </span><span class="s1">jnp.asarray(lhs == rhs</span><span class="s3">, </span><span class="s1">dtype=dtype)</span>
+
+<span class="s3">def </span><span class="s1">one_hot(x: Array</span><span class="s3">, </span><span class="s1">num_classes: int</span><span class="s3">, </span><span class="s1">*</span><span class="s3">,</span>
+            <span class="s1">dtype: Any = jnp.float_</span><span class="s3">, </span><span class="s1">axis: Union[int</span><span class="s3">, </span><span class="s1">AxisName] = -</span><span class="s4">1</span><span class="s1">) -&gt; Array:</span>
+  <span class="s2">&quot;&quot;&quot;One-hot encodes the given indicies. 
+ 
+  Each index in the input ``x`` is encoded as a vector of zeros of length 
+  ``num_classes`` with the element at ``index`` set to one:: 
+ 
+    &gt;&gt;&gt; jax.nn.one_hot(jnp.array([0, 1, 2]), 3) 
+    Array([[1., 0., 0.], 
+           [0., 1., 0.], 
+           [0., 0., 1.]], dtype=float32) 
+ 
+  Indicies outside the range [0, num_classes) will be encoded as zeros:: 
+ 
+    &gt;&gt;&gt; jax.nn.one_hot(jnp.array([-1, 3]), 3) 
+    Array([[0., 0., 0.], 
+           [0., 0., 0.]], dtype=float32) 
+ 
+  Args: 
+    x: A tensor of indices. 
+    num_classes: Number of classes in the one-hot dimension. 
+    dtype: optional, a float dtype for the returned values (default :obj:`jnp.float_`). 
+    axis: the axis or axes along which the function should be 
+      computed. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">num_classes = core.concrete_or_error(</span>
+      <span class="s1">int</span><span class="s3">, </span><span class="s1">num_classes</span><span class="s3">,</span>
+      <span class="s5">&quot;The error arose in jax.nn.one_hot argument `num_classes`.&quot;</span><span class="s1">)</span>
+  <span class="s3">return </span><span class="s1">_one_hot(x</span><span class="s3">, </span><span class="s1">num_classes</span><span class="s3">, </span><span class="s1">dtype=dtype</span><span class="s3">, </span><span class="s1">axis=axis)</span>
+
+
+<span class="s1">@jax.custom_jvp</span>
+<span class="s1">@jax.jit</span>
+<span class="s3">def </span><span class="s1">relu6(x: Array) -&gt; Array:</span>
+  <span class="s2">r&quot;&quot;&quot;Rectified Linear Unit 6 activation function. 
+ 
+  Computes the element-wise function 
+ 
+  .. math:: 
+    \mathrm{relu6}(x) = \min(\max(x, 0), 6) 
+ 
+  except under differentiation, we take: 
+ 
+  .. math:: 
+    \nabla \mathrm{relu}(0) = 0 
+ 
+  and 
+ 
+  .. math:: 
+    \nabla \mathrm{relu}(6) = 0 
+ 
+ 
+  Args: 
+    x : input array 
+  &quot;&quot;&quot;</span>
+  <span class="s3">return </span><span class="s1">jnp.minimum(jnp.maximum(x</span><span class="s3">, </span><span class="s4">0</span><span class="s1">)</span><span class="s3">, </span><span class="s4">6.</span><span class="s1">)</span>
+<span class="s1">relu6.defjvps(</span><span class="s3">lambda </span><span class="s1">g</span><span class="s3">, </span><span class="s1">ans</span><span class="s3">, </span><span class="s1">x:</span>
+              <span class="s1">lax.select((x &gt; </span><span class="s4">0</span><span class="s1">) &amp; (x &lt; </span><span class="s4">6</span><span class="s1">)</span><span class="s3">, </span><span class="s1">g</span><span class="s3">, </span><span class="s1">lax.full_like(g</span><span class="s3">, </span><span class="s4">0</span><span class="s1">)))</span>
+
+<span class="s1">@jax.jit</span>
+<span class="s3">def </span><span class="s1">hard_sigmoid(x: Array) -&gt; Array:</span>
+  <span class="s2">r&quot;&quot;&quot;Hard Sigmoid activation function. 
+ 
+  Computes the element-wise function 
+ 
+  .. math:: 
+    \mathrm{hard\_sigmoid}(x) = \frac{\mathrm{relu6}(x + 3)}{6} 
+ 
+  Args: 
+    x : input array 
+  &quot;&quot;&quot;</span>
+  <span class="s3">return </span><span class="s1">relu6(x + </span><span class="s4">3.</span><span class="s1">) / </span><span class="s4">6.</span>
+
+<span class="s1">@jax.jit</span>
+<span class="s3">def </span><span class="s1">hard_silu(x: Array) -&gt; Array:</span>
+  <span class="s2">r&quot;&quot;&quot;Hard SiLU activation function 
+ 
+  Computes the element-wise function 
+ 
+  .. math:: 
+    \mathrm{hard\_silu}(x) = x \cdot \mathrm{hard\_sigmoid}(x) 
+ 
+  Args: 
+    x : input array 
+  &quot;&quot;&quot;</span>
+  <span class="s3">return </span><span class="s1">x * hard_sigmoid(x)</span>
+
+<span class="s1">hard_swish = hard_silu</span>
+</pre>
+</body>
+</html>

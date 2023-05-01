@@ -1,0 +1,169 @@
+<html>
+<head>
+<title>_core.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+.s5 { color: #629755; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_core.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2023 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s2">from </span><span class="s1">collections </span><span class="s2">import </span><span class="s1">namedtuple</span>
+<span class="s2">from </span><span class="s1">functools </span><span class="s2">import </span><span class="s1">partial</span>
+<span class="s2">import </span><span class="s1">math</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Optional</span><span class="s2">, </span><span class="s1">Tuple</span>
+
+<span class="s2">import </span><span class="s1">jax</span>
+<span class="s2">import </span><span class="s1">jax.numpy </span><span class="s2">as </span><span class="s1">jnp</span>
+<span class="s2">from </span><span class="s1">jax </span><span class="s2">import </span><span class="s1">jit</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">dtypes</span>
+<span class="s2">from </span><span class="s1">jax._src.api </span><span class="s2">import </span><span class="s1">vmap</span>
+<span class="s2">from </span><span class="s1">jax._src.numpy.util </span><span class="s2">import </span><span class="s1">check_arraylike</span><span class="s2">, </span><span class="s1">_wraps</span>
+<span class="s2">from </span><span class="s1">jax._src.typing </span><span class="s2">import </span><span class="s1">ArrayLike</span><span class="s2">, </span><span class="s1">Array</span>
+<span class="s2">from </span><span class="s1">jax._src.util </span><span class="s2">import </span><span class="s1">canonicalize_axis</span>
+
+<span class="s2">import </span><span class="s1">scipy</span>
+
+<span class="s1">ModeResult = namedtuple(</span><span class="s3">'ModeResult'</span><span class="s2">, </span><span class="s1">(</span><span class="s3">'mode'</span><span class="s2">, </span><span class="s3">'count'</span><span class="s1">))</span>
+
+<span class="s1">@_wraps(scipy.stats.mode</span><span class="s2">, </span><span class="s1">lax_description=</span><span class="s3">&quot;&quot;&quot;</span><span class="s2">\ 
+</span><span class="s3">Currently the only supported nan_policy is 'propagate' 
+&quot;&quot;&quot;</span><span class="s1">)</span>
+<span class="s1">@partial(jit</span><span class="s2">, </span><span class="s1">static_argnames=[</span><span class="s3">'axis'</span><span class="s2">, </span><span class="s3">'nan_policy'</span><span class="s2">, </span><span class="s3">'keepdims'</span><span class="s1">])</span>
+<span class="s2">def </span><span class="s1">mode(a: ArrayLike</span><span class="s2">, </span><span class="s1">axis: Optional[int] = </span><span class="s4">0</span><span class="s2">, </span><span class="s1">nan_policy: str = </span><span class="s3">&quot;propagate&quot;</span><span class="s2">, </span><span class="s1">keepdims: bool = </span><span class="s2">False</span><span class="s1">) -&gt; ModeResult:</span>
+  <span class="s1">check_arraylike(</span><span class="s3">&quot;mode&quot;</span><span class="s2">, </span><span class="s1">a)</span>
+  <span class="s1">x = jnp.atleast_1d(a)</span>
+
+  <span class="s2">if </span><span class="s1">nan_policy </span><span class="s2">not in </span><span class="s1">[</span><span class="s3">&quot;propagate&quot;</span><span class="s2">, </span><span class="s3">&quot;omit&quot;</span><span class="s2">, </span><span class="s3">&quot;raise&quot;</span><span class="s1">]:</span>
+    <span class="s2">raise </span><span class="s1">ValueError(</span>
+      <span class="s3">f&quot;Illegal nan_policy value </span><span class="s2">{</span><span class="s1">nan_policy</span><span class="s2">!r}</span><span class="s3">; expected one of &quot;</span>
+      <span class="s3">&quot;{'propagate', 'omit', 'raise'}&quot;</span>
+    <span class="s1">)</span>
+  <span class="s2">if </span><span class="s1">nan_policy == </span><span class="s3">&quot;omit&quot;</span><span class="s1">:</span>
+    <span class="s0"># TODO: return answer without nans included.</span>
+    <span class="s2">raise </span><span class="s1">NotImplementedError(</span>
+      <span class="s3">f&quot;Logic for `nan_policy` of </span><span class="s2">{</span><span class="s1">nan_policy</span><span class="s2">} </span><span class="s3">is not implemented&quot;</span>
+    <span class="s1">)</span>
+  <span class="s2">if </span><span class="s1">nan_policy == </span><span class="s3">&quot;raise&quot;</span><span class="s1">:</span>
+    <span class="s2">raise </span><span class="s1">NotImplementedError(</span>
+      <span class="s3">&quot;In order to best JIT compile `mode`, we cannot know whether `x` contains nans. &quot;</span>
+      <span class="s3">&quot;Please check if nans exist in `x` outside of the `mode` function.&quot;</span>
+    <span class="s1">)</span>
+
+  <span class="s1">input_shape = x.shape</span>
+  <span class="s2">if </span><span class="s1">keepdims:</span>
+    <span class="s2">if </span><span class="s1">axis </span><span class="s2">is None</span><span class="s1">:</span>
+      <span class="s1">output_shape = tuple(</span><span class="s4">1 </span><span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">input_shape)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+      <span class="s1">output_shape = tuple(</span><span class="s4">1 </span><span class="s2">if </span><span class="s1">i == axis </span><span class="s2">else </span><span class="s1">s </span><span class="s2">for </span><span class="s1">i</span><span class="s2">, </span><span class="s1">s </span><span class="s2">in </span><span class="s1">enumerate(input_shape))</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s2">if </span><span class="s1">axis </span><span class="s2">is None</span><span class="s1">:</span>
+      <span class="s1">output_shape = ()</span>
+    <span class="s2">else</span><span class="s1">:</span>
+      <span class="s1">output_shape = tuple(s </span><span class="s2">for </span><span class="s1">i</span><span class="s2">, </span><span class="s1">s </span><span class="s2">in </span><span class="s1">enumerate(input_shape) </span><span class="s2">if </span><span class="s1">i != axis)</span>
+
+  <span class="s2">if </span><span class="s1">axis </span><span class="s2">is None</span><span class="s1">:</span>
+    <span class="s1">axis = </span><span class="s4">0</span>
+    <span class="s1">x = x.ravel()</span>
+
+  <span class="s2">def </span><span class="s1">_mode_helper(x: jax.Array) -&gt; Tuple[jax.Array</span><span class="s2">, </span><span class="s1">jax.Array]:</span>
+    <span class="s5">&quot;&quot;&quot;Helper function to return mode and count of a given array.&quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">x.size == </span><span class="s4">0</span><span class="s1">:</span>
+      <span class="s2">return </span><span class="s1">jnp.array(jnp.nan</span><span class="s2">, </span><span class="s1">dtype=dtypes.canonicalize_dtype(jnp.float_))</span><span class="s2">, </span><span class="s1">jnp.array(jnp.nan</span><span class="s2">, </span><span class="s1">dtype=dtypes.canonicalize_dtype(jnp.float_))</span>
+    <span class="s2">else</span><span class="s1">:</span>
+      <span class="s1">vals</span><span class="s2">, </span><span class="s1">counts = jnp.unique(x</span><span class="s2">, </span><span class="s1">return_counts=</span><span class="s2">True, </span><span class="s1">size=x.size)</span>
+      <span class="s2">return </span><span class="s1">vals[jnp.argmax(counts)]</span><span class="s2">, </span><span class="s1">counts.max()</span>
+
+  <span class="s1">axis = canonicalize_axis(axis</span><span class="s2">, </span><span class="s1">x.ndim)</span>
+  <span class="s1">x = jnp.moveaxis(x</span><span class="s2">, </span><span class="s1">axis</span><span class="s2">, </span><span class="s4">0</span><span class="s1">)</span>
+  <span class="s1">x = x.reshape(x.shape[</span><span class="s4">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">math.prod(x.shape[</span><span class="s4">1</span><span class="s1">:]))</span>
+  <span class="s1">vals</span><span class="s2">, </span><span class="s1">counts = vmap(_mode_helper</span><span class="s2">, </span><span class="s1">in_axes=</span><span class="s4">1</span><span class="s1">)(x)</span>
+  <span class="s2">return </span><span class="s1">ModeResult(vals.reshape(output_shape)</span><span class="s2">, </span><span class="s1">counts.reshape(output_shape))</span>
+
+<span class="s2">def </span><span class="s1">invert_permutation(i: Array) -&gt; Array:</span>
+  <span class="s5">&quot;&quot;&quot;Helper function that inverts a permutation array.&quot;&quot;&quot;</span>
+  <span class="s2">return </span><span class="s1">jnp.empty_like(i).at[i].set(jnp.arange(i.size</span><span class="s2">, </span><span class="s1">dtype=i.dtype))</span>
+
+<span class="s1">@_wraps(scipy.stats.rankdata</span><span class="s2">, </span><span class="s1">lax_description=</span><span class="s3">&quot;&quot;&quot;</span><span class="s2">\ 
+</span><span class="s3">Currently the only supported nan_policy is 'propagate' 
+&quot;&quot;&quot;</span><span class="s1">)</span>
+<span class="s1">@partial(jit</span><span class="s2">, </span><span class="s1">static_argnames=[</span><span class="s3">&quot;method&quot;</span><span class="s2">, </span><span class="s3">&quot;axis&quot;</span><span class="s2">, </span><span class="s3">&quot;nan_policy&quot;</span><span class="s1">])</span>
+<span class="s2">def </span><span class="s1">rankdata(</span>
+  <span class="s1">a: ArrayLike</span><span class="s2">,</span>
+  <span class="s1">method: str = </span><span class="s3">&quot;average&quot;</span><span class="s2">,</span>
+  <span class="s1">*</span><span class="s2">,</span>
+  <span class="s1">axis: Optional[int] = </span><span class="s2">None,</span>
+  <span class="s1">nan_policy: str = </span><span class="s3">&quot;propagate&quot;</span><span class="s2">,</span>
+<span class="s1">) -&gt; Array:</span>
+
+  <span class="s1">check_arraylike(</span><span class="s3">&quot;rankdata&quot;</span><span class="s2">, </span><span class="s1">a)</span>
+
+  <span class="s2">if </span><span class="s1">nan_policy </span><span class="s2">not in </span><span class="s1">[</span><span class="s3">&quot;propagate&quot;</span><span class="s2">, </span><span class="s3">&quot;omit&quot;</span><span class="s2">, </span><span class="s3">&quot;raise&quot;</span><span class="s1">]:</span>
+    <span class="s2">raise </span><span class="s1">ValueError(</span>
+      <span class="s3">f&quot;Illegal nan_policy value </span><span class="s2">{</span><span class="s1">nan_policy</span><span class="s2">!r}</span><span class="s3">; expected one of &quot;</span>
+      <span class="s3">&quot;{'propoagate', 'omit', 'raise'}&quot;</span>
+    <span class="s1">)</span>
+  <span class="s2">if </span><span class="s1">nan_policy == </span><span class="s3">&quot;omit&quot;</span><span class="s1">:</span>
+    <span class="s2">raise </span><span class="s1">NotImplementedError(</span>
+      <span class="s3">f&quot;Logic for `nan_policy` of </span><span class="s2">{</span><span class="s1">nan_policy</span><span class="s2">} </span><span class="s3">is not implemented&quot;</span>
+    <span class="s1">)</span>
+  <span class="s2">if </span><span class="s1">nan_policy == </span><span class="s3">&quot;raise&quot;</span><span class="s1">:</span>
+    <span class="s2">raise </span><span class="s1">NotImplementedError(</span>
+      <span class="s3">&quot;In order to best JIT compile `mode`, we cannot know whether `x` &quot;</span>
+      <span class="s3">&quot;contains nans. Please check if nans exist in `x` outside of the &quot;</span>
+      <span class="s3">&quot;`rankdata` function.&quot;</span>
+    <span class="s1">)</span>
+
+  <span class="s2">if </span><span class="s1">method </span><span class="s2">not in </span><span class="s1">(</span><span class="s3">&quot;average&quot;</span><span class="s2">, </span><span class="s3">&quot;min&quot;</span><span class="s2">, </span><span class="s3">&quot;max&quot;</span><span class="s2">, </span><span class="s3">&quot;dense&quot;</span><span class="s2">, </span><span class="s3">&quot;ordinal&quot;</span><span class="s1">):</span>
+    <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">f&quot;unknown method '</span><span class="s2">{</span><span class="s1">method</span><span class="s2">}</span><span class="s3">'&quot;</span><span class="s1">)</span>
+
+  <span class="s1">a = jnp.asarray(a)</span>
+
+  <span class="s2">if </span><span class="s1">axis </span><span class="s2">is not None</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">jnp.apply_along_axis(rankdata</span><span class="s2">, </span><span class="s1">axis</span><span class="s2">, </span><span class="s1">a</span><span class="s2">, </span><span class="s1">method)</span>
+
+  <span class="s1">arr = jnp.ravel(a)</span>
+  <span class="s1">sorter = jnp.argsort(arr)</span>
+  <span class="s1">inv = invert_permutation(sorter)</span>
+
+  <span class="s2">if </span><span class="s1">method == </span><span class="s3">&quot;ordinal&quot;</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">inv + </span><span class="s4">1</span>
+  <span class="s1">arr = arr[sorter]</span>
+  <span class="s1">obs = jnp.insert(arr[</span><span class="s4">1</span><span class="s1">:] != arr[:-</span><span class="s4">1</span><span class="s1">]</span><span class="s2">, </span><span class="s4">0</span><span class="s2">, True</span><span class="s1">)</span>
+  <span class="s1">dense = obs.cumsum()[inv]</span>
+  <span class="s2">if </span><span class="s1">method == </span><span class="s3">&quot;dense&quot;</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">dense</span>
+  <span class="s1">count = jnp.nonzero(obs</span><span class="s2">, </span><span class="s1">size=arr.size + </span><span class="s4">1</span><span class="s2">, </span><span class="s1">fill_value=len(obs))[</span><span class="s4">0</span><span class="s1">]</span>
+  <span class="s2">if </span><span class="s1">method == </span><span class="s3">&quot;max&quot;</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">count[dense]</span>
+  <span class="s2">if </span><span class="s1">method == </span><span class="s3">&quot;min&quot;</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">count[dense - </span><span class="s4">1</span><span class="s1">] + </span><span class="s4">1</span>
+  <span class="s2">if </span><span class="s1">method == </span><span class="s3">&quot;average&quot;</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s4">.5 </span><span class="s1">* (count[dense] + count[dense - </span><span class="s4">1</span><span class="s1">] + </span><span class="s4">1</span><span class="s1">).astype(dtypes.canonicalize_dtype(jnp.float_))</span>
+  <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">f&quot;unknown method '</span><span class="s2">{</span><span class="s1">method</span><span class="s2">}</span><span class="s3">'&quot;</span><span class="s1">)</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,526 @@
+<html>
+<head>
+<title>serialization.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+serialization.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2021 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+<span class="s2">&quot;&quot;&quot;GlobalDeviceArray serialization and deserialization.&quot;&quot;&quot;</span>
+
+<span class="s3">import </span><span class="s1">abc</span>
+<span class="s3">import </span><span class="s1">asyncio</span>
+<span class="s3">import </span><span class="s1">itertools</span>
+<span class="s3">import </span><span class="s1">logging</span>
+<span class="s3">from </span><span class="s1">functools </span><span class="s3">import </span><span class="s1">partial</span>
+<span class="s3">import </span><span class="s1">os</span>
+<span class="s3">import </span><span class="s1">re</span>
+<span class="s3">import </span><span class="s1">threading</span>
+<span class="s3">from </span><span class="s1">typing </span><span class="s3">import </span><span class="s1">Callable</span><span class="s3">, </span><span class="s1">Sequence</span><span class="s3">, </span><span class="s1">Optional</span><span class="s3">, </span><span class="s1">Dict</span><span class="s3">, </span><span class="s1">Any</span>
+
+<span class="s3">import </span><span class="s1">jax</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">distributed</span>
+<span class="s3">from </span><span class="s1">jax._src.config </span><span class="s3">import </span><span class="s1">config</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">array</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">sharding</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">sharding_impls</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">typing</span>
+<span class="s3">from </span><span class="s1">jax.sharding </span><span class="s3">import </span><span class="s1">Mesh</span>
+<span class="s3">import </span><span class="s1">jax.numpy </span><span class="s3">as </span><span class="s1">jnp</span>
+<span class="s3">import </span><span class="s1">numpy </span><span class="s3">as </span><span class="s1">np</span>
+<span class="s3">import </span><span class="s1">tensorstore </span><span class="s3">as </span><span class="s1">ts</span>
+
+
+<span class="s1">TS_CONTEXT = ts.Context({</span><span class="s4">'file_io_concurrency'</span><span class="s1">: {</span><span class="s4">'limit'</span><span class="s1">: </span><span class="s5">128</span><span class="s1">}})</span>
+<span class="s1">_REMOVED_VALUE = </span><span class="s4">'Value removed'</span>
+<span class="s1">_CHECKPOINT_SUCCESS = </span><span class="s4">'checkpoint_write_success'</span>
+<span class="s1">_module_unique_count = itertools.count()</span>
+
+<span class="s1">logger = logging.getLogger(__name__)</span>
+
+
+<span class="s3">async def </span><span class="s1">create_async_array_from_callback(</span>
+    <span class="s1">global_shape: array.Shape</span><span class="s3">,</span>
+    <span class="s1">inp_sharding: sharding_impls.XLACompatibleSharding</span><span class="s3">,</span>
+    <span class="s1">data_callback: Callable[[array.Index]</span><span class="s3">, </span><span class="s1">asyncio.Future]</span><span class="s3">,</span>
+<span class="s1">):</span>
+  <span class="s1">device_to_index_map = inp_sharding.devices_indices_map(global_shape)</span>
+  <span class="s1">addressable_da = inp_sharding._addressable_device_assignment</span>
+  <span class="s1">future_arrays = [data_callback(device_to_index_map[d])  </span><span class="s0"># type: ignore</span>
+                   <span class="s3">for </span><span class="s1">d </span><span class="s3">in </span><span class="s1">addressable_da]</span>
+  <span class="s0"># Pause here and come back to `from_async_callback()` when future_arrays are</span>
+  <span class="s0"># ready. device_put cannot happen with future_arrays.</span>
+  <span class="s1">local_arrays = </span><span class="s3">await </span><span class="s1">asyncio.gather(*future_arrays)</span>
+
+  <span class="s1">dbs = [jax.device_put(array</span><span class="s3">, </span><span class="s1">device)</span>
+         <span class="s3">for </span><span class="s1">array</span><span class="s3">, </span><span class="s1">device </span><span class="s3">in </span><span class="s1">zip(local_arrays</span><span class="s3">, </span><span class="s1">addressable_da)]</span>
+  <span class="s3">return </span><span class="s1">array.make_array_from_single_device_arrays(</span>
+      <span class="s1">global_shape</span><span class="s3">, </span><span class="s1">inp_sharding</span><span class="s3">, </span><span class="s1">dbs)</span>
+
+
+<span class="s3">def </span><span class="s1">_get_metadata(arr):</span>
+  <span class="s3">if </span><span class="s1">arr.dtype == jnp.bfloat16:</span>
+    <span class="s0"># Tensorstore uses 'bfloat16', not '&lt;V2'.</span>
+    <span class="s1">dtype = </span><span class="s4">'bfloat16'</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s1">dtype = np.dtype(arr.dtype).str</span>
+  <span class="s1">local_shape = arr.addressable_data(</span><span class="s5">0</span><span class="s1">).shape</span>
+  <span class="s3">return </span><span class="s1">{</span>
+      <span class="s4">'compressor'</span><span class="s1">: {</span>
+          <span class="s4">'id'</span><span class="s1">: </span><span class="s4">'gzip'</span>
+      <span class="s1">}</span><span class="s3">,</span>
+      <span class="s4">'shape'</span><span class="s1">: arr.shape</span><span class="s3">,</span>
+      <span class="s4">'chunks'</span><span class="s1">: np.array(np.maximum(</span><span class="s5">1</span><span class="s3">, </span><span class="s1">local_shape))</span><span class="s3">,</span>
+      <span class="s4">'dtype'</span><span class="s1">: dtype</span><span class="s3">,</span>
+  <span class="s1">}</span>
+
+
+<span class="s3">def </span><span class="s1">_spec_has_metadata(tree):</span>
+  <span class="s3">if not </span><span class="s1">isinstance(tree</span><span class="s3">, </span><span class="s1">dict):</span>
+    <span class="s3">return False</span>
+  <span class="s3">return </span><span class="s4">'metadata' </span><span class="s3">in </span><span class="s1">tree </span><span class="s3">or </span><span class="s1">any(</span>
+      <span class="s1">_spec_has_metadata(subtree) </span><span class="s3">for </span><span class="s1">_</span><span class="s3">, </span><span class="s1">subtree </span><span class="s3">in </span><span class="s1">tree.items())</span>
+
+<span class="s3">def </span><span class="s1">_get_kvstore_for_gcs(ckpt_path: str):</span>
+  <span class="s1">m = re.fullmatch(</span><span class="s4">'^gs://([^/]*)/(.*)$'</span><span class="s3">, </span><span class="s1">ckpt_path</span><span class="s3">, </span><span class="s1">re.DOTALL)</span>
+  <span class="s3">if </span><span class="s1">m </span><span class="s3">is None</span><span class="s1">:</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">'The ckpt_path should contain the bucket name and the '</span>
+                      <span class="s4">f'file path inside the bucket. Got: </span><span class="s3">{</span><span class="s1">ckpt_path</span><span class="s3">}</span><span class="s4">'</span><span class="s1">)</span>
+  <span class="s1">gcs_bucket = m.group(</span><span class="s5">1</span><span class="s1">)</span>
+  <span class="s1">path_without_bucket = m.group(</span><span class="s5">2</span><span class="s1">)</span>
+  <span class="s3">return </span><span class="s1">{</span><span class="s4">'driver'</span><span class="s1">: </span><span class="s4">'gcs'</span><span class="s3">, </span><span class="s4">'bucket'</span><span class="s1">: gcs_bucket</span><span class="s3">, </span><span class="s4">'path'</span><span class="s1">: path_without_bucket}</span>
+
+<span class="s3">def </span><span class="s1">get_tensorstore_spec(ckpt_path: str</span><span class="s3">, </span><span class="s1">ocdbt: bool = </span><span class="s3">False</span><span class="s1">):</span>
+  <span class="s1">is_gcs_path = ckpt_path.startswith(</span><span class="s4">'gs://'</span><span class="s1">)</span>
+  <span class="s0"># Normalize path to exclude trailing '/'. In GCS path case, we will need to</span>
+  <span class="s0"># fix the path prefix to add back the stripped '/'.</span>
+  <span class="s1">ckpt_path = os.path.normpath(ckpt_path).replace(</span><span class="s4">'gs:/'</span><span class="s3">, </span><span class="s4">'gs://'</span><span class="s1">)</span>
+  <span class="s1">spec = {</span><span class="s4">'driver'</span><span class="s1">: </span><span class="s4">'zarr'</span><span class="s3">, </span><span class="s4">'kvstore'</span><span class="s1">: {}}</span>
+  <span class="s3">if </span><span class="s1">ocdbt:</span>
+    <span class="s1">prefix = </span><span class="s4">'gs' </span><span class="s3">if </span><span class="s1">is_gcs_path </span><span class="s3">else </span><span class="s4">'file'</span>
+    <span class="s1">spec[</span><span class="s4">'kvstore'</span><span class="s1">] = {</span>
+        <span class="s4">'driver'</span><span class="s1">: </span><span class="s4">'ocdbt'</span><span class="s3">,</span>
+        <span class="s4">'base'</span><span class="s1">: </span><span class="s4">f'</span><span class="s3">{</span><span class="s1">prefix</span><span class="s3">}</span><span class="s4">://</span><span class="s3">{</span><span class="s1">os.path.dirname(ckpt_path)</span><span class="s3">}</span><span class="s4">'</span><span class="s3">,</span>
+        <span class="s4">'path'</span><span class="s1">: os.path.basename(ckpt_path)</span><span class="s3">,</span>
+    <span class="s1">}</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s3">if </span><span class="s1">is_gcs_path:</span>
+      <span class="s1">spec[</span><span class="s4">'kvstore'</span><span class="s1">] = _get_kvstore_for_gcs(ckpt_path)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s1">spec[</span><span class="s4">'kvstore'</span><span class="s1">] = {</span><span class="s4">'driver'</span><span class="s1">: </span><span class="s4">'file'</span><span class="s3">, </span><span class="s4">'path'</span><span class="s1">: ckpt_path}</span>
+
+  <span class="s3">return </span><span class="s1">spec</span>
+
+
+<span class="s0"># Lifted from T5X.</span>
+<span class="s3">class </span><span class="s1">_LimitInFlightBytes:</span>
+  <span class="s2">&quot;&quot;&quot;Limits in-flight bytes when reading/writing checkpoints per process.&quot;&quot;&quot;</span>
+
+  <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">num_bytes):</span>
+    <span class="s1">self._max_bytes = num_bytes</span>
+    <span class="s1">self._available_bytes = num_bytes</span>
+    <span class="s1">self._cv = asyncio.Condition(lock=asyncio.Lock())</span>
+
+  <span class="s3">async def </span><span class="s1">wait_for_bytes(self</span><span class="s3">, </span><span class="s1">requested_bytes):</span>
+    <span class="s3">if </span><span class="s1">requested_bytes &gt;= self._max_bytes:</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">'Requested more bytes than we reserved space for: '</span>
+                       <span class="s4">f'</span><span class="s3">{</span><span class="s1">requested_bytes</span><span class="s3">} </span><span class="s4">&gt; </span><span class="s3">{</span><span class="s1">self._max_bytes</span><span class="s3">}</span><span class="s4">'</span><span class="s1">)</span>
+    <span class="s3">async with </span><span class="s1">self._cv:</span>
+      <span class="s3">await </span><span class="s1">self._cv.wait_for(</span><span class="s3">lambda</span><span class="s1">: self._available_bytes &gt; requested_bytes)</span>
+      <span class="s1">self._available_bytes -= requested_bytes</span>
+      <span class="s3">assert </span><span class="s1">self._available_bytes &gt;= </span><span class="s5">0</span>
+
+  <span class="s3">async def </span><span class="s1">release_bytes(self</span><span class="s3">, </span><span class="s1">requested_bytes):</span>
+    <span class="s3">async with </span><span class="s1">self._cv:</span>
+      <span class="s1">self._available_bytes += requested_bytes</span>
+      <span class="s3">assert </span><span class="s1">self._available_bytes &lt;= self._max_bytes</span>
+      <span class="s1">self._cv.notify_all()</span>
+
+
+<span class="s3">async def </span><span class="s1">async_serialize(</span>
+    <span class="s1">arr_inp</span><span class="s3">, </span><span class="s1">tensorstore_spec</span><span class="s3">, </span><span class="s1">commit_future=</span><span class="s3">None, </span><span class="s1">context=TS_CONTEXT</span>
+<span class="s1">):</span>
+  <span class="s3">if </span><span class="s1">(isinstance(arr_inp</span><span class="s3">, </span><span class="s1">array.ArrayImpl) </span><span class="s3">and </span><span class="s1">jax.process_count() &gt; </span><span class="s5">1 </span><span class="s3">and</span>
+      <span class="s1">arr_inp.is_fully_addressable):</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">'Passing fully addressable Arrays to a multiprocess '</span>
+                     <span class="s4">'serialization is not allowed.'</span><span class="s1">)</span>
+  <span class="s0"># 'metadata' may not be present at the top level (for example, if we are using</span>
+  <span class="s0"># a 'cast' driver).</span>
+  <span class="s3">if not </span><span class="s1">_spec_has_metadata(tensorstore_spec):</span>
+    <span class="s1">tensorstore_spec[</span><span class="s4">'metadata'</span><span class="s1">] = _get_metadata(arr_inp)</span>
+
+  <span class="s3">if </span><span class="s1">jax.process_index() == </span><span class="s5">0</span><span class="s1">:</span>
+    <span class="s1">open_future = ts.open(</span>
+        <span class="s1">ts.Spec(tensorstore_spec)</span><span class="s3">,</span>
+        <span class="s1">create=</span><span class="s3">True,</span>
+        <span class="s1">open=</span><span class="s3">True,</span>
+        <span class="s1">context=context</span><span class="s3">,</span>
+    <span class="s1">)</span>
+    <span class="s0"># Asynchronous case.</span>
+    <span class="s3">if </span><span class="s1">commit_future </span><span class="s3">is not None</span><span class="s1">:</span>
+      <span class="s3">assert </span><span class="s1">isinstance(commit_future</span><span class="s3">, </span><span class="s1">list)</span>
+      <span class="s1">commit_future.append(open_future)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s3">await </span><span class="s1">open_future</span>
+
+  <span class="s0"># `ts.open` runs twice for process 0 because for the first time, we just get</span>
+  <span class="s0"># the future to be awaited upon in the background thread. The second one runs</span>
+  <span class="s0"># with `assume_metadata=True` which does no I/O operation and returns the</span>
+  <span class="s0"># tensorstore object.</span>
+  <span class="s0"># For every process other than `0`, we open with `assume_metadata=True`.</span>
+  <span class="s1">t = </span><span class="s3">await </span><span class="s1">ts.open(</span>
+      <span class="s1">ts.Spec(tensorstore_spec)</span><span class="s3">,</span>
+      <span class="s1">open=</span><span class="s3">True,</span>
+      <span class="s1">assume_metadata=</span><span class="s3">True,</span>
+      <span class="s1">context=context</span><span class="s3">,</span>
+  <span class="s1">)</span>
+
+  <span class="s3">async def </span><span class="s1">_write_array(shard):</span>
+    <span class="s3">if </span><span class="s1">shard.replica_id == </span><span class="s5">0</span><span class="s1">:</span>
+      <span class="s1">write_future = t[shard.index].write(shard.data)</span>
+      <span class="s3">if </span><span class="s1">commit_future </span><span class="s3">is not None</span><span class="s1">:</span>
+        <span class="s3">assert </span><span class="s1">isinstance(commit_future</span><span class="s3">, </span><span class="s1">list)</span>
+        <span class="s1">commit_future.append(write_future.commit)</span>
+        <span class="s3">await </span><span class="s1">write_future.copy</span>
+      <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">await </span><span class="s1">write_future.commit</span>
+
+  <span class="s3">if </span><span class="s1">isinstance(arr_inp</span><span class="s3">, </span><span class="s1">array.ArrayImpl):</span>
+    <span class="s1">local_shards = arr_inp.addressable_shards</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s1">local_shards = arr_inp.addressable_shards</span>
+  <span class="s1">future_write_state = jax.tree_util.tree_map(_write_array</span><span class="s3">, </span><span class="s1">local_shards)</span>
+  <span class="s3">return await </span><span class="s1">asyncio.gather(*future_write_state)</span>
+
+
+<span class="s3">def </span><span class="s1">run_serialization(arrays</span><span class="s3">, </span><span class="s1">tensorstore_specs):</span>
+  <span class="s3">async def </span><span class="s1">_run_serializer():</span>
+    <span class="s1">future_writer = jax.tree_util.tree_map(async_serialize</span><span class="s3">, </span><span class="s1">arrays</span><span class="s3">, </span><span class="s1">tensorstore_specs)</span>
+    <span class="s3">return await </span><span class="s1">asyncio.gather(*future_writer)</span>
+  <span class="s1">asyncio.run(_run_serializer())</span>
+
+
+<span class="s3">def </span><span class="s1">estimate_read_memory_footprint(t: ts.TensorStore) -&gt; int:</span>
+  <span class="s1">rank = t.rank</span>
+  <span class="s1">num_bytes = t.dtype.numpy_dtype.itemsize</span>
+  <span class="s1">chunk_template = t.chunk_layout.read_chunk_template</span>
+  <span class="s1">origin = t.domain.origin</span>
+  <span class="s1">shape = t.domain.shape</span>
+  <span class="s1">chunk_origin = chunk_template.origin</span>
+  <span class="s1">chunk_shape = chunk_template.shape</span>
+
+  <span class="s0"># Some TensorStore drivers are not chunked, e.g. the inline 'array' driver.</span>
+  <span class="s0"># For those, instead of returning a near-infinite memory footprint, estimate</span>
+  <span class="s0"># the footprint as the entire shape.</span>
+  <span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">range(rank):</span>
+    <span class="s3">if not </span><span class="s1">chunk_template[i].finite:</span>
+      <span class="s3">return </span><span class="s1">t.domain.size * num_bytes</span>
+
+  <span class="s0"># Otherwise, if we have a chunked driver, estimate based on chunk size.</span>
+  <span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">range(rank):</span>
+    <span class="s1">origin_value = origin[i]</span>
+    <span class="s1">chunk_origin_value = chunk_origin[i]</span>
+    <span class="s1">chunk_size = chunk_shape[i]</span>
+    <span class="s1">lower = origin_value - chunk_origin_value</span>
+    <span class="s1">upper = origin_value + shape[i] - chunk_origin_value</span>
+    <span class="s1">lower_aligned = lower // chunk_size * chunk_size</span>
+    <span class="s1">upper_aligned = -(-upper // chunk_size) * chunk_size</span>
+    <span class="s1">num_bytes *= (upper_aligned - lower_aligned)</span>
+
+  <span class="s3">return </span><span class="s1">num_bytes</span>
+
+
+<span class="s3">async def </span><span class="s1">async_deserialize(</span>
+    <span class="s1">in_sharding</span><span class="s3">,</span>
+    <span class="s1">tensorstore_spec</span><span class="s3">,</span>
+    <span class="s1">global_shape=</span><span class="s3">None,</span>
+    <span class="s1">dtype=</span><span class="s3">None,</span>
+    <span class="s1">byte_limiter: Optional[_LimitInFlightBytes] = </span><span class="s3">None,</span>
+    <span class="s1">context=TS_CONTEXT</span><span class="s3">,</span>
+<span class="s1">):</span>
+  <span class="s1">t = </span><span class="s3">await </span><span class="s1">ts.open(ts.Spec(tensorstore_spec)</span><span class="s3">, </span><span class="s1">open=</span><span class="s3">True, </span><span class="s1">context=context)</span>
+  <span class="s1">shape = t.shape </span><span class="s3">if </span><span class="s1">global_shape </span><span class="s3">is None else </span><span class="s1">global_shape</span>
+  <span class="s1">new_shard_shape = in_sharding.shard_shape(tuple(shape))</span>
+
+  <span class="s3">async def </span><span class="s1">cb(index):</span>
+    <span class="s0"># This maybe needed because the shape the array was saved with is smaller</span>
+    <span class="s0"># than the requested shape of the array in which it will be reloaded. So</span>
+    <span class="s0"># the extra values will be filled with 0s.</span>
+    <span class="s1">out = np.zeros(new_shard_shape</span><span class="s3">, </span><span class="s1">dtype=t.dtype.numpy_dtype)</span>
+    <span class="s1">requested_domain = ts.IndexTransform(input_shape=shape)[index].domain</span>
+    <span class="s1">restricted_domain = t.domain.intersect(requested_domain)</span>
+
+    <span class="s1">requested_bytes = estimate_read_memory_footprint(t[restricted_domain])</span>
+
+    <span class="s0"># Limit the bytes read for every shard.</span>
+    <span class="s3">if </span><span class="s1">byte_limiter </span><span class="s3">is not None</span><span class="s1">:</span>
+      <span class="s3">await </span><span class="s1">byte_limiter.wait_for_bytes(requested_bytes)</span>
+
+    <span class="s3">await </span><span class="s1">ts.array(out)[ts.d[:].translate_to[requested_domain.origin]][restricted_domain].write(</span>
+        <span class="s1">t[restricted_domain])</span>
+
+    <span class="s3">if </span><span class="s1">dtype </span><span class="s3">is not None</span><span class="s1">:</span>
+      <span class="s0"># Cast while reloading on process to avoid 2 copies on device if the</span>
+      <span class="s0"># casting is done on device.</span>
+      <span class="s1">out = out.astype(dtype)</span>
+
+    <span class="s3">if </span><span class="s1">byte_limiter </span><span class="s3">is not None</span><span class="s1">:</span>
+      <span class="s3">await </span><span class="s1">byte_limiter.release_bytes(requested_bytes)</span>
+    <span class="s3">return </span><span class="s1">out</span>
+
+  <span class="s3">return await </span><span class="s1">create_async_array_from_callback(tuple(shape)</span><span class="s3">, </span><span class="s1">in_sharding</span><span class="s3">, </span><span class="s1">cb)</span>
+
+
+<span class="s3">def </span><span class="s1">run_deserialization(shardings: Sequence[sharding.Sharding]</span><span class="s3">,</span>
+                        <span class="s1">tensorstore_specs: Sequence[Dict[str</span><span class="s3">, </span><span class="s1">Any]]</span><span class="s3">,</span>
+                        <span class="s1">global_shapes: Optional[Sequence[array.Shape]] = </span><span class="s3">None,</span>
+                        <span class="s1">dtypes: Optional[Sequence[typing.DTypeLike]] = </span><span class="s3">None,</span>
+                        <span class="s1">concurrent_gb: int = </span><span class="s5">32</span><span class="s1">):</span>
+  <span class="s1">concurrent_bytes = concurrent_gb * </span><span class="s5">10</span><span class="s1">**</span><span class="s5">9</span>
+
+  <span class="s3">async def </span><span class="s1">_run_deserializer():</span>
+    <span class="s0"># Object should be created once per process.</span>
+    <span class="s1">byte_limiter = _LimitInFlightBytes(concurrent_bytes)</span>
+
+    <span class="s1">future_arrays = jax.tree_util.tree_map(</span>
+        <span class="s1">partial(async_deserialize</span><span class="s3">, </span><span class="s1">byte_limiter=byte_limiter)</span><span class="s3">,</span>
+        <span class="s1">shardings</span><span class="s3">, </span><span class="s1">tensorstore_specs</span><span class="s3">,</span>
+        <span class="s1">[</span><span class="s3">None</span><span class="s1">] * len(tensorstore_specs) </span><span class="s3">if </span><span class="s1">global_shapes </span><span class="s3">is None else </span><span class="s1">global_shapes</span><span class="s3">,</span>
+        <span class="s1">[</span><span class="s3">None</span><span class="s1">] * len(tensorstore_specs) </span><span class="s3">if </span><span class="s1">dtypes </span><span class="s3">is None else </span><span class="s1">dtypes)</span>
+    <span class="s3">return await </span><span class="s1">asyncio.gather(*future_arrays)</span>
+  <span class="s3">return </span><span class="s1">asyncio.run(_run_deserializer())</span>
+
+
+<span class="s3">def </span><span class="s1">_get_key(key: str):</span>
+  <span class="s3">return </span><span class="s4">f'tensorstore_checkpoint_</span><span class="s3">{</span><span class="s1">key</span><span class="s3">}</span><span class="s4">'</span>
+
+
+<span class="s3">class </span><span class="s1">GlobalAsyncCheckpointManagerBase(metaclass=abc.ABCMeta):</span>
+  <span class="s2">&quot;&quot;&quot;Interface for checkpointing GDAs asynchronously. 
+ 
+  This class manages the state of an ongoing asynchronous checkpoint. 
+ 
+  For example, say a checkpoint happens on every step. If you checkpoint on 
+  step 1 and after some computation the model is on checkpoint 2. But step 1's 
+  checkpoint hasn't finished committing to the storage layer yet. So until that 
+  is finished, checkpoint for step 2 will need to be blocked. Maintaining a 
+  class allows to maintain that state. 
+ 
+  Example: 
+ 
+  Below is a simplified training loop: 
+ 
+  ``` 
+  # Call this at the start of your program. 
+  jax.distributed.initialize() 
+ 
+  manager = GlobalAsyncCheckpointManager() 
+ 
+  # Restore checkpoint if available or initialize the train_state from 
+  # init_fn(). 
+  train_state = manager.deserialize(...) 
+ 
+  while ...: 
+    if step % num_steps_between_checkpoints == 0: 
+      manager.serialize(train_state, temp_checkpoint_dir=..., 
+                        final_checkpoint_dir=...) 
+      train_state = train_step(train_state, input) 
+      # This is a non-blocking call. 
+      manager.check_for_errors() 
+ 
+  manager.serialize(train_state, temp_checkpoint_dir=..., 
+                    final_checkpoint_dir=...) 
+  # Wait before the end of the program for the checkpoint to finish. This is a 
+  # blocking call. 
+  manager.wait_until_finished() 
+  ``` 
+  &quot;&quot;&quot;</span>
+
+  <span class="s1">@abc.abstractmethod</span>
+  <span class="s3">def </span><span class="s1">check_for_errors(self):</span>
+    <span class="s2">&quot;&quot;&quot;Checks if any errors have been raised in the child thread. 
+ 
+    This is a non-blocking call that can be called in the main thread. 
+    &quot;&quot;&quot;</span>
+
+  <span class="s1">@abc.abstractmethod</span>
+  <span class="s3">def </span><span class="s1">wait_until_finished(self):</span>
+    <span class="s2">&quot;&quot;&quot;Blocks until serialization has finished.&quot;&quot;&quot;</span>
+
+  <span class="s1">@abc.abstractmethod</span>
+  <span class="s3">def </span><span class="s1">serialize(self</span><span class="s3">, </span><span class="s1">arrays</span><span class="s3">, </span><span class="s1">tensorstore_specs</span><span class="s3">, </span><span class="s1">*</span><span class="s3">,</span>
+                <span class="s1">on_commit_callback: Callable[[]</span><span class="s3">, None</span><span class="s1">]):</span>
+    <span class="s2">&quot;&quot;&quot;Serializes GDAs to TensorStore.&quot;&quot;&quot;</span>
+
+  <span class="s1">@abc.abstractmethod</span>
+  <span class="s3">def </span><span class="s1">deserialize(self</span><span class="s3">, </span><span class="s1">shardings: Sequence[sharding.Sharding]</span><span class="s3">,</span>
+                  <span class="s1">tensorstore_specs: Sequence[Dict[str</span><span class="s3">, </span><span class="s1">Any]]</span><span class="s3">,</span>
+                  <span class="s1">global_shapes: Optional[Sequence[array.Shape]] = </span><span class="s3">None,</span>
+                  <span class="s1">dtypes: Optional[Sequence[typing.DTypeLike]] = </span><span class="s3">None</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot;Deserializes GDAs from TensorStore.&quot;&quot;&quot;</span>
+
+
+<span class="s3">class </span><span class="s1">AsyncManager:</span>
+
+  <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">timeout_secs=</span><span class="s5">300</span><span class="s1">):</span>
+    <span class="s1">self._timeout_secs = timeout_secs</span>
+    <span class="s1">self._timeout_in_ms = self._timeout_secs * </span><span class="s5">1000</span>
+
+    <span class="s1">self._commit_futures = </span><span class="s3">None</span>
+    <span class="s1">self._thread = </span><span class="s3">None</span>
+    <span class="s1">self._exception = </span><span class="s3">None</span>
+
+    <span class="s3">if </span><span class="s1">distributed.global_state.client </span><span class="s3">is None</span><span class="s1">:</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">'Please initialize the distributed system via '</span>
+                       <span class="s4">'`jax.distributed.initialize()` at the start of your '</span>
+                       <span class="s4">'program.'</span><span class="s1">)</span>
+    <span class="s1">self._client = distributed.global_state.client</span>
+    <span class="s1">self._count = </span><span class="s3">None</span>
+
+  <span class="s3">def </span><span class="s1">__del__(self):</span>
+    <span class="s3">if </span><span class="s1">self._thread </span><span class="s3">is not None and </span><span class="s1">self._thread.is_alive():</span>
+      <span class="s1">logger.warning(</span><span class="s4">'Please add `.wait_until_finished()` in the main thread '</span>
+                      <span class="s4">'before your program finishes because there is a '</span>
+                      <span class="s4">'possibility of losing errors raised if the '</span>
+                      <span class="s4">'this class is deleted before writing is completed.'</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">_thread_func(self):</span>
+    <span class="s3">try</span><span class="s1">:</span>
+      <span class="s1">current_process = jax.process_index()</span>
+      <span class="s1">logger.info(</span><span class="s4">'Starting commit to storage layer by process: %s'</span><span class="s3">,</span>
+                   <span class="s1">current_process)</span>
+      <span class="s3">for </span><span class="s1">future </span><span class="s3">in </span><span class="s1">self._commit_futures:</span>
+        <span class="s1">future.result()</span>
+      <span class="s1">logger.info(</span><span class="s4">'Finished committing to storage layer by process: %s'</span><span class="s3">,</span>
+                   <span class="s1">current_process)</span>
+
+      <span class="s0"># All processes will wait at the barrier. When all processes are at the</span>
+      <span class="s0"># barrier, the barrier will be satisfied. If not, then it will timeout.</span>
+      <span class="s1">key_for_barrier = _get_key(self._count)</span>
+      <span class="s1">logger.info(</span><span class="s4">'Key used for barrier is %s for process %s'</span><span class="s3">,</span>
+                   <span class="s1">key_for_barrier</span><span class="s3">, </span><span class="s1">current_process)</span>
+      <span class="s1">self._client.wait_at_barrier(key_for_barrier</span><span class="s3">, </span><span class="s1">self._timeout_in_ms)</span>
+      <span class="s1">logger.info(</span><span class="s4">'Finished waiting at barrier for process %s'</span><span class="s3">,</span>
+                   <span class="s1">current_process)</span>
+
+      <span class="s3">if </span><span class="s1">current_process == </span><span class="s5">0</span><span class="s1">:</span>
+        <span class="s1">self._on_commit_callback()</span>
+        <span class="s1">logger.info(</span><span class="s4">'on_commit_callback successfully ran!'</span><span class="s1">)</span>
+        <span class="s1">self._client.key_value_set(key_for_barrier</span><span class="s3">, </span><span class="s1">_CHECKPOINT_SUCCESS)</span>
+        <span class="s1">logger.info(</span><span class="s4">'Process 0 successfully set key %s in the kv store'</span><span class="s3">,</span>
+                    <span class="s1">key_for_barrier)</span>
+
+    <span class="s3">except </span><span class="s1">Exception </span><span class="s3">as </span><span class="s1">e:</span>
+      <span class="s1">self._exception = e</span>
+
+  <span class="s3">def </span><span class="s1">_start_async_commit(self</span><span class="s3">, </span><span class="s1">on_commit_callback):</span>
+    <span class="s1">self._count = next(_module_unique_count)</span>
+
+    <span class="s1">self._on_commit_callback = on_commit_callback</span>
+    <span class="s1">self._thread = threading.Thread(target=self._thread_func)</span>
+    <span class="s1">self._thread.start()</span>
+
+  <span class="s3">def </span><span class="s1">check_for_errors(self):</span>
+    <span class="s3">if </span><span class="s1">self._exception </span><span class="s3">is not None</span><span class="s1">:</span>
+      <span class="s0"># Clears self._exception so it is only raised once.</span>
+      <span class="s1">exception = self._exception</span>
+      <span class="s1">self._exception = </span><span class="s3">None</span>
+      <span class="s3">raise </span><span class="s1">exception  </span><span class="s0"># pylint: disable=raising-bad-type</span>
+
+  <span class="s3">def </span><span class="s1">wait_until_finished(self):</span>
+    <span class="s3">if </span><span class="s1">self._thread </span><span class="s3">is not None</span><span class="s1">:</span>
+      <span class="s1">self._thread.join()</span>
+      <span class="s1">self._thread = </span><span class="s3">None</span>
+      <span class="s1">logger.info(</span><span class="s4">'Thread joined successfully'</span><span class="s1">)</span>
+
+    <span class="s1">self.check_for_errors()</span>
+    <span class="s1">logger.info(</span><span class="s4">'Error check finished successfully'</span><span class="s1">)</span>
+
+    <span class="s3">if </span><span class="s1">self._count </span><span class="s3">is not None</span><span class="s1">:</span>
+      <span class="s0"># Block until process 0 writes success value to the key value store.</span>
+      <span class="s0"># If it fails to write it, then `blocking_key_value_get` will time out.</span>
+      <span class="s1">get_key = _get_key(self._count)</span>
+      <span class="s1">self._client.blocking_key_value_get(get_key</span><span class="s3">, </span><span class="s1">self._timeout_in_ms)</span>
+      <span class="s1">logger.info(</span><span class="s4">'blocking_key_value_get on key %s was successfully '</span>
+                  <span class="s4">'completed.'</span><span class="s3">, </span><span class="s1">get_key)</span>
+
+  <span class="s3">def </span><span class="s1">_add_futures(self</span><span class="s3">, </span><span class="s1">futures: Sequence[asyncio.Future]):</span>
+    <span class="s1">self._commit_futures = futures</span>
+
+
+<span class="s3">class </span><span class="s1">GlobalAsyncCheckpointManager(AsyncManager</span><span class="s3">, </span><span class="s1">GlobalAsyncCheckpointManagerBase):</span>
+  <span class="s2">&quot;&quot;&quot;Responsible for serializing GDAs via TensorStore.&quot;&quot;&quot;</span>
+
+  <span class="s3">def </span><span class="s1">serialize(self</span><span class="s3">, </span><span class="s1">arrays</span><span class="s3">, </span><span class="s1">tensorstore_specs</span><span class="s3">, </span><span class="s1">*</span><span class="s3">, </span><span class="s1">on_commit_callback):</span>
+    <span class="s2">&quot;&quot;&quot;Serializes GlobalDeviceArrays or Arrays via TensorStore asynchronously. 
+ 
+    TensorStore writes to a storage layer in 2 steps: 
+    *  Reading/copying from the source after which the source can be modified. 
+         * Returns a copy future. 
+    *  Writing/committing to the storage layer. 
+         * Returns a commit future. 
+ 
+    In asynchronous mode, the serialization waits for the commit future to 
+    finish in a separate thread allowing other computation to proceed. 
+ 
+    Args: 
+      arrays: GlobalDeviceArrays or Arrays that should be serialized. 
+      tensorstore_specs: TensorStore specs that are used to serialize GDAs or 
+        Arrays. 
+      temp_checkpoint_dir: Temporary checkpoint directory where the checkpoints 
+        will be written. 
+      final_checkpoint_dir: Final checkpoint directory where the checkpoints 
+        will be moved from `temp_checkpoint_dir`. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">logger.info(</span><span class="s4">'Waiting for previous serialization to finish.'</span><span class="s1">)</span>
+    <span class="s1">self.wait_until_finished()</span>
+
+    <span class="s1">commit_futures = [[] </span><span class="s3">for </span><span class="s1">_ </span><span class="s3">in </span><span class="s1">range(len(tensorstore_specs))]</span>
+
+    <span class="s3">async def </span><span class="s1">_run_serializer():</span>
+      <span class="s1">future_writer = jax.tree_util.tree_map(</span>
+          <span class="s1">async_serialize</span><span class="s3">, </span><span class="s1">arrays</span><span class="s3">, </span><span class="s1">tensorstore_specs</span><span class="s3">, </span><span class="s1">commit_futures)</span>
+      <span class="s3">return await </span><span class="s1">asyncio.gather(*future_writer)</span>
+
+    <span class="s1">asyncio.run(_run_serializer())</span>
+
+    <span class="s1">self._add_futures(jax.tree_util.tree_flatten(commit_futures)[</span><span class="s5">0</span><span class="s1">])</span>
+
+    <span class="s0"># Used in wait_until_finished to check on process != 0, if the checkpoint</span>
+    <span class="s0"># has finished writing.</span>
+    <span class="s1">self._start_async_commit(on_commit_callback)</span>
+
+  <span class="s3">def </span><span class="s1">deserialize(self</span><span class="s3">, </span><span class="s1">shardings: Sequence[sharding.Sharding]</span><span class="s3">,</span>
+                  <span class="s1">tensorstore_specs: Sequence[Dict[str</span><span class="s3">, </span><span class="s1">Any]]</span><span class="s3">,</span>
+                  <span class="s1">global_shapes: Optional[Sequence[array.Shape]] = </span><span class="s3">None,</span>
+                  <span class="s1">dtypes: Optional[Sequence[typing.DTypeLike]] = </span><span class="s3">None</span><span class="s1">):</span>
+    <span class="s1">self.wait_until_finished()</span>
+    <span class="s3">return </span><span class="s1">run_deserialization(shardings</span><span class="s3">, </span><span class="s1">tensorstore_specs</span><span class="s3">,</span>
+                               <span class="s1">global_shapes</span><span class="s3">, </span><span class="s1">dtypes)</span>
+</pre>
+</body>
+</html>

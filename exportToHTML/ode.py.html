@@ -1,0 +1,286 @@
+<html>
+<head>
+<title>ode.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6897bb;}
+.s5 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+ode.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2018 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s2">&quot;&quot;&quot;JAX-based Dormand-Prince ODE integration with adaptive stepsize. 
+ 
+Integrate systems of ordinary differential equations (ODEs) using the JAX 
+autograd/diff library and the Dormand-Prince method for adaptive integration 
+stepsize calculation. Provides improved integration accuracy over fixed 
+stepsize integration methods. 
+ 
+For details of the mixed 4th/5th order Runge-Kutta integration method, see 
+https://doi.org/10.1090/S0025-5718-1986-0815836-3 
+ 
+Adjoint algorithm based on Appendix C of https://arxiv.org/pdf/1806.07366.pdf 
+&quot;&quot;&quot;</span>
+
+
+<span class="s3">from </span><span class="s1">functools </span><span class="s3">import </span><span class="s1">partial</span>
+<span class="s3">import </span><span class="s1">operator </span><span class="s3">as </span><span class="s1">op</span>
+
+<span class="s3">import </span><span class="s1">jax</span>
+<span class="s3">import </span><span class="s1">jax.numpy </span><span class="s3">as </span><span class="s1">jnp</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">core</span>
+<span class="s3">from </span><span class="s1">jax </span><span class="s3">import </span><span class="s1">custom_derivatives</span>
+<span class="s3">from </span><span class="s1">jax </span><span class="s3">import </span><span class="s1">lax</span>
+<span class="s3">from </span><span class="s1">jax._src.numpy.util </span><span class="s3">import </span><span class="s1">promote_dtypes_inexact</span>
+<span class="s3">from </span><span class="s1">jax._src.util </span><span class="s3">import </span><span class="s1">safe_map</span><span class="s3">, </span><span class="s1">safe_zip</span>
+<span class="s3">from </span><span class="s1">jax.flatten_util </span><span class="s3">import </span><span class="s1">ravel_pytree</span>
+<span class="s3">from </span><span class="s1">jax.tree_util </span><span class="s3">import </span><span class="s1">tree_leaves</span><span class="s3">, </span><span class="s1">tree_map</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">linear_util </span><span class="s3">as </span><span class="s1">lu</span>
+
+<span class="s1">map = safe_map</span>
+<span class="s1">zip = safe_zip</span>
+
+
+<span class="s3">def </span><span class="s1">ravel_first_arg(f</span><span class="s3">, </span><span class="s1">unravel):</span>
+  <span class="s3">return </span><span class="s1">ravel_first_arg_(lu.wrap_init(f)</span><span class="s3">, </span><span class="s1">unravel).call_wrapped</span>
+
+<span class="s1">@lu.transformation</span>
+<span class="s3">def </span><span class="s1">ravel_first_arg_(unravel</span><span class="s3">, </span><span class="s1">y_flat</span><span class="s3">, </span><span class="s1">*args):</span>
+  <span class="s1">y = unravel(y_flat)</span>
+  <span class="s1">ans = </span><span class="s3">yield </span><span class="s1">(y</span><span class="s3">,</span><span class="s1">) + args</span><span class="s3">, </span><span class="s1">{}</span>
+  <span class="s1">ans_flat</span><span class="s3">, </span><span class="s1">_ = ravel_pytree(ans)</span>
+  <span class="s3">yield </span><span class="s1">ans_flat</span>
+
+<span class="s3">def </span><span class="s1">interp_fit_dopri(y0</span><span class="s3">, </span><span class="s1">y1</span><span class="s3">, </span><span class="s1">k</span><span class="s3">, </span><span class="s1">dt):</span>
+  <span class="s0"># Fit a polynomial to the results of a Runge-Kutta step.</span>
+  <span class="s1">dps_c_mid = jnp.array([</span>
+      <span class="s4">6025192743 </span><span class="s1">/ </span><span class="s4">30085553152 </span><span class="s1">/ </span><span class="s4">2</span><span class="s3">, </span><span class="s4">0</span><span class="s3">, </span><span class="s4">51252292925 </span><span class="s1">/ </span><span class="s4">65400821598 </span><span class="s1">/ </span><span class="s4">2</span><span class="s3">,</span>
+      <span class="s1">-</span><span class="s4">2691868925 </span><span class="s1">/ </span><span class="s4">45128329728 </span><span class="s1">/ </span><span class="s4">2</span><span class="s3">, </span><span class="s4">187940372067 </span><span class="s1">/ </span><span class="s4">1594534317056 </span><span class="s1">/ </span><span class="s4">2</span><span class="s3">,</span>
+      <span class="s1">-</span><span class="s4">1776094331 </span><span class="s1">/ </span><span class="s4">19743644256 </span><span class="s1">/ </span><span class="s4">2</span><span class="s3">, </span><span class="s4">11237099 </span><span class="s1">/ </span><span class="s4">235043384 </span><span class="s1">/ </span><span class="s4">2</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=y0.dtype)</span>
+  <span class="s1">y_mid = y0 + dt.astype(y0.dtype) * jnp.dot(dps_c_mid</span><span class="s3">, </span><span class="s1">k)</span>
+  <span class="s3">return </span><span class="s1">jnp.asarray(fit_4th_order_polynomial(y0</span><span class="s3">, </span><span class="s1">y1</span><span class="s3">, </span><span class="s1">y_mid</span><span class="s3">, </span><span class="s1">k[</span><span class="s4">0</span><span class="s1">]</span><span class="s3">, </span><span class="s1">k[-</span><span class="s4">1</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dt))</span>
+
+<span class="s3">def </span><span class="s1">fit_4th_order_polynomial(y0</span><span class="s3">, </span><span class="s1">y1</span><span class="s3">, </span><span class="s1">y_mid</span><span class="s3">, </span><span class="s1">dy0</span><span class="s3">, </span><span class="s1">dy1</span><span class="s3">, </span><span class="s1">dt):</span>
+  <span class="s1">dt = dt.astype(y0.dtype)</span>
+  <span class="s1">a = -</span><span class="s4">2.</span><span class="s1">*dt*dy0 + </span><span class="s4">2.</span><span class="s1">*dt*dy1 -  </span><span class="s4">8.</span><span class="s1">*y0 -  </span><span class="s4">8.</span><span class="s1">*y1 + </span><span class="s4">16.</span><span class="s1">*y_mid</span>
+  <span class="s1">b =  </span><span class="s4">5.</span><span class="s1">*dt*dy0 - </span><span class="s4">3.</span><span class="s1">*dt*dy1 + </span><span class="s4">18.</span><span class="s1">*y0 + </span><span class="s4">14.</span><span class="s1">*y1 - </span><span class="s4">32.</span><span class="s1">*y_mid</span>
+  <span class="s1">c = -</span><span class="s4">4.</span><span class="s1">*dt*dy0 +    dt*dy1 - </span><span class="s4">11.</span><span class="s1">*y0 -  </span><span class="s4">5.</span><span class="s1">*y1 + </span><span class="s4">16.</span><span class="s1">*y_mid</span>
+  <span class="s1">d = dt * dy0</span>
+  <span class="s1">e = y0</span>
+  <span class="s3">return </span><span class="s1">a</span><span class="s3">, </span><span class="s1">b</span><span class="s3">, </span><span class="s1">c</span><span class="s3">, </span><span class="s1">d</span><span class="s3">, </span><span class="s1">e</span>
+
+<span class="s3">def </span><span class="s1">initial_step_size(fun</span><span class="s3">, </span><span class="s1">t0</span><span class="s3">, </span><span class="s1">y0</span><span class="s3">, </span><span class="s1">order</span><span class="s3">, </span><span class="s1">rtol</span><span class="s3">, </span><span class="s1">atol</span><span class="s3">, </span><span class="s1">f0):</span>
+  <span class="s0"># Algorithm from:</span>
+  <span class="s0"># E. Hairer, S. P. Norsett G. Wanner,</span>
+  <span class="s0"># Solving Ordinary Differential Equations I: Nonstiff Problems, Sec. II.4.</span>
+  <span class="s1">y0</span><span class="s3">, </span><span class="s1">f0 = promote_dtypes_inexact(y0</span><span class="s3">, </span><span class="s1">f0)</span>
+  <span class="s1">dtype = y0.dtype</span>
+
+  <span class="s1">scale = atol + jnp.abs(y0) * rtol</span>
+  <span class="s1">d0 = jnp.linalg.norm(y0 / scale.astype(dtype))</span>
+  <span class="s1">d1 = jnp.linalg.norm(f0 / scale.astype(dtype))</span>
+
+  <span class="s1">h0 = jnp.where((d0 &lt; </span><span class="s4">1e-5</span><span class="s1">) | (d1 &lt; </span><span class="s4">1e-5</span><span class="s1">)</span><span class="s3">, </span><span class="s4">1e-6</span><span class="s3">, </span><span class="s4">0.01 </span><span class="s1">* d0 / d1)</span>
+  <span class="s1">y1 = y0 + h0.astype(dtype) * f0</span>
+  <span class="s1">f1 = fun(y1</span><span class="s3">, </span><span class="s1">t0 + h0)</span>
+  <span class="s1">d2 = jnp.linalg.norm((f1 - f0) / scale.astype(dtype)) / h0</span>
+
+  <span class="s1">h1 = jnp.where((d1 &lt;= </span><span class="s4">1e-15</span><span class="s1">) &amp; (d2 &lt;= </span><span class="s4">1e-15</span><span class="s1">)</span><span class="s3">,</span>
+                <span class="s1">jnp.maximum(</span><span class="s4">1e-6</span><span class="s3">, </span><span class="s1">h0 * </span><span class="s4">1e-3</span><span class="s1">)</span><span class="s3">,</span>
+                <span class="s1">(</span><span class="s4">0.01 </span><span class="s1">/ jnp.maximum(d1</span><span class="s3">, </span><span class="s1">d2)) ** (</span><span class="s4">1. </span><span class="s1">/ (order + </span><span class="s4">1.</span><span class="s1">)))</span>
+
+  <span class="s3">return </span><span class="s1">jnp.minimum(</span><span class="s4">100. </span><span class="s1">* h0</span><span class="s3">, </span><span class="s1">h1)</span>
+
+<span class="s3">def </span><span class="s1">runge_kutta_step(func</span><span class="s3">, </span><span class="s1">y0</span><span class="s3">, </span><span class="s1">f0</span><span class="s3">, </span><span class="s1">t0</span><span class="s3">, </span><span class="s1">dt):</span>
+  <span class="s0"># Dopri5 Butcher tableaux</span>
+  <span class="s1">alpha = jnp.array([</span><span class="s4">1 </span><span class="s1">/ </span><span class="s4">5</span><span class="s3">, </span><span class="s4">3 </span><span class="s1">/ </span><span class="s4">10</span><span class="s3">, </span><span class="s4">4 </span><span class="s1">/ </span><span class="s4">5</span><span class="s3">, </span><span class="s4">8 </span><span class="s1">/ </span><span class="s4">9</span><span class="s3">, </span><span class="s4">1.</span><span class="s3">, </span><span class="s4">1.</span><span class="s3">, </span><span class="s4">0</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=dt.dtype)</span>
+  <span class="s1">beta = jnp.array(</span>
+      <span class="s1">[[</span><span class="s4">1 </span><span class="s1">/ </span><span class="s4">5</span><span class="s3">, </span><span class="s4">0</span><span class="s3">, </span><span class="s4">0</span><span class="s3">, </span><span class="s4">0</span><span class="s3">, </span><span class="s4">0</span><span class="s3">, </span><span class="s4">0</span><span class="s3">, </span><span class="s4">0</span><span class="s1">]</span><span class="s3">, </span><span class="s1">[</span><span class="s4">3 </span><span class="s1">/ </span><span class="s4">40</span><span class="s3">, </span><span class="s4">9 </span><span class="s1">/ </span><span class="s4">40</span><span class="s3">, </span><span class="s4">0</span><span class="s3">, </span><span class="s4">0</span><span class="s3">, </span><span class="s4">0</span><span class="s3">, </span><span class="s4">0</span><span class="s3">, </span><span class="s4">0</span><span class="s1">]</span><span class="s3">,</span>
+       <span class="s1">[</span><span class="s4">44 </span><span class="s1">/ </span><span class="s4">45</span><span class="s3">, </span><span class="s1">-</span><span class="s4">56 </span><span class="s1">/ </span><span class="s4">15</span><span class="s3">, </span><span class="s4">32 </span><span class="s1">/ </span><span class="s4">9</span><span class="s3">, </span><span class="s4">0</span><span class="s3">, </span><span class="s4">0</span><span class="s3">, </span><span class="s4">0</span><span class="s3">, </span><span class="s4">0</span><span class="s1">]</span><span class="s3">,</span>
+       <span class="s1">[</span><span class="s4">19372 </span><span class="s1">/ </span><span class="s4">6561</span><span class="s3">, </span><span class="s1">-</span><span class="s4">25360 </span><span class="s1">/ </span><span class="s4">2187</span><span class="s3">, </span><span class="s4">64448 </span><span class="s1">/ </span><span class="s4">6561</span><span class="s3">, </span><span class="s1">-</span><span class="s4">212 </span><span class="s1">/ </span><span class="s4">729</span><span class="s3">, </span><span class="s4">0</span><span class="s3">, </span><span class="s4">0</span><span class="s3">, </span><span class="s4">0</span><span class="s1">]</span><span class="s3">,</span>
+       <span class="s1">[</span><span class="s4">9017 </span><span class="s1">/ </span><span class="s4">3168</span><span class="s3">, </span><span class="s1">-</span><span class="s4">355 </span><span class="s1">/ </span><span class="s4">33</span><span class="s3">, </span><span class="s4">46732 </span><span class="s1">/ </span><span class="s4">5247</span><span class="s3">, </span><span class="s4">49 </span><span class="s1">/ </span><span class="s4">176</span><span class="s3">, </span><span class="s1">-</span><span class="s4">5103 </span><span class="s1">/ </span><span class="s4">18656</span><span class="s3">, </span><span class="s4">0</span><span class="s3">, </span><span class="s4">0</span><span class="s1">]</span><span class="s3">,</span>
+       <span class="s1">[</span><span class="s4">35 </span><span class="s1">/ </span><span class="s4">384</span><span class="s3">, </span><span class="s4">0</span><span class="s3">, </span><span class="s4">500 </span><span class="s1">/ </span><span class="s4">1113</span><span class="s3">, </span><span class="s4">125 </span><span class="s1">/ </span><span class="s4">192</span><span class="s3">, </span><span class="s1">-</span><span class="s4">2187 </span><span class="s1">/ </span><span class="s4">6784</span><span class="s3">, </span><span class="s4">11 </span><span class="s1">/ </span><span class="s4">84</span><span class="s3">, </span><span class="s4">0</span><span class="s1">]]</span><span class="s3">,</span>
+      <span class="s1">dtype=f0.dtype)</span>
+  <span class="s1">c_sol = jnp.array(</span>
+      <span class="s1">[</span><span class="s4">35 </span><span class="s1">/ </span><span class="s4">384</span><span class="s3">, </span><span class="s4">0</span><span class="s3">, </span><span class="s4">500 </span><span class="s1">/ </span><span class="s4">1113</span><span class="s3">, </span><span class="s4">125 </span><span class="s1">/ </span><span class="s4">192</span><span class="s3">, </span><span class="s1">-</span><span class="s4">2187 </span><span class="s1">/ </span><span class="s4">6784</span><span class="s3">, </span><span class="s4">11 </span><span class="s1">/ </span><span class="s4">84</span><span class="s3">, </span><span class="s4">0</span><span class="s1">]</span><span class="s3">,</span>
+      <span class="s1">dtype=f0.dtype)</span>
+  <span class="s1">c_error = jnp.array([</span>
+      <span class="s4">35 </span><span class="s1">/ </span><span class="s4">384 </span><span class="s1">- </span><span class="s4">1951 </span><span class="s1">/ </span><span class="s4">21600</span><span class="s3">, </span><span class="s4">0</span><span class="s3">, </span><span class="s4">500 </span><span class="s1">/ </span><span class="s4">1113 </span><span class="s1">- </span><span class="s4">22642 </span><span class="s1">/ </span><span class="s4">50085</span><span class="s3">, </span><span class="s4">125 </span><span class="s1">/ </span><span class="s4">192 </span><span class="s1">-</span>
+      <span class="s4">451 </span><span class="s1">/ </span><span class="s4">720</span><span class="s3">, </span><span class="s1">-</span><span class="s4">2187 </span><span class="s1">/ </span><span class="s4">6784 </span><span class="s1">- -</span><span class="s4">12231 </span><span class="s1">/ </span><span class="s4">42400</span><span class="s3">, </span><span class="s4">11 </span><span class="s1">/ </span><span class="s4">84 </span><span class="s1">- </span><span class="s4">649 </span><span class="s1">/ </span><span class="s4">6300</span><span class="s3">, </span><span class="s1">-</span><span class="s4">1. </span><span class="s1">/ </span><span class="s4">60.</span>
+  <span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=f0.dtype)</span>
+
+  <span class="s3">def </span><span class="s1">body_fun(i</span><span class="s3">, </span><span class="s1">k):</span>
+    <span class="s1">ti = t0 + dt * alpha[i-</span><span class="s4">1</span><span class="s1">]</span>
+    <span class="s1">yi = y0 + dt.astype(f0.dtype) * jnp.dot(beta[i-</span><span class="s4">1</span><span class="s3">, </span><span class="s1">:]</span><span class="s3">, </span><span class="s1">k)</span>
+    <span class="s1">ft = func(yi</span><span class="s3">, </span><span class="s1">ti)</span>
+    <span class="s3">return </span><span class="s1">k.at[i</span><span class="s3">, </span><span class="s1">:].set(ft)</span>
+
+  <span class="s1">k = jnp.zeros((</span><span class="s4">7</span><span class="s3">, </span><span class="s1">f0.shape[</span><span class="s4">0</span><span class="s1">])</span><span class="s3">, </span><span class="s1">f0.dtype).at[</span><span class="s4">0</span><span class="s3">, </span><span class="s1">:].set(f0)</span>
+  <span class="s1">k = lax.fori_loop(</span><span class="s4">1</span><span class="s3">, </span><span class="s4">7</span><span class="s3">, </span><span class="s1">body_fun</span><span class="s3">, </span><span class="s1">k)</span>
+
+  <span class="s1">y1 = dt.astype(f0.dtype) * jnp.dot(c_sol</span><span class="s3">, </span><span class="s1">k) + y0</span>
+  <span class="s1">y1_error = dt.astype(f0.dtype) * jnp.dot(c_error</span><span class="s3">, </span><span class="s1">k)</span>
+  <span class="s1">f1 = k[-</span><span class="s4">1</span><span class="s1">]</span>
+  <span class="s3">return </span><span class="s1">y1</span><span class="s3">, </span><span class="s1">f1</span><span class="s3">, </span><span class="s1">y1_error</span><span class="s3">, </span><span class="s1">k</span>
+
+<span class="s3">def </span><span class="s1">abs2(x):</span>
+  <span class="s3">if </span><span class="s1">jnp.iscomplexobj(x):</span>
+    <span class="s3">return </span><span class="s1">x.real ** </span><span class="s4">2 </span><span class="s1">+ x.imag ** </span><span class="s4">2</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s3">return </span><span class="s1">x ** </span><span class="s4">2</span>
+
+<span class="s3">def </span><span class="s1">mean_error_ratio(error_estimate</span><span class="s3">, </span><span class="s1">rtol</span><span class="s3">, </span><span class="s1">atol</span><span class="s3">, </span><span class="s1">y0</span><span class="s3">, </span><span class="s1">y1):</span>
+  <span class="s1">err_tol = atol + rtol * jnp.maximum(jnp.abs(y0)</span><span class="s3">, </span><span class="s1">jnp.abs(y1))</span>
+  <span class="s1">err_ratio = error_estimate / err_tol.astype(error_estimate.dtype)</span>
+  <span class="s3">return </span><span class="s1">jnp.sqrt(jnp.mean(abs2(err_ratio)))</span>
+
+<span class="s3">def </span><span class="s1">optimal_step_size(last_step</span><span class="s3">, </span><span class="s1">mean_error_ratio</span><span class="s3">, </span><span class="s1">safety=</span><span class="s4">0.9</span><span class="s3">, </span><span class="s1">ifactor=</span><span class="s4">10.0</span><span class="s3">,</span>
+                      <span class="s1">dfactor=</span><span class="s4">0.2</span><span class="s3">, </span><span class="s1">order=</span><span class="s4">5.0</span><span class="s1">):</span>
+  <span class="s2">&quot;&quot;&quot;Compute optimal Runge-Kutta stepsize.&quot;&quot;&quot;</span>
+  <span class="s1">dfactor = jnp.where(mean_error_ratio &lt; </span><span class="s4">1</span><span class="s3">, </span><span class="s4">1.0</span><span class="s3">, </span><span class="s1">dfactor)</span>
+
+  <span class="s1">factor = jnp.minimum(ifactor</span><span class="s3">,</span>
+                      <span class="s1">jnp.maximum(mean_error_ratio**(-</span><span class="s4">1.0 </span><span class="s1">/ order) * safety</span><span class="s3">, </span><span class="s1">dfactor))</span>
+  <span class="s3">return </span><span class="s1">jnp.where(mean_error_ratio == </span><span class="s4">0</span><span class="s3">, </span><span class="s1">last_step * ifactor</span><span class="s3">, </span><span class="s1">last_step * factor)</span>
+
+<span class="s3">def </span><span class="s1">odeint(func</span><span class="s3">, </span><span class="s1">y0</span><span class="s3">, </span><span class="s1">t</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">rtol=</span><span class="s4">1.4e-8</span><span class="s3">, </span><span class="s1">atol=</span><span class="s4">1.4e-8</span><span class="s3">, </span><span class="s1">mxstep=jnp.inf</span><span class="s3">, </span><span class="s1">hmax=jnp.inf):</span>
+  <span class="s2">&quot;&quot;&quot;Adaptive stepsize (Dormand-Prince) Runge-Kutta odeint implementation. 
+ 
+  Args: 
+    func: function to evaluate the time derivative of the solution `y` at time 
+      `t` as `func(y, t, *args)`, producing the same shape/structure as `y0`. 
+    y0: array or pytree of arrays representing the initial value for the state. 
+    t: array of float times for evaluation, like `jnp.linspace(0., 10., 101)`, 
+      in which the values must be strictly increasing. 
+    *args: tuple of additional arguments for `func`, which must be arrays 
+      scalars, or (nested) standard Python containers (tuples, lists, dicts, 
+      namedtuples, i.e. pytrees) of those types. 
+    rtol: float, relative local error tolerance for solver (optional). 
+    atol: float, absolute local error tolerance for solver (optional). 
+    mxstep: int, maximum number of steps to take for each timepoint (optional). 
+    hmax: float, maximum step size allowed (optional). 
+ 
+  Returns: 
+    Values of the solution `y` (i.e. integrated system values) at each time 
+    point in `t`, represented as an array (or pytree of arrays) with the same 
+    shape/structure as `y0` except with a new leading axis of length `len(t)`. 
+  &quot;&quot;&quot;</span>
+  <span class="s3">for </span><span class="s1">arg </span><span class="s3">in </span><span class="s1">tree_leaves(args):</span>
+    <span class="s3">if not </span><span class="s1">isinstance(arg</span><span class="s3">, </span><span class="s1">core.Tracer) </span><span class="s3">and not </span><span class="s1">core.valid_jaxtype(arg):</span>
+      <span class="s3">raise </span><span class="s1">TypeError(</span>
+        <span class="s5">f&quot;The contents of odeint *args must be arrays or scalars, but got </span><span class="s3">{</span><span class="s1">arg</span><span class="s3">}</span><span class="s5">.&quot;</span><span class="s1">)</span>
+  <span class="s3">if not </span><span class="s1">jnp.issubdtype(t.dtype</span><span class="s3">, </span><span class="s1">jnp.floating):</span>
+    <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s5">f&quot;t must be an array of floats, but got </span><span class="s3">{</span><span class="s1">t</span><span class="s3">}</span><span class="s5">.&quot;</span><span class="s1">)</span>
+
+  <span class="s1">converted</span><span class="s3">, </span><span class="s1">consts = custom_derivatives.closure_convert(func</span><span class="s3">, </span><span class="s1">y0</span><span class="s3">, </span><span class="s1">t[</span><span class="s4">0</span><span class="s1">]</span><span class="s3">, </span><span class="s1">*args)</span>
+  <span class="s3">return </span><span class="s1">_odeint_wrapper(converted</span><span class="s3">, </span><span class="s1">rtol</span><span class="s3">, </span><span class="s1">atol</span><span class="s3">, </span><span class="s1">mxstep</span><span class="s3">, </span><span class="s1">hmax</span><span class="s3">, </span><span class="s1">y0</span><span class="s3">, </span><span class="s1">t</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">*consts)</span>
+
+<span class="s1">@partial(jax.jit</span><span class="s3">, </span><span class="s1">static_argnums=(</span><span class="s4">0</span><span class="s3">, </span><span class="s4">1</span><span class="s3">, </span><span class="s4">2</span><span class="s3">, </span><span class="s4">3</span><span class="s3">, </span><span class="s4">4</span><span class="s1">))</span>
+<span class="s3">def </span><span class="s1">_odeint_wrapper(func</span><span class="s3">, </span><span class="s1">rtol</span><span class="s3">, </span><span class="s1">atol</span><span class="s3">, </span><span class="s1">mxstep</span><span class="s3">, </span><span class="s1">hmax</span><span class="s3">, </span><span class="s1">y0</span><span class="s3">, </span><span class="s1">ts</span><span class="s3">, </span><span class="s1">*args):</span>
+  <span class="s1">y0</span><span class="s3">, </span><span class="s1">unravel = ravel_pytree(y0)</span>
+  <span class="s1">func = ravel_first_arg(func</span><span class="s3">, </span><span class="s1">unravel)</span>
+  <span class="s1">out = _odeint(func</span><span class="s3">, </span><span class="s1">rtol</span><span class="s3">, </span><span class="s1">atol</span><span class="s3">, </span><span class="s1">mxstep</span><span class="s3">, </span><span class="s1">hmax</span><span class="s3">, </span><span class="s1">y0</span><span class="s3">, </span><span class="s1">ts</span><span class="s3">, </span><span class="s1">*args)</span>
+  <span class="s3">return </span><span class="s1">jax.vmap(unravel)(out)</span>
+
+<span class="s1">@partial(jax.custom_vjp</span><span class="s3">, </span><span class="s1">nondiff_argnums=(</span><span class="s4">0</span><span class="s3">, </span><span class="s4">1</span><span class="s3">, </span><span class="s4">2</span><span class="s3">, </span><span class="s4">3</span><span class="s3">, </span><span class="s4">4</span><span class="s1">))</span>
+<span class="s3">def </span><span class="s1">_odeint(func</span><span class="s3">, </span><span class="s1">rtol</span><span class="s3">, </span><span class="s1">atol</span><span class="s3">, </span><span class="s1">mxstep</span><span class="s3">, </span><span class="s1">hmax</span><span class="s3">, </span><span class="s1">y0</span><span class="s3">, </span><span class="s1">ts</span><span class="s3">, </span><span class="s1">*args):</span>
+  <span class="s1">func_ = </span><span class="s3">lambda </span><span class="s1">y</span><span class="s3">, </span><span class="s1">t: func(y</span><span class="s3">, </span><span class="s1">t</span><span class="s3">, </span><span class="s1">*args)</span>
+
+  <span class="s3">def </span><span class="s1">scan_fun(carry</span><span class="s3">, </span><span class="s1">target_t):</span>
+
+    <span class="s3">def </span><span class="s1">cond_fun(state):</span>
+      <span class="s1">i</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">t</span><span class="s3">, </span><span class="s1">dt</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">_ = state</span>
+      <span class="s3">return </span><span class="s1">(t &lt; target_t) &amp; (i &lt; mxstep) &amp; (dt &gt; </span><span class="s4">0</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">body_fun(state):</span>
+      <span class="s1">i</span><span class="s3">, </span><span class="s1">y</span><span class="s3">, </span><span class="s1">f</span><span class="s3">, </span><span class="s1">t</span><span class="s3">, </span><span class="s1">dt</span><span class="s3">, </span><span class="s1">last_t</span><span class="s3">, </span><span class="s1">interp_coeff = state</span>
+      <span class="s1">next_y</span><span class="s3">, </span><span class="s1">next_f</span><span class="s3">, </span><span class="s1">next_y_error</span><span class="s3">, </span><span class="s1">k = runge_kutta_step(func_</span><span class="s3">, </span><span class="s1">y</span><span class="s3">, </span><span class="s1">f</span><span class="s3">, </span><span class="s1">t</span><span class="s3">, </span><span class="s1">dt)</span>
+      <span class="s1">next_t = t + dt</span>
+      <span class="s1">error_ratio = mean_error_ratio(next_y_error</span><span class="s3">, </span><span class="s1">rtol</span><span class="s3">, </span><span class="s1">atol</span><span class="s3">, </span><span class="s1">y</span><span class="s3">, </span><span class="s1">next_y)</span>
+      <span class="s1">new_interp_coeff = interp_fit_dopri(y</span><span class="s3">, </span><span class="s1">next_y</span><span class="s3">, </span><span class="s1">k</span><span class="s3">, </span><span class="s1">dt)</span>
+      <span class="s1">dt = jnp.clip(optimal_step_size(dt</span><span class="s3">, </span><span class="s1">error_ratio)</span><span class="s3">, </span><span class="s1">a_min=</span><span class="s4">0.</span><span class="s3">, </span><span class="s1">a_max=hmax)</span>
+
+      <span class="s1">new = [i + </span><span class="s4">1</span><span class="s3">, </span><span class="s1">next_y</span><span class="s3">, </span><span class="s1">next_f</span><span class="s3">, </span><span class="s1">next_t</span><span class="s3">, </span><span class="s1">dt</span><span class="s3">,      </span><span class="s1">t</span><span class="s3">, </span><span class="s1">new_interp_coeff]</span>
+      <span class="s1">old = [i + </span><span class="s4">1</span><span class="s3">,      </span><span class="s1">y</span><span class="s3">,      </span><span class="s1">f</span><span class="s3">,      </span><span class="s1">t</span><span class="s3">, </span><span class="s1">dt</span><span class="s3">, </span><span class="s1">last_t</span><span class="s3">,     </span><span class="s1">interp_coeff]</span>
+      <span class="s3">return </span><span class="s1">map(partial(jnp.where</span><span class="s3">, </span><span class="s1">error_ratio &lt;= </span><span class="s4">1.</span><span class="s1">)</span><span class="s3">, </span><span class="s1">new</span><span class="s3">, </span><span class="s1">old)</span>
+
+    <span class="s1">_</span><span class="s3">, </span><span class="s1">*carry = lax.while_loop(cond_fun</span><span class="s3">, </span><span class="s1">body_fun</span><span class="s3">, </span><span class="s1">[</span><span class="s4">0</span><span class="s1">] + carry)</span>
+    <span class="s1">_</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">t</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">last_t</span><span class="s3">, </span><span class="s1">interp_coeff = carry</span>
+    <span class="s1">relative_output_time = (target_t - last_t) / (t - last_t)</span>
+    <span class="s1">y_target = jnp.polyval(interp_coeff</span><span class="s3">, </span><span class="s1">relative_output_time.astype(interp_coeff.dtype))</span>
+    <span class="s3">return </span><span class="s1">carry</span><span class="s3">, </span><span class="s1">y_target</span>
+
+  <span class="s1">f0 = func_(y0</span><span class="s3">, </span><span class="s1">ts[</span><span class="s4">0</span><span class="s1">])</span>
+  <span class="s1">dt = jnp.clip(initial_step_size(func_</span><span class="s3">, </span><span class="s1">ts[</span><span class="s4">0</span><span class="s1">]</span><span class="s3">, </span><span class="s1">y0</span><span class="s3">, </span><span class="s4">4</span><span class="s3">, </span><span class="s1">rtol</span><span class="s3">, </span><span class="s1">atol</span><span class="s3">, </span><span class="s1">f0)</span><span class="s3">, </span><span class="s1">a_min=</span><span class="s4">0.</span><span class="s3">, </span><span class="s1">a_max=hmax)</span>
+  <span class="s1">interp_coeff = jnp.array([y0] * </span><span class="s4">5</span><span class="s1">)</span>
+  <span class="s1">init_carry = [y0</span><span class="s3">, </span><span class="s1">f0</span><span class="s3">, </span><span class="s1">ts[</span><span class="s4">0</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dt</span><span class="s3">, </span><span class="s1">ts[</span><span class="s4">0</span><span class="s1">]</span><span class="s3">, </span><span class="s1">interp_coeff]</span>
+  <span class="s1">_</span><span class="s3">, </span><span class="s1">ys = lax.scan(scan_fun</span><span class="s3">, </span><span class="s1">init_carry</span><span class="s3">, </span><span class="s1">ts[</span><span class="s4">1</span><span class="s1">:])</span>
+  <span class="s3">return </span><span class="s1">jnp.concatenate((y0[</span><span class="s3">None</span><span class="s1">]</span><span class="s3">, </span><span class="s1">ys))</span>
+
+<span class="s3">def </span><span class="s1">_odeint_fwd(func</span><span class="s3">, </span><span class="s1">rtol</span><span class="s3">, </span><span class="s1">atol</span><span class="s3">, </span><span class="s1">mxstep</span><span class="s3">, </span><span class="s1">hmax</span><span class="s3">, </span><span class="s1">y0</span><span class="s3">, </span><span class="s1">ts</span><span class="s3">, </span><span class="s1">*args):</span>
+  <span class="s1">ys = _odeint(func</span><span class="s3">, </span><span class="s1">rtol</span><span class="s3">, </span><span class="s1">atol</span><span class="s3">, </span><span class="s1">mxstep</span><span class="s3">, </span><span class="s1">hmax</span><span class="s3">, </span><span class="s1">y0</span><span class="s3">, </span><span class="s1">ts</span><span class="s3">, </span><span class="s1">*args)</span>
+  <span class="s3">return </span><span class="s1">ys</span><span class="s3">, </span><span class="s1">(ys</span><span class="s3">, </span><span class="s1">ts</span><span class="s3">, </span><span class="s1">args)</span>
+
+<span class="s3">def </span><span class="s1">_odeint_rev(func</span><span class="s3">, </span><span class="s1">rtol</span><span class="s3">, </span><span class="s1">atol</span><span class="s3">, </span><span class="s1">mxstep</span><span class="s3">, </span><span class="s1">hmax</span><span class="s3">, </span><span class="s1">res</span><span class="s3">, </span><span class="s1">g):</span>
+  <span class="s1">ys</span><span class="s3">, </span><span class="s1">ts</span><span class="s3">, </span><span class="s1">args = res</span>
+
+  <span class="s3">def </span><span class="s1">aug_dynamics(augmented_state</span><span class="s3">, </span><span class="s1">t</span><span class="s3">, </span><span class="s1">*args):</span>
+    <span class="s2">&quot;&quot;&quot;Original system augmented with vjp_y, vjp_t and vjp_args.&quot;&quot;&quot;</span>
+    <span class="s1">y</span><span class="s3">, </span><span class="s1">y_bar</span><span class="s3">, </span><span class="s1">*_ = augmented_state</span>
+    <span class="s0"># `t` here is negatice time, so we need to negate again to get back to</span>
+    <span class="s0"># normal time. See the `odeint` invocation in `scan_fun` below.</span>
+    <span class="s1">y_dot</span><span class="s3">, </span><span class="s1">vjpfun = jax.vjp(func</span><span class="s3">, </span><span class="s1">y</span><span class="s3">, </span><span class="s1">-t</span><span class="s3">, </span><span class="s1">*args)</span>
+    <span class="s3">return </span><span class="s1">(-y_dot</span><span class="s3">, </span><span class="s1">*vjpfun(y_bar))</span>
+
+  <span class="s1">y_bar = g[-</span><span class="s4">1</span><span class="s1">]</span>
+  <span class="s1">ts_bar = []</span>
+  <span class="s1">t0_bar = </span><span class="s4">0.</span>
+
+  <span class="s3">def </span><span class="s1">scan_fun(carry</span><span class="s3">, </span><span class="s1">i):</span>
+    <span class="s1">y_bar</span><span class="s3">, </span><span class="s1">t0_bar</span><span class="s3">, </span><span class="s1">args_bar = carry</span>
+    <span class="s0"># Compute effect of moving measurement time</span>
+    <span class="s0"># `t_bar` should not be complex as it represents time</span>
+    <span class="s1">t_bar = jnp.dot(func(ys[i]</span><span class="s3">, </span><span class="s1">ts[i]</span><span class="s3">, </span><span class="s1">*args)</span><span class="s3">, </span><span class="s1">g[i]).real</span>
+    <span class="s1">t0_bar = t0_bar - t_bar</span>
+    <span class="s0"># Run augmented system backwards to previous observation</span>
+    <span class="s1">_</span><span class="s3">, </span><span class="s1">y_bar</span><span class="s3">, </span><span class="s1">t0_bar</span><span class="s3">, </span><span class="s1">args_bar = odeint(</span>
+        <span class="s1">aug_dynamics</span><span class="s3">, </span><span class="s1">(ys[i]</span><span class="s3">, </span><span class="s1">y_bar</span><span class="s3">, </span><span class="s1">t0_bar</span><span class="s3">, </span><span class="s1">args_bar)</span><span class="s3">,</span>
+        <span class="s1">jnp.array([-ts[i]</span><span class="s3">, </span><span class="s1">-ts[i - </span><span class="s4">1</span><span class="s1">]])</span><span class="s3">,</span>
+        <span class="s1">*args</span><span class="s3">, </span><span class="s1">rtol=rtol</span><span class="s3">, </span><span class="s1">atol=atol</span><span class="s3">, </span><span class="s1">mxstep=mxstep</span><span class="s3">, </span><span class="s1">hmax=hmax)</span>
+    <span class="s1">y_bar</span><span class="s3">, </span><span class="s1">t0_bar</span><span class="s3">, </span><span class="s1">args_bar = tree_map(op.itemgetter(</span><span class="s4">1</span><span class="s1">)</span><span class="s3">, </span><span class="s1">(y_bar</span><span class="s3">, </span><span class="s1">t0_bar</span><span class="s3">, </span><span class="s1">args_bar))</span>
+    <span class="s0"># Add gradient from current output</span>
+    <span class="s1">y_bar = y_bar + g[i - </span><span class="s4">1</span><span class="s1">]</span>
+    <span class="s3">return </span><span class="s1">(y_bar</span><span class="s3">, </span><span class="s1">t0_bar</span><span class="s3">, </span><span class="s1">args_bar)</span><span class="s3">, </span><span class="s1">t_bar</span>
+
+  <span class="s1">init_carry = (g[-</span><span class="s4">1</span><span class="s1">]</span><span class="s3">, </span><span class="s4">0.</span><span class="s3">, </span><span class="s1">tree_map(jnp.zeros_like</span><span class="s3">, </span><span class="s1">args))</span>
+  <span class="s1">(y_bar</span><span class="s3">, </span><span class="s1">t0_bar</span><span class="s3">, </span><span class="s1">args_bar)</span><span class="s3">, </span><span class="s1">rev_ts_bar = lax.scan(</span>
+      <span class="s1">scan_fun</span><span class="s3">, </span><span class="s1">init_carry</span><span class="s3">, </span><span class="s1">jnp.arange(len(ts) - </span><span class="s4">1</span><span class="s3">, </span><span class="s4">0</span><span class="s3">, </span><span class="s1">-</span><span class="s4">1</span><span class="s1">))</span>
+  <span class="s1">ts_bar = jnp.concatenate([jnp.array([t0_bar])</span><span class="s3">, </span><span class="s1">rev_ts_bar[::-</span><span class="s4">1</span><span class="s1">]])</span>
+  <span class="s3">return </span><span class="s1">(y_bar</span><span class="s3">, </span><span class="s1">ts_bar</span><span class="s3">, </span><span class="s1">*args_bar)</span>
+
+<span class="s1">_odeint.defvjp(_odeint_fwd</span><span class="s3">, </span><span class="s1">_odeint_rev)</span>
+</pre>
+</body>
+</html>

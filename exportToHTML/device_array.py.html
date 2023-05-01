@@ -1,0 +1,366 @@
+<html>
+<head>
+<title>device_array.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #629755; font-style: italic;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+device_array.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2018 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s0"># On-device arrays.</span>
+
+<span class="s2">from </span><span class="s1">functools </span><span class="s2">import </span><span class="s1">partial</span><span class="s2">, </span><span class="s1">partialmethod</span>
+<span class="s2">import </span><span class="s1">math</span>
+<span class="s2">import </span><span class="s1">operator</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">(Any</span><span class="s2">, </span><span class="s1">List</span><span class="s2">, </span><span class="s1">Optional</span><span class="s2">, </span><span class="s1">Union)</span>
+<span class="s2">import </span><span class="s1">weakref</span>
+<span class="s2">import </span><span class="s1">warnings</span>
+
+<span class="s2">import </span><span class="s1">numpy </span><span class="s2">as </span><span class="s1">np</span>
+
+<span class="s2">import </span><span class="s1">jax</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">core</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">abstract_arrays</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">profiler</span>
+<span class="s2">from </span><span class="s1">jax._src.config </span><span class="s2">import </span><span class="s1">config</span>
+<span class="s2">from </span><span class="s1">jax._src.lib </span><span class="s2">import </span><span class="s1">xla_client </span><span class="s2">as </span><span class="s1">xc</span>
+<span class="s2">from </span><span class="s1">jax._src.typing </span><span class="s2">import </span><span class="s1">Array</span>
+
+<span class="s0">### device-persistent data</span>
+
+<span class="s1">xe = xc._xla</span>
+
+<span class="s1">Device = xc.Device</span>
+<span class="s1">Buffer = xe.Buffer</span>
+
+
+<span class="s2">def </span><span class="s1">_forward_method(attrname</span><span class="s2">, </span><span class="s1">self</span><span class="s2">, </span><span class="s1">fun</span><span class="s2">, </span><span class="s1">*args):</span>
+  <span class="s2">return </span><span class="s1">fun(getattr(self</span><span class="s2">, </span><span class="s1">attrname)</span><span class="s2">, </span><span class="s1">*args)</span>
+<span class="s1">_forward_to_value = partial(_forward_method</span><span class="s2">, </span><span class="s3">&quot;_value&quot;</span><span class="s1">)</span>
+
+
+<span class="s0"># The following is used for the type xc.Buffer or _DeviceArray.</span>
+<span class="s1">DeviceArrayProtocol = Any</span>
+<span class="s1">DeviceArray = xc.DeviceArrayBase</span>
+
+
+<span class="s2">def </span><span class="s1">make_device_array(</span>
+    <span class="s1">aval: core.ShapedArray</span><span class="s2">,</span>
+    <span class="s1">device: Optional[Device]</span><span class="s2">,</span>
+    <span class="s1">device_buffer: Buffer</span><span class="s2">,</span>
+<span class="s1">) -&gt; Union[Buffer</span><span class="s2">, </span><span class="s3">&quot;_DeviceArray&quot;</span><span class="s1">]:</span>
+  <span class="s4">&quot;&quot;&quot;Returns a DeviceArray implementation based on arguments. 
+ 
+  This is to be used only within JAX. It will return either a PythonDeviceArray 
+  or a C++ equivalent implementation. 
+  &quot;&quot;&quot;</span>
+
+  <span class="s2">if </span><span class="s1">isinstance(device_buffer</span><span class="s2">, </span><span class="s1">xc.Buffer):</span>
+
+    <span class="s2">if </span><span class="s1">device_buffer.aval == aval </span><span class="s2">and </span><span class="s1">device_buffer._device == device:</span>
+      <span class="s2">return </span><span class="s1">device_buffer</span>
+    <span class="s1">device_buffer = device_buffer.clone()</span>
+    <span class="s1">device_buffer._device = device</span>
+    <span class="s1">device_buffer.aval = aval</span>
+    <span class="s1">device_buffer.weak_type = aval.weak_type</span>
+    <span class="s2">return </span><span class="s1">device_buffer</span>
+
+  <span class="s2">return </span><span class="s1">_DeviceArray(aval</span><span class="s2">, </span><span class="s1">device</span><span class="s2">, </span><span class="s1">device_buffer)</span>
+
+
+<span class="s2">def </span><span class="s1">type_is_device_array(x):</span>
+  <span class="s4">&quot;&quot;&quot;Returns `True` if `x` is a non-sharded DeviceArray. 
+ 
+  Use this function instead of `type(x) is Devicearray`. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">type_x = type(x)</span>
+  <span class="s2">return </span><span class="s1">type_x </span><span class="s2">is </span><span class="s1">_DeviceArray </span><span class="s2">or </span><span class="s1">type_x </span><span class="s2">is </span><span class="s1">xc.Buffer</span>
+
+
+<span class="s2">def </span><span class="s1">device_array_supports_weakrefs():</span>
+  <span class="s2">try</span><span class="s1">:</span>
+    <span class="s1">weakref.ref(DeviceArray())</span>
+    <span class="s2">return True</span>
+  <span class="s2">except </span><span class="s1">TypeError:</span>
+    <span class="s2">return False</span>
+
+
+<span class="s2">class </span><span class="s1">_DeviceArray(DeviceArray):  </span><span class="s0"># type: ignore</span>
+  <span class="s4">&quot;&quot;&quot;A DeviceArray is an ndarray backed by a single device memory buffer.&quot;&quot;&quot;</span>
+  <span class="s0"># We don't subclass ndarray because that would open up a host of issues,</span>
+  <span class="s0"># but lax_numpy.py overrides isinstance behavior and attaches ndarray methods.</span>
+  <span class="s1">__slots__ = [</span>
+      <span class="s3">&quot;aval&quot;</span><span class="s2">, </span><span class="s3">&quot;device_buffer&quot;</span><span class="s2">, </span><span class="s3">&quot;_npy_value&quot;</span><span class="s2">, </span><span class="s3">&quot;_device&quot;</span><span class="s2">, </span><span class="s3">&quot;__weakref__&quot;</span>
+  <span class="s1">]</span>
+  <span class="s1">__array_priority__ = </span><span class="s5">100</span>
+
+  <span class="s0"># DeviceArray has methods that are dynamically populated in lax_numpy.py,</span>
+  <span class="s0"># and this annotation is needed to make pytype happy.</span>
+  <span class="s1">_HAS_DYNAMIC_ATTRIBUTES = </span><span class="s2">True</span>
+
+  <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">aval: core.ShapedArray</span><span class="s2">, </span><span class="s1">device: Optional[Device]</span><span class="s2">,</span>
+               <span class="s1">device_buffer: Buffer):</span>
+    <span class="s4">&quot;&quot;&quot;Initializer. 
+ 
+    Args: 
+      aval: The abstract value associated to this array (shape+dtype+weak_type). 
+      device:  The optional sticky device. See 
+        https://jax.readthedocs.io/en/latest/faq.html#controlling-data-and-computation-placement-on-devices 
+      device_buffer: The underlying buffer owning the on-device data. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">DeviceArray.__init__(self)</span>
+    <span class="s1">self.aval = aval</span>
+    <span class="s1">self.device_buffer = device_buffer</span>
+    <span class="s1">self._device = device</span>
+
+    <span class="s1">self._npy_value = </span><span class="s2">None</span>
+    <span class="s2">if </span><span class="s1">config.jax_enable_checks:</span>
+      <span class="s2">assert </span><span class="s1">type(aval) </span><span class="s2">is </span><span class="s1">core.ShapedArray</span>
+      <span class="s1">npy_value = self._value</span>
+      <span class="s2">assert </span><span class="s1">npy_value.dtype == aval.dtype </span><span class="s2">and </span><span class="s1">npy_value.shape == aval.shape</span><span class="s2">, </span><span class="s1">(</span>
+          <span class="s1">aval</span><span class="s2">, </span><span class="s1">npy_value.shape</span><span class="s2">, </span><span class="s1">npy_value.dtype)</span>
+      <span class="s2">assert </span><span class="s1">(device </span><span class="s2">is None</span><span class="s1">) </span><span class="s2">or </span><span class="s1">device </span><span class="s2">is </span><span class="s1">device_buffer.device()</span>
+
+
+  <span class="s2">def </span><span class="s1">_check_if_deleted(self):</span>
+    <span class="s2">if </span><span class="s1">self.device_buffer </span><span class="s2">is </span><span class="s1">deleted_buffer:</span>
+      <span class="s2">raise </span><span class="s1">RuntimeError(</span><span class="s3">&quot;DeviceArray has been deleted.&quot;</span><span class="s1">)</span>
+
+  <span class="s1">@profiler.annotate_function</span>
+  <span class="s2">def </span><span class="s1">block_until_ready(self):</span>
+    <span class="s4">&quot;&quot;&quot;Blocks the caller until the buffer's value has been computed on device. 
+ 
+    This method is mostly useful for timing microbenchmarks that wish to 
+    time how long a computation takes, without transferring the result back 
+    to the host. 
+ 
+    Returns the buffer object (`self`). 
+    &quot;&quot;&quot;</span>
+    <span class="s1">self._check_if_deleted()</span>
+    <span class="s1">self.device_buffer.block_until_ready()</span>
+    <span class="s2">return </span><span class="s1">self</span>
+
+  <span class="s1">@property</span>
+  <span class="s2">def </span><span class="s1">_value(self):</span>
+    <span class="s1">self._check_if_deleted()</span>
+    <span class="s2">if </span><span class="s1">self._npy_value </span><span class="s2">is None</span><span class="s1">:</span>
+      <span class="s1">self._npy_value = np.asarray(self.device_buffer)  </span><span class="s0"># pytype: disable=attribute-error  # bind-properties</span>
+      <span class="s1">self._npy_value.flags.writeable = </span><span class="s2">False</span>
+    <span class="s2">return </span><span class="s1">self._npy_value</span>
+
+  <span class="s1">@property</span>
+  <span class="s2">def </span><span class="s1">shape(self):</span>
+    <span class="s2">return </span><span class="s1">self.aval.shape</span>
+
+  <span class="s1">@property</span>
+  <span class="s2">def </span><span class="s1">dtype(self):</span>
+    <span class="s2">return </span><span class="s1">self.aval.dtype</span>
+
+  <span class="s1">@property</span>
+  <span class="s2">def </span><span class="s1">size(self):</span>
+    <span class="s2">return </span><span class="s1">math.prod(self.aval.shape)</span>
+
+  <span class="s1">@property</span>
+  <span class="s2">def </span><span class="s1">ndim(self):</span>
+    <span class="s2">return </span><span class="s1">len(self.aval.shape)</span>
+
+  <span class="s2">def </span><span class="s1">device(self):</span>
+    <span class="s1">self._check_if_deleted()</span>
+    <span class="s2">return </span><span class="s1">self.device_buffer.device()  </span><span class="s0"># pytype: disable=attribute-error</span>
+
+  <span class="s2">def </span><span class="s1">copy_to_host_async(self):</span>
+    <span class="s4">&quot;&quot;&quot;Requests a copy of the buffer to the host.&quot;&quot;&quot;</span>
+    <span class="s1">self._check_if_deleted()</span>
+    <span class="s2">if </span><span class="s1">self._npy_value </span><span class="s2">is None</span><span class="s1">:</span>
+      <span class="s1">self.device_buffer.copy_to_host_async()  </span><span class="s0"># pytype: disable=attribute-error</span>
+
+  <span class="s2">def </span><span class="s1">unsafe_buffer_pointer(self):</span>
+    <span class="s1">self._check_if_deleted()</span>
+    <span class="s2">return </span><span class="s1">self.device_buffer.unsafe_buffer_pointer()  </span><span class="s0"># pytype: disable=attribute-error</span>
+
+  <span class="s2">def </span><span class="s1">delete(self):</span>
+    <span class="s4">&quot;&quot;&quot;Deletes the device array and any cached copy on the host. 
+ 
+    It is an error to access the contents of a `DeviceArray` after it has 
+    been deleted. 
+ 
+    Use of this method is optional; device buffers will be reclaimed 
+    automatically by Python when a DeviceArray object is garbage collected. 
+    However, it is sometimes useful to have more explicit control over the 
+    time of deletion. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">self.device_buffer.delete()  </span><span class="s0"># pytype: disable=attribute-error</span>
+    <span class="s1">self.device_buffer = deleted_buffer</span>
+    <span class="s1">self._npy_value = </span><span class="s2">None</span>
+
+  <span class="s1">@property</span>
+  <span class="s2">def </span><span class="s1">__cuda_array_interface__(self):</span>
+    <span class="s2">return </span><span class="s1">self.device_buffer.__cuda_array_interface__  </span><span class="s0"># pytype: disable=attribute-error  # bind-properties</span>
+
+
+<span class="s0"># Adding methods dynamically to both _DeviceArray and xc.Buffer</span>
+<span class="s0"># pylint: disable=protected-access</span>
+<span class="s2">for </span><span class="s1">device_array </span><span class="s2">in </span><span class="s1">[DeviceArray]:</span>
+
+  <span class="s2">def </span><span class="s1">__repr__(self):</span>
+    <span class="s1">line_width = np.get_printoptions()[</span><span class="s3">&quot;linewidth&quot;</span><span class="s1">]</span>
+    <span class="s1">prefix = </span><span class="s3">'{}('</span><span class="s1">.format(self.__class__.__name__.lstrip(</span><span class="s3">'_'</span><span class="s1">))</span>
+    <span class="s1">s = np.array2string(self._value</span><span class="s2">, </span><span class="s1">prefix=prefix</span><span class="s2">, </span><span class="s1">suffix=</span><span class="s3">','</span><span class="s2">,</span>
+                        <span class="s1">separator=</span><span class="s3">', '</span><span class="s2">, </span><span class="s1">max_line_width=line_width)</span>
+    <span class="s2">if </span><span class="s1">self.aval </span><span class="s2">is not None and </span><span class="s1">self.aval.weak_type:</span>
+      <span class="s1">dtype_str = </span><span class="s3">f'dtype=</span><span class="s2">{</span><span class="s1">self.dtype.name</span><span class="s2">}</span><span class="s3">, weak_type=True)'</span>
+    <span class="s2">else</span><span class="s1">:</span>
+      <span class="s1">dtype_str = </span><span class="s3">f'dtype=</span><span class="s2">{</span><span class="s1">self.dtype.name</span><span class="s2">}</span><span class="s3">)'</span>
+    <span class="s1">last_line_len = len(s) - s.rfind(</span><span class="s3">'</span><span class="s2">\n</span><span class="s3">'</span><span class="s1">) + </span><span class="s5">1</span>
+    <span class="s1">sep = </span><span class="s3">' '</span>
+    <span class="s2">if </span><span class="s1">last_line_len + len(dtype_str) + </span><span class="s5">1 </span><span class="s1">&gt; line_width:</span>
+      <span class="s1">sep = </span><span class="s3">' ' </span><span class="s1">* len(prefix)</span>
+    <span class="s2">return </span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">prefix</span><span class="s2">}{</span><span class="s1">s</span><span class="s2">}</span><span class="s3">,</span><span class="s2">{</span><span class="s1">sep</span><span class="s2">}{</span><span class="s1">dtype_str</span><span class="s2">}</span><span class="s3">&quot;</span>
+
+  <span class="s1">setattr(device_array</span><span class="s2">, </span><span class="s3">&quot;__repr__&quot;</span><span class="s2">, </span><span class="s1">__repr__)</span>
+
+  <span class="s2">def </span><span class="s1">__len__(self):</span>
+    <span class="s2">try</span><span class="s1">:</span>
+      <span class="s2">return </span><span class="s1">self.aval.shape[</span><span class="s5">0</span><span class="s1">]</span>
+    <span class="s2">except </span><span class="s1">IndexError </span><span class="s2">as </span><span class="s1">err:</span>
+      <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;len() of unsized object&quot;</span><span class="s1">) </span><span class="s2">from </span><span class="s1">err  </span><span class="s0"># same as numpy error</span>
+
+  <span class="s1">setattr(device_array</span><span class="s2">, </span><span class="s3">&quot;__len__&quot;</span><span class="s2">, </span><span class="s1">__len__)</span>
+
+  <span class="s2">def </span><span class="s1">__iter__(self):</span>
+    <span class="s2">if </span><span class="s1">self.ndim == </span><span class="s5">0</span><span class="s1">:</span>
+      <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;iteration over a 0-d array&quot;</span><span class="s1">)  </span><span class="s0"># same as numpy error</span>
+    <span class="s2">else</span><span class="s1">:</span>
+      <span class="s2">return </span><span class="s1">(sl </span><span class="s2">for </span><span class="s1">chunk </span><span class="s2">in </span><span class="s1">self._chunk_iter(</span><span class="s5">100</span><span class="s1">) </span><span class="s2">for </span><span class="s1">sl </span><span class="s2">in </span><span class="s1">chunk._unstack())</span>
+
+  <span class="s1">setattr(device_array</span><span class="s2">, </span><span class="s3">&quot;__iter__&quot;</span><span class="s2">, </span><span class="s1">__iter__)</span>
+
+  <span class="s2">def </span><span class="s1">__reversed__(self):</span>
+    <span class="s2">return </span><span class="s1">iter(self[::-</span><span class="s5">1</span><span class="s1">])</span>
+
+  <span class="s1">setattr(device_array</span><span class="s2">, </span><span class="s3">&quot;__reversed__&quot;</span><span class="s2">, </span><span class="s1">__reversed__)</span>
+
+  <span class="s2">def </span><span class="s1">__format__(self</span><span class="s2">, </span><span class="s1">format_spec):</span>
+    <span class="s0"># Simulates behavior of https://github.com/numpy/numpy/pull/9883</span>
+    <span class="s2">if </span><span class="s1">self.ndim == </span><span class="s5">0</span><span class="s1">:</span>
+      <span class="s2">return </span><span class="s1">format(self._value[()]</span><span class="s2">, </span><span class="s1">format_spec)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+      <span class="s2">return </span><span class="s1">format(self._value</span><span class="s2">, </span><span class="s1">format_spec)</span>
+
+  <span class="s1">setattr(device_array</span><span class="s2">, </span><span class="s3">&quot;__format__&quot;</span><span class="s2">, </span><span class="s1">__format__)</span>
+
+  <span class="s2">def </span><span class="s1">__array__(self</span><span class="s2">, </span><span class="s1">dtype=</span><span class="s2">None, </span><span class="s1">context=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s2">return </span><span class="s1">np.asarray(self._value</span><span class="s2">, </span><span class="s1">dtype=dtype)</span>
+
+  <span class="s1">setattr(device_array</span><span class="s2">, </span><span class="s3">&quot;__array__&quot;</span><span class="s2">, </span><span class="s1">__array__)</span>
+
+  <span class="s0"># TODO(phawkins): delete this code path after the deprecation for .to_py()</span>
+  <span class="s0"># expires in Nov 2022.</span>
+  <span class="s2">def </span><span class="s1">to_py(self):</span>
+    <span class="s1">warnings.warn(</span><span class="s3">&quot;The .to_py() method on JAX arrays is deprecated. Use &quot;</span>
+                  <span class="s3">&quot;np.asarray(...) instead.&quot;</span><span class="s2">, </span><span class="s1">category=FutureWarning)</span>
+    <span class="s2">return </span><span class="s1">np.asarray(self._value)</span>
+
+  <span class="s1">setattr(device_array</span><span class="s2">, </span><span class="s3">&quot;to_py&quot;</span><span class="s2">, </span><span class="s1">to_py)</span>
+
+  <span class="s2">def </span><span class="s1">__dlpack__(self):</span>
+    <span class="s2">from </span><span class="s1">jax.dlpack </span><span class="s2">import </span><span class="s1">to_dlpack  </span><span class="s0"># pylint: disable=g-import-not-at-top</span>
+    <span class="s2">return </span><span class="s1">to_dlpack(self)</span>
+
+  <span class="s1">setattr(device_array</span><span class="s2">, </span><span class="s3">&quot;__dlpack__&quot;</span><span class="s2">, </span><span class="s1">__dlpack__)</span>
+
+  <span class="s2">def </span><span class="s1">__reduce__(self):</span>
+    <span class="s1">fun</span><span class="s2">, </span><span class="s1">args</span><span class="s2">, </span><span class="s1">arr_state = self._value.__reduce__()</span>
+    <span class="s1">aval_state = {</span><span class="s3">'weak_type'</span><span class="s1">: self.aval.weak_type</span><span class="s2">,</span>
+                  <span class="s3">'named_shape'</span><span class="s1">: self.aval.named_shape}</span>
+    <span class="s2">return </span><span class="s1">(reconstruct_device_array</span><span class="s2">, </span><span class="s1">(fun</span><span class="s2">, </span><span class="s1">args</span><span class="s2">, </span><span class="s1">arr_state</span><span class="s2">, </span><span class="s1">aval_state))</span>
+
+  <span class="s1">setattr(device_array</span><span class="s2">, </span><span class="s3">&quot;__reduce__&quot;</span><span class="s2">, </span><span class="s1">__reduce__)</span>
+
+  <span class="s2">def </span><span class="s1">sharding(self):</span>
+    <span class="s2">return </span><span class="s1">jax.sharding.SingleDeviceSharding(self.device())</span>
+
+  <span class="s1">setattr(device_array</span><span class="s2">, </span><span class="s3">&quot;sharding&quot;</span><span class="s2">, </span><span class="s1">property(sharding))</span>
+
+  <span class="s2">def </span><span class="s1">addressable_shards(self):</span>
+    <span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">array</span>
+    <span class="s2">return </span><span class="s1">[array.Shard(self.device()</span><span class="s2">, </span><span class="s1">self.sharding</span><span class="s2">, </span><span class="s1">self.shape</span><span class="s2">,</span>
+                        <span class="s1">self.device_buffer)]</span>
+
+  <span class="s1">setattr(device_array</span><span class="s2">, </span><span class="s3">&quot;addressable_shards&quot;</span><span class="s2">, </span><span class="s1">property(addressable_shards))</span>
+
+  <span class="s1">setattr(device_array</span><span class="s2">, </span><span class="s3">&quot;__str__&quot;</span><span class="s2">, </span><span class="s1">partialmethod(_forward_to_value</span><span class="s2">, </span><span class="s1">str))</span>
+  <span class="s1">setattr(device_array</span><span class="s2">, </span><span class="s3">&quot;__bool__&quot;</span><span class="s2">, </span><span class="s1">partialmethod(_forward_to_value</span><span class="s2">, </span><span class="s1">bool))</span>
+  <span class="s1">setattr(device_array</span><span class="s2">, </span><span class="s3">&quot;__nonzero__&quot;</span><span class="s2">, </span><span class="s1">partialmethod(_forward_to_value</span><span class="s2">, </span><span class="s1">bool))</span>
+  <span class="s1">setattr(device_array</span><span class="s2">, </span><span class="s3">&quot;__float__&quot;</span><span class="s2">, lambda </span><span class="s1">self: self._value.__float__())</span>
+  <span class="s1">setattr(device_array</span><span class="s2">, </span><span class="s3">&quot;__int__&quot;</span><span class="s2">, lambda </span><span class="s1">self: self._value.__int__())</span>
+  <span class="s1">setattr(device_array</span><span class="s2">, </span><span class="s3">&quot;__complex__&quot;</span><span class="s2">, lambda </span><span class="s1">self: self._value.__complex__())</span>
+  <span class="s1">setattr(device_array</span><span class="s2">, </span><span class="s3">&quot;__hex__&quot;</span><span class="s2">, </span><span class="s1">partialmethod(_forward_to_value</span><span class="s2">, </span><span class="s1">hex))</span>
+  <span class="s1">setattr(device_array</span><span class="s2">, </span><span class="s3">&quot;__oct__&quot;</span><span class="s2">, </span><span class="s1">partialmethod(_forward_to_value</span><span class="s2">, </span><span class="s1">oct))</span>
+  <span class="s1">setattr(device_array</span><span class="s2">, </span><span class="s3">&quot;__index__&quot;</span><span class="s2">, </span><span class="s1">partialmethod(_forward_to_value</span><span class="s2">,</span>
+                                                   <span class="s1">operator.index))</span>
+  <span class="s1">to_bytes = </span><span class="s2">lambda </span><span class="s1">self</span><span class="s2">, </span><span class="s1">order=</span><span class="s3">&quot;C&quot;</span><span class="s1">: self._value.tobytes(order)</span>
+  <span class="s1">setattr(device_array</span><span class="s2">, </span><span class="s3">&quot;tobytes&quot;</span><span class="s2">, </span><span class="s1">to_bytes)</span>
+  <span class="s2">del </span><span class="s1">to_bytes</span>
+  <span class="s1">setattr(device_array</span><span class="s2">, </span><span class="s3">&quot;tolist&quot;</span><span class="s2">, lambda </span><span class="s1">self: self._value.tolist())</span>
+
+  <span class="s0"># explicitly set to be unhashable.</span>
+  <span class="s1">setattr(device_array</span><span class="s2">, </span><span class="s3">&quot;__hash__&quot;</span><span class="s2">, None</span><span class="s1">)</span>
+
+  <span class="s0"># clobbered when jax.numpy is imported, but useful in tests</span>
+  <span class="s1">setattr(device_array</span><span class="s2">, </span><span class="s3">&quot;__eq__&quot;</span><span class="s2">, lambda </span><span class="s1">self</span><span class="s2">, </span><span class="s1">other: self._value == other)</span>
+
+  <span class="s0"># The following methods are dynamically overridden in lax_numpy.py.</span>
+  <span class="s2">def </span><span class="s1">raise_not_implemented():</span>
+    <span class="s2">raise </span><span class="s1">NotImplementedError</span>
+
+  <span class="s1">setattr(device_array</span><span class="s2">, </span><span class="s3">&quot;__getitem__&quot;</span><span class="s2">, lambda </span><span class="s1">self</span><span class="s2">, </span><span class="s1">i: raise_not_implemented())</span>
+<span class="s0"># pylint: enable=protected-access</span>
+
+
+<span class="s2">def </span><span class="s1">reconstruct_device_array(fun</span><span class="s2">, </span><span class="s1">args</span><span class="s2">, </span><span class="s1">arr_state</span><span class="s2">, </span><span class="s1">aval_state):</span>
+  <span class="s4">&quot;&quot;&quot;Method to reconstruct a device array from a serialized state.&quot;&quot;&quot;</span>
+  <span class="s1">np_value = fun(*args)</span>
+  <span class="s1">np_value.__setstate__(arr_state)</span>
+  <span class="s1">jnp_value = jax.device_put(np_value)</span>
+  <span class="s1">jnp_value.aval = jnp_value.aval.update(**aval_state)</span>
+  <span class="s2">return </span><span class="s1">jnp_value</span>
+
+
+<span class="s2">class </span><span class="s1">DeletedBuffer(object): </span><span class="s2">pass</span>
+<span class="s1">deleted_buffer = DeletedBuffer()</span>
+
+
+<span class="s1">Array.register(DeviceArray)</span>
+<span class="s1">device_array_types: List[type] = [xc.Buffer</span><span class="s2">, </span><span class="s1">_DeviceArray]</span>
+<span class="s2">for </span><span class="s1">_device_array </span><span class="s2">in </span><span class="s1">device_array_types:</span>
+  <span class="s1">core.literalable_types.add(_device_array)</span>
+  <span class="s1">core.pytype_aval_mappings[_device_array] = abstract_arrays.canonical_concrete_aval</span>
+  <span class="s1">Array.register(_device_array)</span>
+</pre>
+</body>
+</html>

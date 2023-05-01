@@ -1,0 +1,361 @@
+<html>
+<head>
+<title>multihost_utils.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+multihost_utils.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2021 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+<span class="s2">&quot;&quot;&quot;Utilities for synchronizing and communication across multiple hosts.&quot;&quot;&quot;</span>
+
+<span class="s3">import </span><span class="s1">functools</span>
+<span class="s3">import </span><span class="s1">itertools </span><span class="s3">as </span><span class="s1">it</span>
+<span class="s3">from </span><span class="s1">typing </span><span class="s3">import </span><span class="s1">Optional</span>
+<span class="s3">import </span><span class="s1">zlib</span>
+
+<span class="s3">from </span><span class="s1">typing </span><span class="s3">import </span><span class="s1">Any</span>
+<span class="s3">import </span><span class="s1">jax</span>
+<span class="s3">from </span><span class="s1">jax.tree_util </span><span class="s3">import </span><span class="s1">tree_flatten</span><span class="s3">, </span><span class="s1">tree_map</span><span class="s3">, </span><span class="s1">tree_unflatten</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">core</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">dispatch</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">array</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">sharding_impls</span>
+<span class="s3">from </span><span class="s1">jax._src.interpreters </span><span class="s3">import </span><span class="s1">pxla</span>
+<span class="s3">from </span><span class="s1">jax.interpreters </span><span class="s3">import </span><span class="s1">xla</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">pjit </span><span class="s3">as </span><span class="s1">pjit_lib</span>
+<span class="s3">from </span><span class="s1">jax.experimental.pjit </span><span class="s3">import </span><span class="s1">pjit</span>
+<span class="s3">from </span><span class="s1">jax.sharding </span><span class="s3">import </span><span class="s1">PartitionSpec </span><span class="s3">as </span><span class="s1">P</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">distributed</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">config </span><span class="s3">as </span><span class="s1">config_internal</span>
+<span class="s3">import </span><span class="s1">numpy </span><span class="s3">as </span><span class="s1">np</span>
+
+
+<span class="s0"># This needs to be top-level for the jax compilation cache.</span>
+<span class="s1">@functools.partial(jax.pmap</span><span class="s3">, </span><span class="s1">axis_name=</span><span class="s4">'hosts'</span><span class="s1">)</span>
+<span class="s3">def </span><span class="s1">_psum(x: Any) -&gt; Any:</span>
+  <span class="s3">return </span><span class="s1">jax.lax.psum(x</span><span class="s3">, </span><span class="s4">'hosts'</span><span class="s1">)</span>
+
+
+<span class="s3">def </span><span class="s1">broadcast_one_to_all(in_tree: Any</span><span class="s3">, </span><span class="s1">is_source: Optional[bool] = </span><span class="s3">None</span><span class="s1">) -&gt; Any:</span>
+  <span class="s2">&quot;&quot;&quot;Broadcast data from a source host (host 0 by default) to all other hosts. 
+ 
+  Args: 
+    in_tree: pytree of arrays - each array *must* have the same shape across the 
+      hosts. 
+    is_source: optional bool denoting whether the caller is the source. Only 
+      'source host' will contribute the data for the broadcast. If None, then 
+      host 0 is used. 
+ 
+  Returns: 
+    A pytree matching in_tree where the leaves now all contain the data from the 
+    first host. 
+  &quot;&quot;&quot;</span>
+  <span class="s3">if </span><span class="s1">is_source </span><span class="s3">is None</span><span class="s1">:</span>
+    <span class="s1">is_source = jax.process_index() == </span><span class="s5">0</span>
+
+  <span class="s3">def </span><span class="s1">pre_pmap(x):</span>
+    <span class="s3">if </span><span class="s1">is_source:</span>
+      <span class="s3">return </span><span class="s1">np.concatenate([</span>
+          <span class="s1">x[</span><span class="s3">None, </span><span class="s1">...]</span><span class="s3">,</span>
+          <span class="s1">np.repeat([np.zeros_like(x)]</span><span class="s3">,</span>
+                    <span class="s1">jax.local_device_count() - </span><span class="s5">1</span><span class="s3">, </span><span class="s5">0</span><span class="s1">)</span>
+      <span class="s1">])</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s3">return </span><span class="s1">np.repeat([np.zeros_like(x)]</span><span class="s3">, </span><span class="s1">jax.local_device_count()</span><span class="s3">, </span><span class="s5">0</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">post_pmap(x):</span>
+    <span class="s3">return </span><span class="s1">jax.device_get(x)[</span><span class="s5">0</span><span class="s1">]</span>
+
+  <span class="s1">in_tree = jax.tree_util.tree_map(pre_pmap</span><span class="s3">, </span><span class="s1">in_tree)</span>
+  <span class="s1">in_tree = jax.device_get(_psum(in_tree))</span>
+  <span class="s3">return </span><span class="s1">jax.tree_util.tree_map(post_pmap</span><span class="s3">, </span><span class="s1">in_tree)</span>
+
+
+<span class="s3">def </span><span class="s1">sync_global_devices(name: str):</span>
+  <span class="s2">&quot;&quot;&quot;Creates a barrier across all hosts/devices.&quot;&quot;&quot;</span>
+  <span class="s1">h = np.uint32(zlib.crc32(name.encode()))</span>
+  <span class="s1">assert_equal(h</span><span class="s3">, </span><span class="s4">f&quot;sync_global_devices name mismatch ('</span><span class="s3">{</span><span class="s1">name</span><span class="s3">}</span><span class="s4">')&quot;</span><span class="s1">)</span>
+
+
+<span class="s0"># Identity function is at the top level so that `process_allgather` doesn't</span>
+<span class="s0"># recompile on every invocation.</span>
+<span class="s3">def </span><span class="s1">_identity_fn(x):</span>
+  <span class="s3">return </span><span class="s1">x</span>
+
+
+<span class="s3">def </span><span class="s1">_handle_array_process_allgather(inp</span><span class="s3">, </span><span class="s1">tiled):</span>
+  <span class="s3">if </span><span class="s1">isinstance(inp</span><span class="s3">, </span><span class="s1">array.ArrayImpl) </span><span class="s3">and not </span><span class="s1">inp.is_fully_addressable:</span>
+    <span class="s1">reps = sharding_impls.GSPMDSharding(</span>
+        <span class="s1">inp.sharding._device_assignment</span><span class="s3">,</span>
+        <span class="s1">sharding_impls.get_replicated_op_sharding())</span>
+    <span class="s1">out = pjit(_identity_fn</span><span class="s3">, </span><span class="s1">out_shardings=reps)(inp)</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s0"># All inputs here will be fully addressable.</span>
+    <span class="s3">if </span><span class="s1">jax.process_count() == </span><span class="s5">1</span><span class="s1">:</span>
+      <span class="s3">return </span><span class="s1">np.asarray(inp)</span>
+
+    <span class="s1">devices = np.array(jax.devices()).reshape(jax.process_count()</span><span class="s3">,</span>
+                                              <span class="s1">jax.local_device_count())</span>
+    <span class="s1">global_mesh = jax.sharding.Mesh(devices</span><span class="s3">, </span><span class="s1">(</span><span class="s4">'processes'</span><span class="s3">, </span><span class="s4">'local_devices'</span><span class="s1">))</span>
+    <span class="s1">pspec = P(</span><span class="s4">'processes'</span><span class="s1">)</span>
+    <span class="s1">s = jax.sharding.NamedSharding(global_mesh</span><span class="s3">, </span><span class="s1">pspec)</span>
+
+    <span class="s1">host_np_arr = np.asarray(inp)</span>
+    <span class="s3">if </span><span class="s1">host_np_arr.ndim == </span><span class="s5">0 </span><span class="s3">or not </span><span class="s1">tiled:</span>
+      <span class="s1">host_np_arr = np.expand_dims(host_np_arr</span><span class="s3">, </span><span class="s1">axis=</span><span class="s5">0</span><span class="s1">)</span>
+
+    <span class="s1">aval = core.ShapedArray(host_np_arr.shape</span><span class="s3">, </span><span class="s1">host_np_arr.dtype)</span>
+    <span class="s1">global_aval = pxla.mesh_local_to_global(</span>
+        <span class="s1">global_mesh</span><span class="s3">, </span><span class="s1">pxla.get_array_mapping(pspec)</span><span class="s3">, </span><span class="s1">aval)</span>
+
+    <span class="s1">bufs = [jax.device_put(host_np_arr</span><span class="s3">, </span><span class="s1">d) </span><span class="s3">for </span><span class="s1">d </span><span class="s3">in </span><span class="s1">jax.local_devices()]</span>
+    <span class="s1">global_arr = array.make_array_from_single_device_arrays(</span>
+        <span class="s1">global_aval.shape</span><span class="s3">, </span><span class="s1">s</span><span class="s3">, </span><span class="s1">bufs)</span>
+    <span class="s3">with </span><span class="s1">global_mesh:</span>
+      <span class="s1">out = pjit(_identity_fn</span><span class="s3">, </span><span class="s1">out_shardings=</span><span class="s3">None</span><span class="s1">)(global_arr)</span>
+
+  <span class="s3">return </span><span class="s1">np.asarray(out.addressable_data(</span><span class="s5">0</span><span class="s1">))</span>
+
+
+<span class="s3">def </span><span class="s1">process_allgather(in_tree: Any</span><span class="s3">, </span><span class="s1">tiled: bool = </span><span class="s3">False</span><span class="s1">) -&gt; Any:</span>
+  <span class="s2">&quot;&quot;&quot;Gather data from across processes. 
+ 
+  Args: 
+    in_tree: pytree of arrays - each array _must_ have the same shape across the 
+      hosts. 
+    tiled: Whether to stack or concat the output. Defaults to False i.e. stack 
+      into a new positional axis at index 0. 
+      This does not affect GDA inputs as the GDA output will always be 
+      concatenated. 
+      Scalar inputs will always be stacked. 
+ 
+  Returns: 
+    Pytress of arrays where the data is gathered from all hosts. 
+      * If the input is a GDA, then the data is fully replicated. 
+      * If the input is non-GDA, then the output shape is dependent on the 
+        `tiled` argument. If its False, then the output will be stacked else 
+        concatenated. 
+      * If the input is non-GDA and scalar, then the output will be stacked. 
+  &quot;&quot;&quot;</span>
+
+  <span class="s3">def </span><span class="s1">_pjit(inp):</span>
+    <span class="s3">return </span><span class="s1">_handle_array_process_allgather(inp</span><span class="s3">, </span><span class="s1">tiled)</span>
+  <span class="s3">return </span><span class="s1">jax.tree_map(_pjit</span><span class="s3">, </span><span class="s1">in_tree)</span>
+
+
+<span class="s3">def </span><span class="s1">assert_equal(in_tree</span><span class="s3">, </span><span class="s1">fail_message: str = </span><span class="s4">''</span><span class="s1">):</span>
+  <span class="s2">&quot;&quot;&quot;Verifies that all the hosts have the same tree of values.&quot;&quot;&quot;</span>
+  <span class="s1">expected = broadcast_one_to_all(in_tree)</span>
+  <span class="s3">if not </span><span class="s1">jax.tree_util.tree_all(</span>
+      <span class="s1">jax.tree_util.tree_map(</span><span class="s3">lambda </span><span class="s1">*x: np.all(np.equal(*x))</span><span class="s3">, </span><span class="s1">in_tree</span><span class="s3">, </span><span class="s1">expected)):</span>
+    <span class="s3">raise </span><span class="s1">AssertionError(</span>
+        <span class="s4">f'</span><span class="s3">{</span><span class="s1">fail_message</span><span class="s3">} </span><span class="s4">Expected: </span><span class="s3">{</span><span class="s1">expected</span><span class="s3">}</span><span class="s4">; got: </span><span class="s3">{</span><span class="s1">in_tree</span><span class="s3">}</span><span class="s4">.'</span><span class="s1">)</span>
+
+
+<span class="s3">def </span><span class="s1">reached_preemption_sync_point(step_id: int) -&gt; bool:</span>
+  <span class="s2">&quot;&quot;&quot;Determine whether all hosts have reached a preemption sync step. 
+ 
+  When any host receive a preemption notice, the notice will be propagated to 
+  all hosts and trigger a synchronization protocol in background. The 
+  synchronization protocol calculates the maximum step ids from all hosts, and 
+  uses the next step id (i.e., max + 1) as the safe step to save a checkpoint. 
+  All hosts should continue training more steps until this method returns True, 
+  indicating that the `step_id` is equal to the safe step and the hosts should 
+  start saving a checkpoint. This feature requires enabling 
+  `jax.config.jax_coordination_service`. 
+ 
+  To use this API, all hosts must start training from the same step and call at 
+  every training step. Example usage: 
+ 
+  ``` 
+  def should_save(step_id: int) -&gt; bool: 
+ 
+    # Should save an on-demand checkpoint for preemption 
+    if multihost_utils.reached_preemption_sync_point(step_id): 
+      return True 
+ 
+    # Should save a regular checkpoint 
+    return step_id - last_saved_checkpoint_step &gt;= save_interval_steps 
+  ``` 
+ 
+  Preemption notice is provided by the cluster scheduler to notify the 
+  application in advance before it gets evicted. By default, we use SIGTERM as 
+  the signal for preemption notice. 
+ 
+  TODO(b/230630494): Add instructions for customized preemption notice. 
+ 
+  Returns: 
+    A boolean indicating whether all hosts have reached a synchronization step 
+    after some hosts are preempted. 
+ 
+  Raises: 
+    RuntimeError: if preemption sync manager has not been inititialized. 
+  &quot;&quot;&quot;</span>
+  <span class="s3">if </span><span class="s1">distributed.global_state.client </span><span class="s3">is None</span><span class="s1">:</span>
+    <span class="s3">return False</span>
+  <span class="s1">sync_manager = distributed.global_state.preemption_sync_manager</span>
+  <span class="s3">if </span><span class="s1">sync_manager </span><span class="s3">is None</span><span class="s1">:</span>
+    <span class="s3">raise </span><span class="s1">RuntimeError(</span><span class="s4">&quot;Preemption sync manager has not been initialized.&quot;</span><span class="s1">)</span>
+  <span class="s3">return </span><span class="s1">sync_manager.reached_sync_point(step_id)</span>
+
+
+<span class="s1">@functools.lru_cache()</span>
+<span class="s3">def </span><span class="s1">_flatten_pspecs(name</span><span class="s3">, </span><span class="s1">in_tree</span><span class="s3">, </span><span class="s1">pspecs_thunk):</span>
+  <span class="s3">return </span><span class="s1">pjit_lib.flatten_axis_resources(</span>
+      <span class="s1">name</span><span class="s3">, </span><span class="s1">in_tree</span><span class="s3">, </span><span class="s1">pspecs_thunk()</span><span class="s3">, </span><span class="s1">tupled_args=</span><span class="s3">True</span><span class="s1">)</span>
+
+<span class="s1">@functools.lru_cache()</span>
+<span class="s3">def </span><span class="s1">_local_to_global_aval(local_aval</span><span class="s3">, </span><span class="s1">mesh</span><span class="s3">, </span><span class="s1">pspec):</span>
+  <span class="s3">return </span><span class="s1">pxla.mesh_local_to_global(mesh</span><span class="s3">, </span><span class="s1">pxla.get_array_mapping(pspec)</span><span class="s3">,</span>
+                                   <span class="s1">local_aval)</span>
+
+<span class="s1">@functools.lru_cache()</span>
+<span class="s3">def </span><span class="s1">_global_to_local_aval(global_aval</span><span class="s3">, </span><span class="s1">mesh</span><span class="s3">, </span><span class="s1">pspec):</span>
+  <span class="s3">return </span><span class="s1">pxla.mesh_global_to_local(mesh</span><span class="s3">, </span><span class="s1">pxla.get_array_mapping(pspec)</span><span class="s3">,</span>
+                                   <span class="s1">global_aval)</span>
+
+
+<span class="s3">def </span><span class="s1">host_local_array_to_global_array(local_inputs: Any</span><span class="s3">,</span>
+                                     <span class="s1">global_mesh: jax.sharding.Mesh</span><span class="s3">,</span>
+                                     <span class="s1">pspecs: Any):</span>
+  <span class="s2">&quot;&quot;&quot;Converts a host local value to a globally sharded `jax.Array`. 
+ 
+  You can use this function to transition to `jax.Array`. Using `jax.Array` with 
+  `pjit` has the same semantics of using GDA with pjit i.e. all `jax.Array` 
+  inputs to pjit should be globally shaped. 
+ 
+  If you are currently passing host local values to pjit, you can use this 
+  function to convert your host local values to global Arrays and then pass that 
+  to pjit. 
+ 
+  Example usage: 
+ 
+  ``` 
+  from jax.experimental import multihost_utils 
+ 
+  global_inputs = multihost_utils.host_local_array_to_global_array( 
+    host_local_inputs, global_mesh, in_pspecs) 
+ 
+  with mesh: 
+    global_out = pjitted_fun(global_inputs) 
+ 
+  host_local_output = multihost_utils.global_array_to_host_local_array( 
+    global_out, mesh, out_pspecs) 
+  ``` 
+ 
+  Args: 
+    local_inputs: A Pytree of host local values. 
+    global_mesh: A ``jax.sharding.Mesh`` object. 
+    pspecs: A Pytree of ``jax.sharding.PartitionSpec``s. 
+  &quot;&quot;&quot;</span>
+  <span class="s3">def </span><span class="s1">_convert(arr</span><span class="s3">, </span><span class="s1">pspec):</span>
+    <span class="s0"># If the Array is not fully addressable i.e. not host local, return it.</span>
+    <span class="s3">if </span><span class="s1">isinstance(arr</span><span class="s3">, </span><span class="s1">array.ArrayImpl) </span><span class="s3">and not </span><span class="s1">arr.is_fully_addressable:</span>
+      <span class="s3">return </span><span class="s1">arr</span>
+    <span class="s3">if </span><span class="s1">isinstance(arr</span><span class="s3">, </span><span class="s1">array.ArrayImpl) </span><span class="s3">and </span><span class="s1">isinstance(</span>
+        <span class="s1">arr.sharding</span><span class="s3">, </span><span class="s1">jax.sharding.PmapSharding):</span>
+      <span class="s1">arr = np.array(arr)</span>
+
+    <span class="s1">local_sharding = jax.sharding.NamedSharding(global_mesh.local_mesh</span><span class="s3">, </span><span class="s1">pspec)</span>
+
+    <span class="s0"># If the input is a concrete jax.Array and the input array sharding</span>
+    <span class="s0"># matches the `local_sharding`, then there's no need to reshard and create</span>
+    <span class="s0"># copies.</span>
+    <span class="s3">if </span><span class="s1">(isinstance(arr</span><span class="s3">, </span><span class="s1">array.ArrayImpl) </span><span class="s3">and</span>
+        <span class="s1">arr.sharding.is_equivalent_to(local_sharding</span><span class="s3">, </span><span class="s1">arr.ndim)):</span>
+      <span class="s1">arrays = [x.data </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">arr.addressable_shards]</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s1">arr = xla.canonicalize_dtype(arr)</span>
+      <span class="s1">arrays = list(</span>
+          <span class="s1">arr[index]</span>
+          <span class="s3">for </span><span class="s1">d</span><span class="s3">, </span><span class="s1">index </span><span class="s3">in </span><span class="s1">local_sharding.devices_indices_map(arr.shape).items())</span>
+
+    <span class="s1">global_aval = _local_to_global_aval(</span>
+        <span class="s1">core.ShapedArray(arr.shape</span><span class="s3">, </span><span class="s1">arrays[</span><span class="s5">0</span><span class="s1">].dtype)</span><span class="s3">, </span><span class="s1">global_mesh</span><span class="s3">, </span><span class="s1">pspec)</span>
+
+    <span class="s3">return </span><span class="s1">pxla.batched_device_put(</span>
+        <span class="s1">global_aval</span><span class="s3">, </span><span class="s1">jax.sharding.NamedSharding(global_mesh</span><span class="s3">, </span><span class="s1">pspec)</span><span class="s3">,</span>
+        <span class="s1">arrays</span><span class="s3">, </span><span class="s1">list(global_mesh.local_mesh.devices.flat))</span>
+
+  <span class="s1">flattened_inps</span><span class="s3">, </span><span class="s1">in_tree = tree_flatten(local_inputs)</span>
+  <span class="s1">in_pspecs = _flatten_pspecs(</span><span class="s4">'input pspecs'</span><span class="s3">, </span><span class="s1">in_tree</span><span class="s3">,</span>
+                              <span class="s1">pjit_lib.hashable_pytree(pspecs))</span>
+  <span class="s1">out = tree_map(_convert</span><span class="s3">, </span><span class="s1">tuple(flattened_inps)</span><span class="s3">, </span><span class="s1">in_pspecs)</span>
+  <span class="s3">return </span><span class="s1">tree_unflatten(in_tree</span><span class="s3">, </span><span class="s1">out)</span>
+
+
+<span class="s3">def </span><span class="s1">global_array_to_host_local_array(global_inputs: Any</span><span class="s3">,</span>
+                                     <span class="s1">global_mesh: jax.sharding.Mesh</span><span class="s3">,</span>
+                                     <span class="s1">pspecs: Any):</span>
+  <span class="s2">&quot;&quot;&quot;Converts a global `jax.Array` to a host local `jax.Array`. 
+ 
+  You can use this function to transition to `jax.Array`. Using `jax.Array` with 
+  `pjit` has the same semantics of using GDA with pjit i.e. all `jax.Array` 
+  inputs to pjit should be globally shaped and the output from `pjit` will also 
+  be globally shaped `jax.Array`s 
+ 
+  You can use this function to convert the globally shaped `jax.Array` output 
+  from pjit to host local values again so that the transition to jax.Array can 
+  be a mechanical change. 
+ 
+  Example usage: 
+ 
+  ``` 
+  from jax.experimental import multihost_utils 
+ 
+  global_inputs = multihost_utils.host_local_array_to_global_array( 
+    host_local_inputs, global_mesh, in_pspecs) 
+ 
+  with mesh: 
+    global_out = pjitted_fun(global_inputs) 
+ 
+  host_local_output = multihost_utils.global_array_to_host_local_array( 
+    global_out, mesh, out_pspecs) 
+  ``` 
+ 
+  Args: 
+    global_inputs: A Pytree of global `jax.Array`s. 
+    global_mesh: A ``jax.sharding.Mesh`` object. 
+    pspecs: A Pytree of ``jax.sharding.PartitionSpec``s. 
+  &quot;&quot;&quot;</span>
+  <span class="s3">def </span><span class="s1">_convert(arr</span><span class="s3">, </span><span class="s1">pspec):</span>
+    <span class="s0"># If the Array is already fully addressable i.e. host local, return it.</span>
+    <span class="s3">if </span><span class="s1">isinstance(arr</span><span class="s3">, </span><span class="s1">array.ArrayImpl) </span><span class="s3">and </span><span class="s1">arr.is_fully_addressable:</span>
+      <span class="s3">return </span><span class="s1">arr</span>
+    <span class="s1">local_aval = _global_to_local_aval(arr.aval</span><span class="s3">, </span><span class="s1">global_mesh</span><span class="s3">, </span><span class="s1">pspec)</span>
+    <span class="s3">return </span><span class="s1">array.ArrayImpl(</span>
+        <span class="s1">local_aval</span><span class="s3">, </span><span class="s1">jax.sharding.NamedSharding(global_mesh.local_mesh</span><span class="s3">, </span><span class="s1">pspec)</span><span class="s3">,</span>
+        <span class="s1">arr._arrays</span><span class="s3">, </span><span class="s1">committed=</span><span class="s3">True</span><span class="s1">)</span>
+
+  <span class="s1">flattened_inps</span><span class="s3">, </span><span class="s1">out_tree = tree_flatten(global_inputs)</span>
+  <span class="s1">out_pspecs = _flatten_pspecs(</span><span class="s4">'output pspecs'</span><span class="s3">, </span><span class="s1">out_tree</span><span class="s3">,</span>
+                               <span class="s1">pjit_lib.hashable_pytree(pspecs))</span>
+  <span class="s1">out = tree_map(_convert</span><span class="s3">, </span><span class="s1">tuple(flattened_inps)</span><span class="s3">, </span><span class="s1">out_pspecs)</span>
+  <span class="s3">return </span><span class="s1">tree_unflatten(out_tree</span><span class="s3">, </span><span class="s1">out)</span>
+</pre>
+</body>
+</html>

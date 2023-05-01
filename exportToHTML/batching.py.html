@@ -1,0 +1,100 @@
+<html>
+<head>
+<title>batching.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+batching.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2023 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s0"># Note: import &lt;name&gt; as &lt;name&gt; is required for names to be exported.</span>
+<span class="s0"># See PEP 484 &amp; https://github.com/google/jax/issues/7570</span>
+
+<span class="s2">from </span><span class="s1">jax._src.interpreters.batching </span><span class="s2">import </span><span class="s1">(</span>
+  <span class="s1">Array </span><span class="s2">as </span><span class="s1">Array</span><span class="s2">,</span>
+  <span class="s1">AxisSize </span><span class="s2">as </span><span class="s1">AxisSize</span><span class="s2">,</span>
+  <span class="s1">BatchTrace </span><span class="s2">as </span><span class="s1">BatchTrace</span><span class="s2">,</span>
+  <span class="s1">BatchTracer </span><span class="s2">as </span><span class="s1">BatchTracer</span><span class="s2">,</span>
+  <span class="s1">BatchingRule </span><span class="s2">as </span><span class="s1">BatchingRule</span><span class="s2">,</span>
+  <span class="s1">ConcatAxis </span><span class="s2">as </span><span class="s1">ConcatAxis</span><span class="s2">,</span>
+  <span class="s1">Elt </span><span class="s2">as </span><span class="s1">Elt</span><span class="s2">,</span>
+  <span class="s1">FromEltHandler </span><span class="s2">as </span><span class="s1">FromEltHandler</span><span class="s2">,</span>
+  <span class="s1">GetIdx </span><span class="s2">as </span><span class="s1">GetIdx</span><span class="s2">,</span>
+  <span class="s1">IndexedAxisSize </span><span class="s2">as </span><span class="s1">IndexedAxisSize</span><span class="s2">,</span>
+  <span class="s1">MakeIotaHandler </span><span class="s2">as </span><span class="s1">MakeIotaHandler</span><span class="s2">,</span>
+  <span class="s1">MapSpec </span><span class="s2">as </span><span class="s1">MapSpec</span><span class="s2">,</span>
+  <span class="s1">NotMapped </span><span class="s2">as </span><span class="s1">NotMapped</span><span class="s2">,</span>
+  <span class="s1">Pile </span><span class="s2">as </span><span class="s1">Pile</span><span class="s2">,</span>
+  <span class="s1">PileAxis </span><span class="s2">as </span><span class="s1">PileAxis</span><span class="s2">,</span>
+  <span class="s1">PileTy </span><span class="s2">as </span><span class="s1">PileTy</span><span class="s2">,</span>
+  <span class="s1">ToEltHandler </span><span class="s2">as </span><span class="s1">ToEltHandler</span><span class="s2">,</span>
+  <span class="s1">Vmappable </span><span class="s2">as </span><span class="s1">Vmappable</span><span class="s2">,</span>
+  <span class="s1">Zero </span><span class="s2">as </span><span class="s1">Zero</span><span class="s2">,</span>
+  <span class="s1">ZeroIfMapped </span><span class="s2">as </span><span class="s1">ZeroIfMapped</span><span class="s2">,</span>
+  <span class="s1">add_batched </span><span class="s2">as </span><span class="s1">add_batched</span><span class="s2">,</span>
+  <span class="s1">axis_primitive_batchers </span><span class="s2">as </span><span class="s1">axis_primitive_batchers</span><span class="s2">,</span>
+  <span class="s1">batch </span><span class="s2">as </span><span class="s1">batch</span><span class="s2">,</span>
+  <span class="s1">batch_custom_jvp_subtrace </span><span class="s2">as </span><span class="s1">batch_custom_jvp_subtrace</span><span class="s2">,</span>
+  <span class="s1">batch_custom_vjp_bwd </span><span class="s2">as </span><span class="s1">batch_custom_vjp_bwd</span><span class="s2">,</span>
+  <span class="s1">batch_jaxpr </span><span class="s2">as </span><span class="s1">batch_jaxpr</span><span class="s2">,</span>
+  <span class="s1">batch_jaxpr2 </span><span class="s2">as </span><span class="s1">batch_jaxpr2</span><span class="s2">,</span>
+  <span class="s1">batch_jaxpr_axes </span><span class="s2">as </span><span class="s1">batch_jaxpr_axes</span><span class="s2">,</span>
+  <span class="s1">batch_subtrace </span><span class="s2">as </span><span class="s1">batch_subtrace</span><span class="s2">,</span>
+  <span class="s1">bdim_at_front </span><span class="s2">as </span><span class="s1">bdim_at_front</span><span class="s2">,</span>
+  <span class="s1">broadcast </span><span class="s2">as </span><span class="s1">broadcast</span><span class="s2">,</span>
+  <span class="s1">broadcast_batcher </span><span class="s2">as </span><span class="s1">broadcast_batcher</span><span class="s2">,</span>
+  <span class="s1">defbroadcasting </span><span class="s2">as </span><span class="s1">defbroadcasting</span><span class="s2">,</span>
+  <span class="s1">defreducer </span><span class="s2">as </span><span class="s1">defreducer</span><span class="s2">,</span>
+  <span class="s1">defvectorized </span><span class="s2">as </span><span class="s1">defvectorized</span><span class="s2">,</span>
+  <span class="s1">flatten_fun_for_vmap </span><span class="s2">as </span><span class="s1">flatten_fun_for_vmap</span><span class="s2">,</span>
+  <span class="s1">from_elt </span><span class="s2">as </span><span class="s1">from_elt</span><span class="s2">,</span>
+  <span class="s1">from_elt_handlers </span><span class="s2">as </span><span class="s1">from_elt_handlers</span><span class="s2">,</span>
+  <span class="s1">is_vmappable </span><span class="s2">as </span><span class="s1">is_vmappable</span><span class="s2">,</span>
+  <span class="s1">make_iota </span><span class="s2">as </span><span class="s1">make_iota</span><span class="s2">,</span>
+  <span class="s1">make_iota_handlers </span><span class="s2">as </span><span class="s1">make_iota_handlers</span><span class="s2">,</span>
+  <span class="s1">matchaxis </span><span class="s2">as </span><span class="s1">matchaxis</span><span class="s2">,</span>
+  <span class="s1">moveaxis </span><span class="s2">as </span><span class="s1">moveaxis</span><span class="s2">,</span>
+  <span class="s1">not_mapped </span><span class="s2">as </span><span class="s1">not_mapped</span><span class="s2">,</span>
+  <span class="s1">pile_axis </span><span class="s2">as </span><span class="s1">pile_axis</span><span class="s2">,</span>
+  <span class="s1">primitive_batchers </span><span class="s2">as </span><span class="s1">primitive_batchers</span><span class="s2">,</span>
+  <span class="s1">reassemble_concat_axes </span><span class="s2">as </span><span class="s1">reassemble_concat_axes</span><span class="s2">,</span>
+  <span class="s1">reducer_batcher </span><span class="s2">as </span><span class="s1">reducer_batcher</span><span class="s2">,</span>
+  <span class="s1">register_vmappable </span><span class="s2">as </span><span class="s1">register_vmappable</span><span class="s2">,</span>
+  <span class="s1">segment_sum </span><span class="s2">as </span><span class="s1">segment_sum</span><span class="s2">,</span>
+  <span class="s1">spec_types </span><span class="s2">as </span><span class="s1">spec_types</span><span class="s2">,</span>
+  <span class="s1">spmd_axis_primitive_batchers </span><span class="s2">as </span><span class="s1">spmd_axis_primitive_batchers</span><span class="s2">,</span>
+  <span class="s1">to_elt </span><span class="s2">as </span><span class="s1">to_elt</span><span class="s2">,</span>
+  <span class="s1">to_elt_handlers </span><span class="s2">as </span><span class="s1">to_elt_handlers</span><span class="s2">,</span>
+  <span class="s1">unpack_concat_axes </span><span class="s2">as </span><span class="s1">unpack_concat_axes</span><span class="s2">,</span>
+  <span class="s1">unregister_vmappable </span><span class="s2">as </span><span class="s1">unregister_vmappable</span><span class="s2">,</span>
+  <span class="s1">vectorized_batcher </span><span class="s2">as </span><span class="s1">vectorized_batcher</span><span class="s2">,</span>
+  <span class="s1">vmappables </span><span class="s2">as </span><span class="s1">vmappables</span><span class="s2">,</span>
+  <span class="s1">vtile </span><span class="s2">as </span><span class="s1">vtile</span><span class="s2">,</span>
+  <span class="s1">zero_if_mapped </span><span class="s2">as </span><span class="s1">zero_if_mapped</span><span class="s2">,</span>
+  <span class="s1">zeros_like_batched </span><span class="s2">as </span><span class="s1">zeros_like_batched</span><span class="s2">,</span>
+  <span class="s1">zeros_like_p </span><span class="s2">as </span><span class="s1">zeros_like_p</span><span class="s2">,</span>
+<span class="s1">)</span>
+</pre>
+</body>
+</html>

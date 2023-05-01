@@ -1,0 +1,601 @@
+<html>
+<head>
+<title>linalg.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6897bb;}
+.s5 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+linalg.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2022 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s2">&quot;&quot;&quot;Sparse linear algebra routines.&quot;&quot;&quot;</span>
+
+<span class="s3">from </span><span class="s1">typing </span><span class="s3">import </span><span class="s1">Union</span><span class="s3">, </span><span class="s1">Callable</span>
+<span class="s3">import </span><span class="s1">functools</span>
+
+<span class="s3">import </span><span class="s1">jax</span>
+<span class="s3">import </span><span class="s1">jax.numpy </span><span class="s3">as </span><span class="s1">jnp</span>
+
+<span class="s3">from </span><span class="s1">jax.interpreters </span><span class="s3">import </span><span class="s1">mlir</span>
+<span class="s3">from </span><span class="s1">jax.interpreters </span><span class="s3">import </span><span class="s1">xla</span>
+
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">core</span>
+<span class="s3">from </span><span class="s1">jax._src.lib </span><span class="s3">import </span><span class="s1">gpu_solver</span>
+
+<span class="s3">import </span><span class="s1">numpy </span><span class="s3">as </span><span class="s1">np</span>
+<span class="s3">from </span><span class="s1">scipy.sparse </span><span class="s3">import </span><span class="s1">csr_matrix</span><span class="s3">, </span><span class="s1">linalg</span>
+
+
+<span class="s3">def </span><span class="s1">lobpcg_standard(</span>
+    <span class="s1">A: Union[jax.Array</span><span class="s3">, </span><span class="s1">Callable[[jax.Array]</span><span class="s3">, </span><span class="s1">jax.Array]]</span><span class="s3">,</span>
+    <span class="s1">X: jax.Array</span><span class="s3">,</span>
+    <span class="s1">m: int = </span><span class="s4">100</span><span class="s3">,</span>
+    <span class="s1">tol: Union[jax.Array</span><span class="s3">, </span><span class="s1">float</span><span class="s3">, None</span><span class="s1">] = </span><span class="s3">None</span><span class="s1">):</span>
+  <span class="s2">&quot;&quot;&quot;Compute the top-k standard eigenvalues using the LOBPCG routine. 
+ 
+  LOBPCG [1] stands for Locally Optimal Block Preconditioned Conjugate Gradient. 
+  The method enables finding top-k eigenvectors in an accelerator-friendly 
+  manner. 
+ 
+  This initial experimental version has several caveats. 
+ 
+    - Only the standard eigenvalue problem `A U = lambda U` is supported, 
+      general eigenvalues are not. 
+    - Gradient code is not available. 
+    - f64 will only work where jnp.linalg.eigh is supported for that type. 
+    - Finding the smallest eigenvectors is not yet supported. As a result, 
+      we don't yet support preconditioning, which is mostly needed for this 
+      case. 
+ 
+  The implementation is based on [2] and [3]; however, we deviate from these 
+  sources in several ways to improve robustness or facilitate implementation: 
+ 
+    - Despite increased iteration cost, we always maintain an orthonormal basis 
+      for the block search directions. 
+    - We change the convergence criterion; see the `tol` argument. 
+    - Soft locking [4] is intentionally not implemented; it relies on 
+      choosing an appropriate problem-specific tolerance to prevent 
+      blow-up near convergence from catastrophic cancellation of 
+      near-0 residuals. Instead, the approach implemented favors 
+      truncating the iteration basis. 
+ 
+  [1]: http://ccm.ucdenver.edu/reports/rep149.pdf 
+  [2]: https://arxiv.org/abs/1704.07458 
+  [3]: https://arxiv.org/abs/0705.2626 
+  [4]: DOI 10.13140/RG.2.2.11794.48327 
+ 
+  Args: 
+    A : An `(n, n)` array representing a square Hermitian matrix or a 
+        callable with its action. 
+    X : An `(n, k)` array representing the initial search directions for the `k` 
+        desired top eigenvectors. This need not be orthogonal, but must be 
+        numerically linearly independent (`X` will be orthonormalized). 
+        Note that we must have `0 &lt; k * 5 &lt; n`. 
+    m : Maximum integer iteration count; LOBPCG will only ever explore (a 
+        subspace of) the Krylov basis `{X, A X, A^2 X, ..., A^m X}`. 
+    tol : A float convergence tolerance; an eigenpair `(lambda, v)` is converged 
+          when its residual L2 norm `r = |A v - lambda v|` is below 
+          `tol * 10 * n * (lambda + |A v|)`, which 
+          roughly estimates the worst-case floating point error for an ideal 
+          eigenvector. If all `k` eigenvectors satisfy the tolerance 
+          comparison, then LOBPCG exits early. If left as None, then this is set 
+          to the float epsilon of `A.dtype`. 
+ 
+  Returns: 
+    `theta, U, i`, where `theta` is a `(k,)` array 
+    of eigenvalues, `U` is a `(n, k)` array of eigenvectors, `i` is the 
+    number of iterations performed. 
+ 
+  Raises: 
+    ValueError : if `A,X` dtypes or `n` dimensions do not match, or `k` is too 
+                 large (only `k * 5 &lt; n` supported), or `k == 0`. 
+  &quot;&quot;&quot;</span>
+  <span class="s0"># Jit-compile once per matrix shape if possible.</span>
+  <span class="s3">if </span><span class="s1">isinstance(A</span><span class="s3">, </span><span class="s1">(jax.Array</span><span class="s3">, </span><span class="s1">np.ndarray)):</span>
+    <span class="s3">return </span><span class="s1">_lobpcg_standard_matrix(A</span><span class="s3">, </span><span class="s1">X</span><span class="s3">, </span><span class="s1">m</span><span class="s3">, </span><span class="s1">tol</span><span class="s3">, </span><span class="s1">debug=</span><span class="s3">False</span><span class="s1">)</span>
+  <span class="s3">return </span><span class="s1">_lobpcg_standard_callable(A</span><span class="s3">, </span><span class="s1">X</span><span class="s3">, </span><span class="s1">m</span><span class="s3">, </span><span class="s1">tol</span><span class="s3">, </span><span class="s1">debug=</span><span class="s3">False</span><span class="s1">)</span>
+
+<span class="s1">@functools.partial(jax.jit</span><span class="s3">, </span><span class="s1">static_argnames=[</span><span class="s5">'m'</span><span class="s3">, </span><span class="s5">'debug'</span><span class="s1">])</span>
+<span class="s3">def </span><span class="s1">_lobpcg_standard_matrix(</span>
+    <span class="s1">A: jax.Array</span><span class="s3">,</span>
+    <span class="s1">X: jax.Array</span><span class="s3">,</span>
+    <span class="s1">m: int</span><span class="s3">,</span>
+    <span class="s1">tol: Union[jax.Array</span><span class="s3">, </span><span class="s1">float</span><span class="s3">, None</span><span class="s1">]</span><span class="s3">,</span>
+    <span class="s1">debug: bool = </span><span class="s3">False</span><span class="s1">):</span>
+  <span class="s2">&quot;&quot;&quot;Computes lobpcg_standard(), possibly with debug diagnostics.&quot;&quot;&quot;</span>
+  <span class="s3">return </span><span class="s1">_lobpcg_standard_callable(</span>
+      <span class="s1">functools.partial(_mm</span><span class="s3">, </span><span class="s1">A)</span><span class="s3">, </span><span class="s1">X</span><span class="s3">, </span><span class="s1">m</span><span class="s3">, </span><span class="s1">tol</span><span class="s3">, </span><span class="s1">debug)</span>
+
+<span class="s1">@functools.partial(jax.jit</span><span class="s3">, </span><span class="s1">static_argnames=[</span><span class="s5">'A'</span><span class="s3">, </span><span class="s5">'m'</span><span class="s3">, </span><span class="s5">'debug'</span><span class="s1">])</span>
+<span class="s3">def </span><span class="s1">_lobpcg_standard_callable(</span>
+    <span class="s1">A: Callable[[jax.Array]</span><span class="s3">, </span><span class="s1">jax.Array]</span><span class="s3">,</span>
+    <span class="s1">X: jax.Array</span><span class="s3">,</span>
+    <span class="s1">m: int</span><span class="s3">,</span>
+    <span class="s1">tol: Union[jax.Array</span><span class="s3">, </span><span class="s1">float</span><span class="s3">, None</span><span class="s1">]</span><span class="s3">,</span>
+    <span class="s1">debug: bool = </span><span class="s3">False</span><span class="s1">):</span>
+  <span class="s2">&quot;&quot;&quot;Supports generic lobpcg_standard() callable interface.&quot;&quot;&quot;</span>
+
+  <span class="s0"># TODO(vladf): support mixed_precision flag, which allows f64 Rayleigh-Ritz</span>
+  <span class="s0"># with f32 inputs.</span>
+
+  <span class="s1">n</span><span class="s3">, </span><span class="s1">k = X.shape</span>
+  <span class="s1">dt = X.dtype</span>
+
+  <span class="s1">_check_inputs(A</span><span class="s3">, </span><span class="s1">X)</span>
+
+  <span class="s3">if </span><span class="s1">tol </span><span class="s3">is None</span><span class="s1">:</span>
+    <span class="s1">tol = jnp.finfo(dt).eps</span>
+
+  <span class="s1">X = _orthonormalize(X)</span>
+  <span class="s1">P = _extend_basis(X</span><span class="s3">, </span><span class="s1">X.shape[</span><span class="s4">1</span><span class="s1">])</span>
+
+  <span class="s0"># We maintain X, our current list of best eigenvectors,</span>
+  <span class="s0"># P, our search direction, and</span>
+  <span class="s0"># R, our residuals, in a large joint array XPR, column-stacked, so (n, 3*k).</span>
+
+  <span class="s1">AX = A(X)</span>
+  <span class="s1">theta = jnp.sum(X * AX</span><span class="s3">, </span><span class="s1">axis=</span><span class="s4">0</span><span class="s3">, </span><span class="s1">keepdims=</span><span class="s3">True</span><span class="s1">)</span>
+  <span class="s1">R = AX - theta * X</span>
+
+  <span class="s3">def </span><span class="s1">cond(state):</span>
+    <span class="s1">i</span><span class="s3">, </span><span class="s1">_X</span><span class="s3">, </span><span class="s1">_P</span><span class="s3">, </span><span class="s1">_R</span><span class="s3">, </span><span class="s1">converged</span><span class="s3">, </span><span class="s1">_ = state</span>
+    <span class="s3">return </span><span class="s1">jnp.logical_and(i &lt; m</span><span class="s3">, </span><span class="s1">converged &lt; k)</span>
+
+  <span class="s3">def </span><span class="s1">body(state):</span>
+    <span class="s1">i</span><span class="s3">, </span><span class="s1">X</span><span class="s3">, </span><span class="s1">P</span><span class="s3">, </span><span class="s1">R</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">theta = state</span>
+    <span class="s0"># Invariants: X, P, R kept orthonormal</span>
+    <span class="s0"># Some R, P columns may be 0 (due to basis truncation, as decided</span>
+    <span class="s0"># by orthogonalization routines), but not X.</span>
+
+    <span class="s0"># TODO(vladf): support preconditioning for bottom-k eigenvectors</span>
+    <span class="s0"># if M is not None:</span>
+    <span class="s0">#   R = M(R)</span>
+
+    <span class="s0"># Residual basis selection.</span>
+    <span class="s1">R = _project_out(jnp.concatenate((X</span><span class="s3">, </span><span class="s1">P)</span><span class="s3">, </span><span class="s1">axis=</span><span class="s4">1</span><span class="s1">)</span><span class="s3">, </span><span class="s1">R)</span>
+    <span class="s1">XPR = jnp.concatenate((X</span><span class="s3">, </span><span class="s1">P</span><span class="s3">, </span><span class="s1">R)</span><span class="s3">, </span><span class="s1">axis=</span><span class="s4">1</span><span class="s1">)</span>
+
+    <span class="s0"># Projected eigensolve.</span>
+    <span class="s1">theta</span><span class="s3">, </span><span class="s1">Q = _rayleigh_ritz_orth(A</span><span class="s3">, </span><span class="s1">XPR)</span>
+
+    <span class="s0"># Eigenvector X extraction</span>
+    <span class="s1">B = Q[:</span><span class="s3">, </span><span class="s1">:k]</span>
+    <span class="s1">normB = jnp.linalg.norm(B</span><span class="s3">, </span><span class="s1">ord=</span><span class="s4">2</span><span class="s3">, </span><span class="s1">axis=</span><span class="s4">0</span><span class="s3">, </span><span class="s1">keepdims=</span><span class="s3">True</span><span class="s1">)</span>
+    <span class="s1">B /= normB</span>
+    <span class="s1">X = _mm(XPR</span><span class="s3">, </span><span class="s1">B)</span>
+    <span class="s1">normX = jnp.linalg.norm(X</span><span class="s3">, </span><span class="s1">ord=</span><span class="s4">2</span><span class="s3">, </span><span class="s1">axis=</span><span class="s4">0</span><span class="s3">, </span><span class="s1">keepdims=</span><span class="s3">True</span><span class="s1">)</span>
+    <span class="s1">X /= normX</span>
+
+    <span class="s0"># Difference terms P extraction</span>
+    <span class="s0">#</span>
+    <span class="s0"># In next step of LOBPCG, naively, we'd set</span>
+    <span class="s0"># P = S[:, k:] @ Q[k:, :k] to achieve span(X, P) == span(X, previous X)</span>
+    <span class="s0"># (this is not obvious, see section 4 of [1]).</span>
+    <span class="s0">#</span>
+    <span class="s0"># Instead we orthogonalize concat(0, Q[k:, :k]) against Q[:, :k]</span>
+    <span class="s0"># in the standard basis before mapping with XPR. Since XPR is itself</span>
+    <span class="s0"># orthonormal, the resulting directions are themselves orthonormalized.</span>
+    <span class="s0">#</span>
+    <span class="s0"># [2] leverages Q's existing orthogonality to derive</span>
+    <span class="s0"># an analytic expression for this value based on the quadrant Q[:k,k:]</span>
+    <span class="s0"># (see section 4.2 of [2]).</span>
+    <span class="s1">q</span><span class="s3">, </span><span class="s1">_ = jnp.linalg.qr(Q[:k</span><span class="s3">, </span><span class="s1">k:].T)</span>
+    <span class="s1">diff_rayleigh_ortho = _mm(Q[:</span><span class="s3">, </span><span class="s1">k:]</span><span class="s3">, </span><span class="s1">q)</span>
+    <span class="s1">P = _mm(XPR</span><span class="s3">, </span><span class="s1">diff_rayleigh_ortho)</span>
+    <span class="s1">normP = jnp.linalg.norm(P</span><span class="s3">, </span><span class="s1">ord=</span><span class="s4">2</span><span class="s3">, </span><span class="s1">axis=</span><span class="s4">0</span><span class="s3">, </span><span class="s1">keepdims=</span><span class="s3">True</span><span class="s1">)</span>
+    <span class="s1">P /= jnp.where(normP == </span><span class="s4">0</span><span class="s3">, </span><span class="s4">1.0</span><span class="s3">, </span><span class="s1">normP)</span>
+
+    <span class="s0"># Compute new residuals.</span>
+    <span class="s1">AX = A(X)</span>
+    <span class="s1">R = AX - theta[jnp.newaxis</span><span class="s3">, </span><span class="s1">:k] * X</span>
+    <span class="s1">resid_norms = jnp.linalg.norm(R</span><span class="s3">, </span><span class="s1">ord=</span><span class="s4">2</span><span class="s3">, </span><span class="s1">axis=</span><span class="s4">0</span><span class="s1">)</span>
+
+    <span class="s0"># I tried many variants of hard and soft locking [3]. All of them seemed</span>
+    <span class="s0"># to worsen performance relative to no locking.</span>
+    <span class="s0">#</span>
+    <span class="s0"># Further, I found a more expermental convergence formula compared to what</span>
+    <span class="s0"># is suggested in the literature, loosely based on floating-point</span>
+    <span class="s0"># expectations.</span>
+    <span class="s0">#</span>
+    <span class="s0"># [2] discusses various strategies for this in Sec 5.3. The solution</span>
+    <span class="s0"># they end up with, which estimates operator norm |A| via Gaussian</span>
+    <span class="s0"># products, was too crude in practice (and overly-lax). The Gaussian</span>
+    <span class="s0"># approximation seems like an estimate of the average eigenvalue.</span>
+    <span class="s0">#</span>
+    <span class="s0"># Instead, we test convergence via self-consistency of the eigenpair</span>
+    <span class="s0"># i.e., the residual norm |r| should be small, relative to the floating</span>
+    <span class="s0"># point error we'd expect from computing just the residuals given</span>
+    <span class="s0"># candidate vectors.</span>
+    <span class="s1">reltol = jnp.linalg.norm(AX</span><span class="s3">, </span><span class="s1">ord=</span><span class="s4">2</span><span class="s3">, </span><span class="s1">axis=</span><span class="s4">0</span><span class="s1">) + theta[:k]</span>
+    <span class="s1">reltol *= n</span>
+    <span class="s0"># Allow some margin for a few element-wise operations.</span>
+    <span class="s1">reltol *= </span><span class="s4">10</span>
+    <span class="s1">res_converged = resid_norms &lt; tol * reltol</span>
+    <span class="s1">converged = jnp.sum(res_converged)</span>
+
+    <span class="s1">new_state = i + </span><span class="s4">1</span><span class="s3">, </span><span class="s1">X</span><span class="s3">, </span><span class="s1">P</span><span class="s3">, </span><span class="s1">R</span><span class="s3">, </span><span class="s1">converged</span><span class="s3">, </span><span class="s1">theta[jnp.newaxis</span><span class="s3">, </span><span class="s1">:k]</span>
+    <span class="s3">if </span><span class="s1">debug:</span>
+      <span class="s1">diagnostics = _generate_diagnostics(</span>
+          <span class="s1">XPR</span><span class="s3">, </span><span class="s1">X</span><span class="s3">, </span><span class="s1">P</span><span class="s3">, </span><span class="s1">R</span><span class="s3">, </span><span class="s1">theta</span><span class="s3">, </span><span class="s1">converged</span><span class="s3">, </span><span class="s1">resid_norms / reltol)</span>
+      <span class="s1">new_state = (new_state</span><span class="s3">, </span><span class="s1">diagnostics)</span>
+    <span class="s3">return </span><span class="s1">new_state</span>
+
+  <span class="s1">converged = </span><span class="s4">0</span>
+  <span class="s1">state = (</span><span class="s4">0</span><span class="s3">, </span><span class="s1">X</span><span class="s3">, </span><span class="s1">P</span><span class="s3">, </span><span class="s1">R</span><span class="s3">, </span><span class="s1">converged</span><span class="s3">, </span><span class="s1">theta)</span>
+  <span class="s3">if </span><span class="s1">debug:</span>
+    <span class="s1">state</span><span class="s3">, </span><span class="s1">diagnostics = jax.lax.scan(</span>
+        <span class="s3">lambda </span><span class="s1">state</span><span class="s3">, </span><span class="s1">_: body(state)</span><span class="s3">, </span><span class="s1">state</span><span class="s3">, </span><span class="s1">xs=</span><span class="s3">None, </span><span class="s1">length=m)</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s1">state = jax.lax.while_loop(cond</span><span class="s3">, </span><span class="s1">body</span><span class="s3">, </span><span class="s1">state)</span>
+  <span class="s1">i</span><span class="s3">, </span><span class="s1">X</span><span class="s3">, </span><span class="s1">_P</span><span class="s3">, </span><span class="s1">_R</span><span class="s3">, </span><span class="s1">_converged</span><span class="s3">, </span><span class="s1">theta = state</span>
+
+  <span class="s3">if </span><span class="s1">debug:</span>
+    <span class="s3">return </span><span class="s1">theta[</span><span class="s4">0</span><span class="s3">, </span><span class="s1">:]</span><span class="s3">, </span><span class="s1">X</span><span class="s3">, </span><span class="s1">i</span><span class="s3">, </span><span class="s1">diagnostics</span>
+  <span class="s3">return </span><span class="s1">theta[</span><span class="s4">0</span><span class="s3">, </span><span class="s1">:]</span><span class="s3">, </span><span class="s1">X</span><span class="s3">, </span><span class="s1">i</span>
+
+
+<span class="s3">def </span><span class="s1">_check_inputs(A</span><span class="s3">, </span><span class="s1">X):</span>
+  <span class="s1">n</span><span class="s3">, </span><span class="s1">k = X.shape</span>
+  <span class="s1">dt = X.dtype</span>
+
+  <span class="s3">if </span><span class="s1">k == </span><span class="s4">0</span><span class="s1">:</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s5">f'must have search dim &gt; 0, got </span><span class="s3">{</span><span class="s1">k</span><span class="s3">}</span><span class="s5">'</span><span class="s1">)</span>
+
+  <span class="s3">if </span><span class="s1">k * </span><span class="s4">5 </span><span class="s1">&gt;= n:</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s5">f'expected search dim * 5 &lt; matrix dim (got </span><span class="s3">{</span><span class="s1">k * </span><span class="s4">5</span><span class="s3">}</span><span class="s5">, </span><span class="s3">{</span><span class="s1">n</span><span class="s3">}</span><span class="s5">)'</span><span class="s1">)</span>
+
+  <span class="s1">test_output = A(jnp.zeros((n</span><span class="s3">, </span><span class="s4">1</span><span class="s1">)</span><span class="s3">, </span><span class="s1">dtype=X.dtype))</span>
+
+  <span class="s3">if </span><span class="s1">test_output.dtype != dt:</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span>
+        <span class="s5">f'A, X must have same dtypes (were </span><span class="s3">{</span><span class="s1">test_output.dtype</span><span class="s3">}</span><span class="s5">, </span><span class="s3">{</span><span class="s1">dt</span><span class="s3">}</span><span class="s5">)'</span><span class="s1">)</span>
+
+  <span class="s3">if </span><span class="s1">test_output.shape != (n</span><span class="s3">, </span><span class="s4">1</span><span class="s1">):</span>
+    <span class="s1">s = test_output.shape</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s5">f'A must be (</span><span class="s3">{</span><span class="s1">n</span><span class="s3">}</span><span class="s5">, </span><span class="s3">{</span><span class="s1">n</span><span class="s3">}</span><span class="s5">) matrix A, got output </span><span class="s3">{</span><span class="s1">s</span><span class="s3">}</span><span class="s5">'</span><span class="s1">)</span>
+
+
+<span class="s3">def </span><span class="s1">_mm(a</span><span class="s3">, </span><span class="s1">b</span><span class="s3">, </span><span class="s1">precision=jax.lax.Precision.HIGHEST):</span>
+  <span class="s3">return </span><span class="s1">jax.lax.dot(a</span><span class="s3">, </span><span class="s1">b</span><span class="s3">, </span><span class="s1">(precision</span><span class="s3">, </span><span class="s1">precision))</span>
+
+<span class="s3">def </span><span class="s1">_generate_diagnostics(prev_XPR</span><span class="s3">, </span><span class="s1">X</span><span class="s3">, </span><span class="s1">P</span><span class="s3">, </span><span class="s1">R</span><span class="s3">, </span><span class="s1">theta</span><span class="s3">, </span><span class="s1">converged</span><span class="s3">, </span><span class="s1">adj_resid):</span>
+  <span class="s1">k = X.shape[</span><span class="s4">1</span><span class="s1">]</span>
+  <span class="s3">assert </span><span class="s1">X.shape == P.shape</span>
+
+  <span class="s1">diagdiag = </span><span class="s3">lambda </span><span class="s1">x: jnp.diag(jnp.diag(x))</span>
+  <span class="s1">abserr = </span><span class="s3">lambda </span><span class="s1">x: jnp.abs(x).sum() / (k ** </span><span class="s4">2</span><span class="s1">)</span>
+
+  <span class="s1">XTX = _mm(X.T</span><span class="s3">, </span><span class="s1">X)</span>
+  <span class="s1">DX = diagdiag(XTX)</span>
+  <span class="s1">orthX = abserr(XTX - DX)</span>
+
+  <span class="s1">PTP = _mm(P.T</span><span class="s3">, </span><span class="s1">P)</span>
+  <span class="s1">DP = diagdiag(PTP)</span>
+  <span class="s1">orthP = abserr(PTP - DP)</span>
+
+  <span class="s1">PX = abserr(X.T @ P)</span>
+
+  <span class="s1">prev_basis = prev_XPR.shape[</span><span class="s4">1</span><span class="s1">] - jnp.sum(jnp.all(prev_XPR == </span><span class="s4">0.0</span><span class="s3">, </span><span class="s1">axis=</span><span class="s4">0</span><span class="s1">))</span>
+
+  <span class="s3">return </span><span class="s1">{</span>
+      <span class="s5">'basis rank'</span><span class="s1">: prev_basis</span><span class="s3">,</span>
+      <span class="s5">'X zeros'</span><span class="s1">: jnp.sum(jnp.all(X == </span><span class="s4">0.0</span><span class="s3">, </span><span class="s1">axis=</span><span class="s4">0</span><span class="s1">))</span><span class="s3">,</span>
+      <span class="s5">'P zeros'</span><span class="s1">: jnp.sum(jnp.all(P == </span><span class="s4">0.0</span><span class="s3">, </span><span class="s1">axis=</span><span class="s4">0</span><span class="s1">))</span><span class="s3">,</span>
+      <span class="s5">'lambda history'</span><span class="s1">: theta[:k]</span><span class="s3">,</span>
+      <span class="s5">'residual history'</span><span class="s1">: jnp.linalg.norm(R</span><span class="s3">, </span><span class="s1">axis=</span><span class="s4">0</span><span class="s3">, </span><span class="s1">ord=</span><span class="s4">2</span><span class="s1">)</span><span class="s3">,</span>
+      <span class="s5">'converged'</span><span class="s1">: converged</span><span class="s3">,</span>
+      <span class="s5">'adjusted residual max'</span><span class="s1">: jnp.max(adj_resid)</span><span class="s3">,</span>
+      <span class="s5">'adjusted residual p50'</span><span class="s1">: jnp.median(adj_resid)</span><span class="s3">,</span>
+      <span class="s5">'adjusted residual min'</span><span class="s1">: jnp.min(adj_resid)</span><span class="s3">,</span>
+      <span class="s5">'X orth'</span><span class="s1">: orthX</span><span class="s3">,</span>
+      <span class="s5">'P orth'</span><span class="s1">: orthP</span><span class="s3">,</span>
+      <span class="s5">'P.X'</span><span class="s1">: PX}</span>
+
+<span class="s3">def </span><span class="s1">_eigh_ascending(A):</span>
+  <span class="s1">w</span><span class="s3">, </span><span class="s1">V = jnp.linalg.eigh(A)</span>
+  <span class="s3">return </span><span class="s1">w[::-</span><span class="s4">1</span><span class="s1">]</span><span class="s3">, </span><span class="s1">V[:</span><span class="s3">, </span><span class="s1">::-</span><span class="s4">1</span><span class="s1">]</span>
+
+
+<span class="s3">def </span><span class="s1">_svqb(X):</span>
+  <span class="s2">&quot;&quot;&quot;Derives a truncated orthonormal basis for `X`. 
+ 
+  SVQB [1] is an accelerator-friendly orthonormalization procedure, which 
+  squares the matrix `C = X.T @ X` and computes an eigenbasis for a smaller 
+  `(k, k)` system; this offloads most of the work in orthonormalization 
+  to the first multiply when `n` is large. 
+ 
+  Importantly, if diagonalizing the squared matrix `C` reveals rank deficiency 
+  of X (which would be evidenced by near-0 then), eigenvalues corresponding 
+  columns are zeroed out. 
+ 
+  [1]: https://sdm.lbl.gov/~kewu/ps/45577.html 
+ 
+  Args: 
+    X : An `(n, k)` array which describes a linear subspace of R^n, possibly 
+        numerically degenerate with some rank less than `k`. 
+ 
+  Returns: 
+    An orthonormal space `V` described by a `(n, k)` array, with trailing 
+    columns possibly zeroed out if `X` is of low rank. 
+  &quot;&quot;&quot;</span>
+
+  <span class="s0"># In [1] diagonal conditioning is explicit, but by normalizing first</span>
+  <span class="s0"># we can simplify the formulas a bit, since then diagonal conditioning</span>
+  <span class="s0"># becomes a no-op.</span>
+  <span class="s1">norms = jnp.linalg.norm(X</span><span class="s3">, </span><span class="s1">ord=</span><span class="s4">2</span><span class="s3">, </span><span class="s1">axis=</span><span class="s4">0</span><span class="s3">, </span><span class="s1">keepdims=</span><span class="s3">True</span><span class="s1">)</span>
+  <span class="s1">X /= jnp.where(norms == </span><span class="s4">0</span><span class="s3">, </span><span class="s4">1.0</span><span class="s3">, </span><span class="s1">norms)</span>
+
+  <span class="s1">inner = _mm(X.T</span><span class="s3">, </span><span class="s1">X)</span>
+
+  <span class="s1">w</span><span class="s3">, </span><span class="s1">V = _eigh_ascending(inner)</span>
+
+  <span class="s0"># All mask logic is used to avoid divide-by-zeros when input columns</span>
+  <span class="s0"># may have been zero or new zero columns introduced from truncation.</span>
+  <span class="s0">#</span>
+  <span class="s0"># If an eigenvalue is less than max eigvalue * eps, then consider</span>
+  <span class="s0"># that direction &quot;degenerate&quot;.</span>
+  <span class="s1">tau = jnp.finfo(X.dtype).eps * w[</span><span class="s4">0</span><span class="s1">]</span>
+  <span class="s1">padded = jnp.maximum(w</span><span class="s3">, </span><span class="s1">tau)</span>
+
+  <span class="s0"># Note the the tau == 0 edge case where X was all zeros.</span>
+  <span class="s1">sqrted = jnp.where(tau &gt; </span><span class="s4">0</span><span class="s3">, </span><span class="s1">padded</span><span class="s3">, </span><span class="s4">1.0</span><span class="s1">) ** (-</span><span class="s4">0.5</span><span class="s1">)</span>
+
+  <span class="s0"># X^T X = V diag(w) V^T, so</span>
+  <span class="s0"># W = X V diag(w)^(-1/2) will yield W^T W = I (excerpting zeros).</span>
+  <span class="s1">scaledV = V * sqrted[jnp.newaxis</span><span class="s3">, </span><span class="s1">:]</span>
+  <span class="s1">orthoX = _mm(X</span><span class="s3">, </span><span class="s1">scaledV)</span>
+
+  <span class="s1">keep = ((w &gt; tau) * (jnp.diag(inner) &gt; </span><span class="s4">0.0</span><span class="s1">))[jnp.newaxis</span><span class="s3">, </span><span class="s1">:]</span>
+  <span class="s1">orthoX *= keep.astype(orthoX.dtype)</span>
+  <span class="s1">norms = jnp.linalg.norm(orthoX</span><span class="s3">, </span><span class="s1">ord=</span><span class="s4">2</span><span class="s3">, </span><span class="s1">axis=</span><span class="s4">0</span><span class="s3">, </span><span class="s1">keepdims=</span><span class="s3">True</span><span class="s1">)</span>
+  <span class="s1">keep *= norms &gt; </span><span class="s4">0.0</span>
+  <span class="s1">orthoX /= jnp.where(keep</span><span class="s3">, </span><span class="s1">norms</span><span class="s3">, </span><span class="s4">1.0</span><span class="s1">)</span>
+  <span class="s3">return </span><span class="s1">orthoX</span>
+
+
+<span class="s3">def </span><span class="s1">_project_out(basis</span><span class="s3">, </span><span class="s1">U):</span>
+  <span class="s2">&quot;&quot;&quot;Derives component of U in the orthogonal complement of basis. 
+ 
+  This method iteratively subtracts out the basis component and orthonormalizes 
+  the remainder. To an extent, these two operations can oppose each other 
+  when the remainder norm is near-zero (since normalization enlarges a vector 
+  which may possibly lie in the subspace `basis` to be subtracted). 
+ 
+  We make sure to prioritize orthogonality between `basis` and `U`, favoring 
+  to return a lower-rank space thank `rank(U)`, in this tradeoff. 
+ 
+  Args: 
+    basis : An `(n, m)` array which describes a linear subspace of R^n, this 
+        is assumed to be orthonormal but zero columns are allowed. 
+    U : An `(n, k)` array representing another subspace of R^n, whose `basis` 
+        component is to be projected out. 
+ 
+  Returns: 
+    An `(n, k)` array, with some columns possibly zeroed out, representing 
+    the component of `U` in the complement of `basis`. The nonzero columns 
+    are mutually orthonormal. 
+  &quot;&quot;&quot;</span>
+
+  <span class="s0"># See Sec. 6.9 of The Symmetric Eigenvalue Problem by Beresford Parlett [1]</span>
+  <span class="s0"># which motivates two loop iterations for basis subtraction. This</span>
+  <span class="s0"># &quot;twice is enough&quot; approach is due to Kahan. See also a practical note</span>
+  <span class="s0"># by SLEPc developers [2].</span>
+  <span class="s0">#</span>
+  <span class="s0"># Interspersing with orthonormalization isn't directly grounded in the</span>
+  <span class="s0"># original analysis, but taken from Algorithm 5 of [3]. In practice, due to</span>
+  <span class="s0"># normalization, I have noticed that that the orthonormalized basis</span>
+  <span class="s0"># does not always end up as a subspace of the starting basis in practice.</span>
+  <span class="s0"># There may be room to refine this procedure further, but the adjustment</span>
+  <span class="s0"># in the subsequent block handles this edge case well enough for now.</span>
+  <span class="s0">#</span>
+  <span class="s0"># [1]: https://epubs.siam.org/doi/abs/10.1137/1.9781611971163</span>
+  <span class="s0"># [2]: http://slepc.upv.es/documentation/reports/str1.pdf</span>
+  <span class="s0"># [3]: https://arxiv.org/abs/1704.07458</span>
+  <span class="s3">for </span><span class="s1">_ </span><span class="s3">in </span><span class="s1">range(</span><span class="s4">2</span><span class="s1">):</span>
+    <span class="s1">U -= _mm(basis</span><span class="s3">, </span><span class="s1">_mm(basis.T</span><span class="s3">, </span><span class="s1">U))</span>
+    <span class="s1">U = _orthonormalize(U)</span>
+
+  <span class="s0"># It's crucial to end on a subtraction of the original basis.</span>
+  <span class="s0"># This seems to be a detail not present in [2], possibly because of</span>
+  <span class="s0"># of reliance on soft locking.</span>
+  <span class="s0">#</span>
+  <span class="s0"># Near convergence, if the residuals R are 0 and our last</span>
+  <span class="s0"># operation when projecting (X, P) out from R is the orthonormalization</span>
+  <span class="s0"># done above, then due to catastrophic cancellation we may re-introduce</span>
+  <span class="s0"># (X, P) subspace components into U, which can ruin the Rayleigh-Ritz</span>
+  <span class="s0"># conditioning.</span>
+  <span class="s0">#</span>
+  <span class="s0"># We zero out any columns that are even remotely suspicious, so the invariant</span>
+  <span class="s0"># that [basis, U] is zero-or-orthogonal is ensured.</span>
+  <span class="s3">for </span><span class="s1">_ </span><span class="s3">in </span><span class="s1">range(</span><span class="s4">2</span><span class="s1">):</span>
+    <span class="s1">U -= _mm(basis</span><span class="s3">, </span><span class="s1">_mm(basis.T</span><span class="s3">, </span><span class="s1">U))</span>
+  <span class="s1">normU = jnp.linalg.norm(U</span><span class="s3">, </span><span class="s1">ord=</span><span class="s4">2</span><span class="s3">, </span><span class="s1">axis=</span><span class="s4">0</span><span class="s3">, </span><span class="s1">keepdims=</span><span class="s3">True</span><span class="s1">)</span>
+  <span class="s1">U *= (normU &gt;= </span><span class="s4">0.99</span><span class="s1">).astype(U.dtype)</span>
+
+  <span class="s3">return </span><span class="s1">U</span>
+
+<span class="s3">def </span><span class="s1">_orthonormalize(basis):</span>
+  <span class="s0"># Twice is enough, again.</span>
+  <span class="s3">for </span><span class="s1">_ </span><span class="s3">in </span><span class="s1">range(</span><span class="s4">2</span><span class="s1">):</span>
+    <span class="s1">basis = _svqb(basis)</span>
+  <span class="s3">return </span><span class="s1">basis</span>
+
+
+<span class="s3">def </span><span class="s1">_rayleigh_ritz_orth(A</span><span class="s3">, </span><span class="s1">S):</span>
+  <span class="s2">&quot;&quot;&quot;Solve the Rayleigh-Ritz problem for `A` projected to `S`. 
+ 
+  Solves the local eigenproblem for `A` within the subspace `S`, which is 
+  assumed to be orthonormal (with zero columns allowed), identifying `w, V` 
+  satisfying 
+ 
+  (1) `S.T A S V ~= diag(w) V` 
+  (2) `V` is standard orthonormal 
+ 
+  Note that (2) is simplified to be standard orthonormal because `S` is. 
+ 
+  Args: 
+    A: An operator representing the action of an `n`-sized square matrix. 
+    S: An orthonormal subspace of R^n represented by an `(n, k)` array, with 
+       zero columns allowed. 
+ 
+  Returns: 
+    Eigenvectors `V` and eigenvalues `w` satisfying the size-`k` system 
+    described in this method doc. Note `V` will be full rank, even if `S` isn't. 
+  &quot;&quot;&quot;</span>
+
+  <span class="s1">SAS = _mm(S.T</span><span class="s3">, </span><span class="s1">A(S))</span>
+
+  <span class="s0"># Solve the projected subsytem.</span>
+  <span class="s0"># If we could tell to eigh to stop after first k, we would.</span>
+  <span class="s3">return </span><span class="s1">_eigh_ascending(SAS)</span>
+
+
+<span class="s3">def </span><span class="s1">_extend_basis(X</span><span class="s3">, </span><span class="s1">m):</span>
+  <span class="s2">&quot;&quot;&quot;Extend the basis of `X` with `m` addition dimensions. 
+ 
+  Given an orthonormal `X` of dimension `k`, a typical strategy for deriving 
+  an extended basis is to generate a random one and project it out. 
+ 
+  We instead generate a basis using block householder reflectors [1] [2] to 
+  leverage the favorable properties of determinism and avoiding the chance that 
+  the generated random basis has overlap with the starting basis, which may 
+  happen with non-negligible probability in low-dimensional cases. 
+ 
+  [1]: https://epubs.siam.org/doi/abs/10.1137/0725014 
+  [2]: https://www.jstage.jst.go.jp/article/ipsjdc/2/0/2_0_298/_article 
+ 
+  Args: 
+    X : An `(n, k)` array representing a `k`-rank orthonormal basis for a linear 
+        subspace of R^n. 
+    m : A nonnegative integer such that `k + m &lt;= n` telling us how much to 
+        extend the basis by. 
+ 
+  Returns: 
+    An `(n, m)` array representing an extension to the basis of `X` such that 
+    their union is orthonormal. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">n</span><span class="s3">, </span><span class="s1">k = X.shape</span>
+  <span class="s0"># X = vstack(Xupper, Xlower), where Xupper is (k, k)</span>
+  <span class="s1">Xupper</span><span class="s3">, </span><span class="s1">Xlower = jnp.split(X</span><span class="s3">, </span><span class="s1">[k]</span><span class="s3">, </span><span class="s1">axis=</span><span class="s4">0</span><span class="s1">)</span>
+  <span class="s1">u</span><span class="s3">, </span><span class="s1">s</span><span class="s3">, </span><span class="s1">vt = jnp.linalg.svd(Xupper)</span>
+
+  <span class="s0"># Adding U V^T to Xupper won't change its row or column space, but notice</span>
+  <span class="s0"># its singular values are all lifted by 1; we could write its upper k rows</span>
+  <span class="s0"># as u diag(1 + s) vt.</span>
+  <span class="s1">y = jnp.concatenate([Xupper + _mm(u</span><span class="s3">, </span><span class="s1">vt)</span><span class="s3">, </span><span class="s1">Xlower]</span><span class="s3">, </span><span class="s1">axis=</span><span class="s4">0</span><span class="s1">)</span>
+
+  <span class="s0"># Suppose we found a full-rank (n, k) matrix w which defines the</span>
+  <span class="s0"># perpendicular to a space we'd like to reflect over. The block householder</span>
+  <span class="s0"># reflector H(w) would have the usual involution property.</span>
+  <span class="s0">#</span>
+  <span class="s0"># Consider the two definitions below:</span>
+  <span class="s0"># H(w) = I - 2 w w^T</span>
+  <span class="s0"># 2 w w^T = y (v diag(1+s)^(-1) vt) y^T</span>
+  <span class="s0">#</span>
+  <span class="s0"># After some algebra, we see H(w) X = vstack(-u vt, 0)</span>
+  <span class="s0"># Applying H(w) to both sides since H(w)^2 = I we have</span>
+  <span class="s0"># X = H(w) vstack(-u vt, 0). But since H(w) is unitary its action must</span>
+  <span class="s0"># preserve rank. Thus H(w) vstack(0, eye(n - k)) must be orthogonal to</span>
+  <span class="s0"># X; taking just the first m columns H(w) vstack(0, eye(m), 0) yields</span>
+  <span class="s0"># an orthogonal extension to X.</span>
+  <span class="s1">other = jnp.concatenate(</span>
+      <span class="s1">[jnp.eye(m</span><span class="s3">, </span><span class="s1">dtype=X.dtype)</span><span class="s3">,</span>
+       <span class="s1">jnp.zeros((n - k - m</span><span class="s3">, </span><span class="s1">m)</span><span class="s3">, </span><span class="s1">dtype=X.dtype)]</span><span class="s3">, </span><span class="s1">axis=</span><span class="s4">0</span><span class="s1">)</span>
+  <span class="s1">w = _mm(y</span><span class="s3">, </span><span class="s1">vt.T * ((</span><span class="s4">2 </span><span class="s1">* (</span><span class="s4">1 </span><span class="s1">+ s)) ** (-</span><span class="s4">1</span><span class="s1">/</span><span class="s4">2</span><span class="s1">))[jnp.newaxis</span><span class="s3">, </span><span class="s1">:])</span>
+  <span class="s1">h = -</span><span class="s4">2 </span><span class="s1">* jnp.linalg.multi_dot(</span>
+      <span class="s1">[w</span><span class="s3">, </span><span class="s1">w[k:</span><span class="s3">, </span><span class="s1">:].T</span><span class="s3">, </span><span class="s1">other]</span><span class="s3">, </span><span class="s1">precision=jax.lax.Precision.HIGHEST)</span>
+  <span class="s3">return </span><span class="s1">h.at[k:].add(other)</span>
+
+
+<span class="s0"># Sparse direct solve via QR factorization</span>
+<span class="s3">def </span><span class="s1">_spsolve_abstract_eval(data</span><span class="s3">, </span><span class="s1">indices</span><span class="s3">, </span><span class="s1">indptr</span><span class="s3">, </span><span class="s1">b</span><span class="s3">, </span><span class="s1">*</span><span class="s3">, </span><span class="s1">tol</span><span class="s3">, </span><span class="s1">reorder):</span>
+  <span class="s3">if </span><span class="s1">data.dtype != b.dtype:</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s5">f&quot;data types do not match: </span><span class="s3">{</span><span class="s1">data.dtype=</span><span class="s3">} {</span><span class="s1">b.dtype=</span><span class="s3">}</span><span class="s5">&quot;</span><span class="s1">)</span>
+  <span class="s3">if not </span><span class="s1">(jnp.issubdtype(indices.dtype</span><span class="s3">, </span><span class="s1">jnp.integer) </span><span class="s3">and </span><span class="s1">jnp.issubdtype(indptr.dtype</span><span class="s3">, </span><span class="s1">jnp.integer)):</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s5">f&quot;index arrays must be integer typed; got </span><span class="s3">{</span><span class="s1">indices.dtype=</span><span class="s3">} {</span><span class="s1">indptr.dtype=</span><span class="s3">}</span><span class="s5">&quot;</span><span class="s1">)</span>
+  <span class="s3">if not </span><span class="s1">data.ndim == indices.ndim == indptr.ndim == b.ndim == </span><span class="s4">1</span><span class="s1">:</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s5">&quot;Arrays must be one-dimensional. &quot;</span>
+                     <span class="s5">f&quot;Got </span><span class="s3">{</span><span class="s1">data.shape=</span><span class="s3">} {</span><span class="s1">indices.shape=</span><span class="s3">} {</span><span class="s1">indptr.shape=</span><span class="s3">} {</span><span class="s1">b.shape=</span><span class="s3">}</span><span class="s5">&quot;</span><span class="s1">)</span>
+  <span class="s3">if </span><span class="s1">indptr.size != b.size + </span><span class="s4">1 </span><span class="s3">or  </span><span class="s1">data.shape != indices.shape:</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s5">f&quot;Invalid CSR buffer sizes: </span><span class="s3">{</span><span class="s1">data.shape=</span><span class="s3">} {</span><span class="s1">indices.shape=</span><span class="s3">} {</span><span class="s1">indptr.shape=</span><span class="s3">}</span><span class="s5">&quot;</span><span class="s1">)</span>
+  <span class="s3">if </span><span class="s1">reorder </span><span class="s3">not in </span><span class="s1">[</span><span class="s4">0</span><span class="s3">, </span><span class="s4">1</span><span class="s3">, </span><span class="s4">2</span><span class="s3">, </span><span class="s4">3</span><span class="s1">]:</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s5">f&quot;</span><span class="s3">{</span><span class="s1">reorder=</span><span class="s3">} </span><span class="s5">not valid, must be one of [1, 2, 3, 4]&quot;</span><span class="s1">)</span>
+  <span class="s1">tol = float(tol)</span>
+  <span class="s3">return </span><span class="s1">b</span>
+
+
+<span class="s3">def </span><span class="s1">_spsolve_gpu_lowering(ctx</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">indices</span><span class="s3">, </span><span class="s1">indptr</span><span class="s3">, </span><span class="s1">b</span><span class="s3">, </span><span class="s1">*</span><span class="s3">, </span><span class="s1">tol</span><span class="s3">, </span><span class="s1">reorder):</span>
+  <span class="s1">data_aval</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">= ctx.avals_in</span>
+  <span class="s3">return </span><span class="s1">gpu_solver.cuda_csrlsvqr(data_aval.dtype</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">indices</span><span class="s3">,</span>
+                                  <span class="s1">indptr</span><span class="s3">, </span><span class="s1">b</span><span class="s3">, </span><span class="s1">tol</span><span class="s3">, </span><span class="s1">reorder)</span>
+
+
+<span class="s3">def </span><span class="s1">_spsolve_cpu_lowering(ctx</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">indices</span><span class="s3">, </span><span class="s1">indptr</span><span class="s3">, </span><span class="s1">b</span><span class="s3">, </span><span class="s1">tol</span><span class="s3">, </span><span class="s1">reorder):</span>
+  <span class="s3">del </span><span class="s1">tol</span><span class="s3">, </span><span class="s1">reorder</span>
+  <span class="s1">args = [data</span><span class="s3">, </span><span class="s1">indices</span><span class="s3">, </span><span class="s1">indptr</span><span class="s3">, </span><span class="s1">b]</span>
+
+  <span class="s3">def </span><span class="s1">_callback(data</span><span class="s3">, </span><span class="s1">indices</span><span class="s3">, </span><span class="s1">indptr</span><span class="s3">, </span><span class="s1">b</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+    <span class="s1">A = csr_matrix((data</span><span class="s3">, </span><span class="s1">indices</span><span class="s3">, </span><span class="s1">indptr)</span><span class="s3">, </span><span class="s1">shape=(b.size</span><span class="s3">, </span><span class="s1">b.size))</span>
+    <span class="s3">return </span><span class="s1">(linalg.spsolve(A</span><span class="s3">, </span><span class="s1">b).astype(b.dtype)</span><span class="s3">,</span><span class="s1">)</span>
+
+  <span class="s1">result</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">keepalive = mlir.emit_python_callback(</span>
+      <span class="s1">ctx</span><span class="s3">, </span><span class="s1">_callback</span><span class="s3">, None, </span><span class="s1">args</span><span class="s3">, </span><span class="s1">ctx.avals_in</span><span class="s3">, </span><span class="s1">ctx.avals_out</span><span class="s3">,</span>
+      <span class="s1">has_side_effect=</span><span class="s3">False</span><span class="s1">)</span>
+  <span class="s1">ctx.module_context.add_keepalive(keepalive)</span>
+  <span class="s3">return </span><span class="s1">result</span>
+
+
+<span class="s1">spsolve_p = core.Primitive(</span><span class="s5">'spsolve'</span><span class="s1">)</span>
+<span class="s1">spsolve_p.def_impl(functools.partial(xla.apply_primitive</span><span class="s3">, </span><span class="s1">spsolve_p))</span>
+<span class="s1">spsolve_p.def_abstract_eval(_spsolve_abstract_eval)</span>
+<span class="s1">mlir.register_lowering(spsolve_p</span><span class="s3">, </span><span class="s1">_spsolve_gpu_lowering</span><span class="s3">, </span><span class="s1">platform=</span><span class="s5">'cuda'</span><span class="s1">)</span>
+<span class="s1">mlir.register_lowering(spsolve_p</span><span class="s3">, </span><span class="s1">_spsolve_cpu_lowering</span><span class="s3">, </span><span class="s1">platform=</span><span class="s5">'cpu'</span><span class="s1">)</span>
+
+
+<span class="s3">def </span><span class="s1">spsolve(data</span><span class="s3">, </span><span class="s1">indices</span><span class="s3">, </span><span class="s1">indptr</span><span class="s3">, </span><span class="s1">b</span><span class="s3">, </span><span class="s1">tol=</span><span class="s4">1e-6</span><span class="s3">, </span><span class="s1">reorder=</span><span class="s4">1</span><span class="s1">):</span>
+  <span class="s2">&quot;&quot;&quot;A sparse direct solver using QR factorization. 
+ 
+  Accepts a sparse matrix in CSR format `data, indices, indptr` arrays. 
+  Currently only the CUDA GPU backend is implemented. 
+ 
+  Args: 
+    data : An array containing the non-zero entries of the CSR matrix. 
+    indices : The column indices of the CSR matrix. 
+    indptr : The row pointer array of the CSR matrix. 
+    b : The right hand side of the linear system. 
+    tol : Tolerance to decide if singular or not. Defaults to 1e-6. 
+    reorder : The reordering scheme to use to reduce fill-in. No reordering if 
+        `reorder=0'. Otherwise, symrcm, symamd, or csrmetisnd (`reorder=1,2,3'), 
+        respectively. Defaults to symrcm. 
+ 
+  Returns: 
+    An array with the same dtype and size as b representing the solution to 
+    the sparse linear system. 
+  &quot;&quot;&quot;</span>
+  <span class="s3">return </span><span class="s1">spsolve_p.bind(data</span><span class="s3">, </span><span class="s1">indices</span><span class="s3">, </span><span class="s1">indptr</span><span class="s3">, </span><span class="s1">b</span><span class="s3">, </span><span class="s1">tol=tol</span><span class="s3">, </span><span class="s1">reorder=reorder)</span>
+</pre>
+</body>
+</html>

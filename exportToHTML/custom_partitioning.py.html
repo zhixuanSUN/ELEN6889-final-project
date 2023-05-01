@@ -1,0 +1,460 @@
+<html>
+<head>
+<title>custom_partitioning.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #629755; font-style: italic;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+custom_partitioning.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2018 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s2">import </span><span class="s1">jax</span>
+<span class="s2">import </span><span class="s1">inspect</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">core</span>
+<span class="s2">from </span><span class="s1">jax </span><span class="s2">import </span><span class="s1">tree_util</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">linear_util </span><span class="s2">as </span><span class="s1">lu</span>
+<span class="s2">from </span><span class="s1">jax.experimental </span><span class="s2">import </span><span class="s1">pjit</span>
+<span class="s2">from </span><span class="s1">jax.errors </span><span class="s2">import </span><span class="s1">UnexpectedTracerError</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">mesh </span><span class="s2">as </span><span class="s1">mesh_lib</span>
+<span class="s2">from </span><span class="s1">jax._src.lib.mlir.dialects </span><span class="s2">import </span><span class="s1">hlo</span>
+<span class="s2">from </span><span class="s1">jax._src.lib.mlir </span><span class="s2">import </span><span class="s1">ir</span>
+<span class="s2">from </span><span class="s1">jax._src.interpreters </span><span class="s2">import </span><span class="s1">mlir</span>
+<span class="s2">from </span><span class="s1">jax._src.interpreters </span><span class="s2">import </span><span class="s1">partial_eval </span><span class="s2">as </span><span class="s1">pe</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">custom_api_util</span>
+<span class="s2">from </span><span class="s1">jax._src.lib </span><span class="s2">import </span><span class="s1">xla_client </span><span class="s2">as </span><span class="s1">xc</span>
+<span class="s2">from </span><span class="s1">jax._src.api_util </span><span class="s2">import </span><span class="s1">flatten_fun_nokwargs</span>
+<span class="s2">from </span><span class="s1">jax._src.api_util </span><span class="s2">import </span><span class="s1">argnums_partial</span>
+
+<span class="s2">import </span><span class="s1">weakref</span>
+
+
+<span class="s2">def </span><span class="s1">_resolve_kwargs(fun</span><span class="s2">, </span><span class="s1">args</span><span class="s2">, </span><span class="s1">kwargs):</span>
+  <span class="s1">ba = inspect.signature(fun).bind(*args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+  <span class="s1">ba.apply_defaults()</span>
+  <span class="s2">if </span><span class="s1">ba.kwargs:</span>
+    <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;keyword arguments could not be resolved to positions&quot;</span><span class="s1">)</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">ba.args</span>
+
+
+<span class="s2">class </span><span class="s1">_ShardingCallbackInfo:</span>
+
+  <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">propagate_user_sharding</span><span class="s2">, </span><span class="s1">partition</span><span class="s2">, </span><span class="s1">to_mesh_pspec_sharding</span><span class="s2">,</span>
+               <span class="s1">infer_sharding_from_operands</span><span class="s2">, </span><span class="s1">module_context</span><span class="s2">, </span><span class="s1">mesh</span><span class="s2">, </span><span class="s1">static_args):</span>
+    <span class="s1">self.propagate_user_sharding = propagate_user_sharding</span>
+    <span class="s1">self.partition = partition</span>
+    <span class="s1">self.to_mesh_pspec_sharding = to_mesh_pspec_sharding</span>
+    <span class="s1">self.infer_sharding_from_operands = infer_sharding_from_operands</span>
+    <span class="s1">self.module_context = module_context</span>
+    <span class="s1">self.mesh = mesh</span>
+    <span class="s1">self.static_args = static_args</span>
+
+
+<span class="s1">_sharding_callbacks = weakref.WeakValueDictionary()  </span><span class="s0"># type: ignore</span>
+
+<span class="s1">_CUSTOM_PARTITIONING_CALL_NAME = </span><span class="s3">&quot;CustomSPMDPartitioning&quot;</span>
+
+
+<span class="s2">def </span><span class="s1">_to_jax_shape(s):</span>
+  <span class="s2">return </span><span class="s1">core.ShapedArray(s.dimensions()</span><span class="s2">, </span><span class="s1">s.numpy_dtype())</span>
+
+
+<span class="s2">def </span><span class="s1">_custom_partitioning_propagate_user_sharding(sharding</span><span class="s2">, </span><span class="s1">shape</span><span class="s2">, </span><span class="s1">backend_string):</span>
+  <span class="s1">info = _sharding_callbacks[backend_string]</span>
+  <span class="s2">if </span><span class="s1">info.propagate_user_sharding </span><span class="s2">is None</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">sharding</span>
+  <span class="s2">return </span><span class="s1">info.propagate_user_sharding(*info.static_args</span><span class="s2">, </span><span class="s1">sharding</span><span class="s2">, </span><span class="s1">shape)</span>
+
+
+<span class="s2">def </span><span class="s1">_custom_partitioning_partition(arg_shapes</span><span class="s2">, </span><span class="s1">arg_shardings</span><span class="s2">, </span><span class="s1">result_shape</span><span class="s2">,</span>
+                                   <span class="s1">result_sharding</span><span class="s2">, </span><span class="s1">backend_string):</span>
+  <span class="s1">info = _sharding_callbacks[backend_string]</span>
+  <span class="s1">lower_fn</span><span class="s2">, </span><span class="s1">result_sharding</span><span class="s2">, </span><span class="s1">arg_shardings = info.partition(</span>
+      <span class="s1">*info.static_args</span><span class="s2">,</span>
+      <span class="s1">[_to_jax_shape(s) </span><span class="s2">for </span><span class="s1">s </span><span class="s2">in </span><span class="s1">arg_shapes]</span><span class="s2">,</span>
+      <span class="s1">[info.to_mesh_pspec_sharding(s.to_proto()) </span><span class="s2">for </span><span class="s1">s </span><span class="s2">in </span><span class="s1">arg_shardings]</span><span class="s2">,</span>
+      <span class="s1">_to_jax_shape(result_shape)</span><span class="s2">,</span>
+      <span class="s1">info.to_mesh_pspec_sharding(result_sharding.to_proto())</span>
+  <span class="s1">)</span>
+  <span class="s1">module_context = info.module_context</span>
+
+  <span class="s2">def </span><span class="s1">to_hlo_sharding(sharding</span><span class="s2">, </span><span class="s1">shape):</span>
+    <span class="s2">return </span><span class="s1">xc.HloSharding.from_proto(</span>
+        <span class="s1">sharding._to_xla_op_sharding(len(shape.dimensions())))</span>
+
+  <span class="s1">result_sharding = to_hlo_sharding(result_sharding</span><span class="s2">, </span><span class="s1">result_shape)</span>
+  <span class="s1">arg_shardings = [</span>
+      <span class="s1">to_hlo_sharding(sharding</span><span class="s2">, </span><span class="s1">s)</span>
+      <span class="s2">for </span><span class="s1">sharding</span><span class="s2">, </span><span class="s1">s </span><span class="s2">in </span><span class="s1">zip(arg_shardings</span><span class="s2">, </span><span class="s1">arg_shapes)</span>
+  <span class="s1">]</span>
+  <span class="s1">tiled_args = [</span>
+      <span class="s1">_to_jax_shape(sharding.tile(s))</span>
+      <span class="s2">for </span><span class="s1">sharding</span><span class="s2">, </span><span class="s1">s </span><span class="s2">in </span><span class="s1">zip(arg_shardings</span><span class="s2">, </span><span class="s1">arg_shapes)</span>
+  <span class="s1">]</span>
+  <span class="s1">closed_jaxpr = jax.make_jaxpr(</span>
+      <span class="s1">lower_fn</span><span class="s2">, </span><span class="s1">axis_env=list(info.mesh.shape.items()))(*tiled_args)</span>
+  <span class="s1">axis_context = mlir.SPMDAxisContext(info.mesh)</span>
+  <span class="s1">built = mlir.build_xla_computation_helper(</span>
+      <span class="s1">closed_jaxpr</span><span class="s2">,</span>
+      <span class="s1">name=</span><span class="s3">&quot;tmp_xla_computation&quot;</span><span class="s2">,</span>
+      <span class="s1">platform=module_context.platform</span><span class="s2">,</span>
+      <span class="s1">backend_or_name=module_context.backend_or_name</span><span class="s2">,</span>
+      <span class="s1">axis_context=axis_context.extend_manual(frozenset(info.mesh.axis_names)))</span>
+  <span class="s2">return </span><span class="s1">built</span><span class="s2">, </span><span class="s1">arg_shardings</span><span class="s2">, </span><span class="s1">result_sharding</span>
+
+
+<span class="s2">def </span><span class="s1">_custom_partitioning_infer_sharding_from_operands(arg_shapes</span><span class="s2">, </span><span class="s1">arg_shardings</span><span class="s2">,</span>
+                                                      <span class="s1">shape</span><span class="s2">, </span><span class="s1">backend_string):</span>
+  <span class="s1">info = _sharding_callbacks[backend_string]</span>
+  <span class="s1">result_shape = _to_jax_shape(shape)</span>
+  <span class="s1">result = info.infer_sharding_from_operands(</span>
+      <span class="s1">*info.static_args</span><span class="s2">,</span>
+      <span class="s1">[_to_jax_shape(s) </span><span class="s2">for </span><span class="s1">s </span><span class="s2">in </span><span class="s1">arg_shapes]</span><span class="s2">,</span>
+      <span class="s1">[info.to_mesh_pspec_sharding(s.to_proto()) </span><span class="s2">for </span><span class="s1">s </span><span class="s2">in </span><span class="s1">arg_shardings]</span><span class="s2">,</span>
+      <span class="s1">result_shape</span>
+  <span class="s1">)</span>
+  <span class="s2">return </span><span class="s1">xc.HloSharding.from_proto(</span>
+      <span class="s1">result._to_xla_op_sharding(len(result_shape.shape)))</span>
+
+
+<span class="s1">custom_partitioning_p = core.Primitive(</span><span class="s3">&quot;custom_partitioning&quot;</span><span class="s1">)</span>
+<span class="s1">custom_partitioning_p.multiple_results = </span><span class="s2">True</span>
+
+
+<span class="s2">def </span><span class="s1">_custom_partitioning_abstract_eval(*avals</span><span class="s2">, </span><span class="s1">call</span><span class="s2">, </span><span class="s1">in_tree</span><span class="s2">, </span><span class="s1">out_tree</span><span class="s2">,</span>
+                                       <span class="s1">propagate_user_sharding</span><span class="s2">, </span><span class="s1">partition</span><span class="s2">,</span>
+                                       <span class="s1">infer_sharding_from_operands</span><span class="s2">,</span>
+                                       <span class="s1">static_args):</span>
+  <span class="s2">del </span><span class="s1">in_tree</span><span class="s2">, </span><span class="s1">out_tree</span><span class="s2">, </span><span class="s1">propagate_user_sharding</span><span class="s2">, </span><span class="s1">partition</span>
+  <span class="s2">del </span><span class="s1">infer_sharding_from_operands</span><span class="s2">, </span><span class="s1">static_args</span>
+  <span class="s2">return </span><span class="s1">call.out_avals</span>
+
+
+<span class="s2">def </span><span class="s1">_custom_partitioning_impl(*args</span><span class="s2">, </span><span class="s1">call</span><span class="s2">, </span><span class="s1">in_tree</span><span class="s2">, </span><span class="s1">out_tree</span><span class="s2">, </span><span class="s1">propagate_user_sharding</span><span class="s2">,</span>
+                              <span class="s1">partition</span><span class="s2">, </span><span class="s1">infer_sharding_from_operands</span><span class="s2">, </span><span class="s1">static_args):</span>
+  <span class="s2">del </span><span class="s1">in_tree</span><span class="s2">, </span><span class="s1">out_tree</span><span class="s2">, </span><span class="s1">propagate_user_sharding</span><span class="s2">, </span><span class="s1">partition</span>
+  <span class="s2">del </span><span class="s1">infer_sharding_from_operands</span><span class="s2">, </span><span class="s1">static_args</span>
+  <span class="s2">return </span><span class="s1">core.jaxpr_as_fun(call)(*args)</span>
+
+
+<span class="s1">custom_partitioning_p.def_abstract_eval(_custom_partitioning_abstract_eval)</span>
+<span class="s1">custom_partitioning_p.def_impl(_custom_partitioning_impl)</span>
+
+
+<span class="s2">def </span><span class="s1">_check_for_tracers(x):</span>
+  <span class="s2">for </span><span class="s1">leaf </span><span class="s2">in </span><span class="s1">tree_util.tree_leaves(x):</span>
+    <span class="s2">if </span><span class="s1">isinstance(x</span><span class="s2">, </span><span class="s1">core.Tracer):</span>
+      <span class="s1">msg = (</span>
+          <span class="s3">&quot;Found a JAX Tracer object passed as an argument to a&quot;</span>
+          <span class="s3">&quot;custom_partitioning function in a position indicated as static by&quot;</span>
+          <span class="s3">&quot;static_argnums. &quot;</span>
+      <span class="s1">)</span>
+      <span class="s2">raise </span><span class="s1">UnexpectedTracerError(msg)</span>
+
+
+<span class="s1">@custom_api_util.register_custom_decorator_type</span>
+<span class="s2">class </span><span class="s1">custom_partitioning:</span>
+  <span class="s4">&quot;&quot;&quot;Inserts a CustomCallOp into the XLA graph with custom SPMD lowering rules. 
+ 
+  .. code-block:: python 
+ 
+    @custom_partitioning 
+    def f(*args): 
+      return ... 
+ 
+    def propagate_user_sharding(sharding, shape): 
+      '''Update the sharding of the op from a user's sharding.''' 
+ 
+    def partition(arg_shapes, arg_shardings, result_shape, result_sharding): 
+      def lower_fn(*args): 
+        ... builds computation on per-device shapes ... 
+      # result_sharding and arg_shardings may optionally be modified and the 
+      # partitioner will insert collectives to reshape. 
+      return lower_fn, result_sharding, arg_shardings 
+ 
+    def infer_sharding_from_operands(arg_shapes, arg_shardings, shape): 
+      '''Compute the result sharding from the sharding of the operands.''' 
+ 
+    f.def_partition(partition, propagate_user_sharding, infer_sharding_from_operands) 
+ 
+  The args to ``def_partition`` are as follows: 
+ 
+  * ``propagate_user_sharding``: Callable which takes the sharding of a user (in the dag) 
+    and returns a suggestion for a new `NamedSharding`. The default 
+    implementation is just to return the suggested sharding. 
+  * ``partition``: Callable which takes the SPMD suggested partition shapes and 
+    partition specs and returns a per-shard lowering function and the final 
+    input and output sharding specs (the SPMD partitioner will repartition the 
+    inputs to match). 
+  * ``infer_sharding_from_operands``: Callable which computes an output ``NamedSharding`` 
+    from the ``NamedSharding`` chosen for each argument. 
+ 
+  Positional arguments can be specified as static using static_argnums. JAX uses 
+  :code:`inspect.signature(fun)` to resolve these positional arguments. 
+ 
+  Example: 
+ 
+    As an example, assume we want to enhance the existing ``jax.numpy.fft.fft``. This function computes 
+    the discrete Fourier transform of an N-dimensional input along the last dimension, and is batched 
+    along the first N-1 dimensions. 
+    By default, however, it will ignore the sharding of the input and gather the input on all devices. 
+    However, since ``jax.numpy.fft.fft`` is batched along the first N-1 dimensions, 
+    this is unnecessary. We will create a new ``my_fft`` op that, instead, does not alter the sharding 
+    along the first `N-1` dimensions, and only gathers the input along the last dimension if needed. 
+ 
+    .. code-block:: python 
+ 
+      import jax 
+      from jax.sharding import NamedSharding 
+      from jax.experimental.custom_partitioning import custom_partitioning 
+      from jax.experimental.pjit import pjit 
+      from jax.sharding import PartitionSpec as P 
+      from jax.sharding import Mesh 
+      from jax.numpy.fft import fft 
+      import regex as re 
+      import numpy as np 
+ 
+      # Pattern to detect all-gather or dynamic-slice in the generated HLO 
+      _PATTERN = '(dynamic-slice|all-gather)' 
+ 
+      # For an N-D input, keeps sharding along the first N-1 dimensions 
+      # but replicate along the last dimension 
+      def supported_sharding(sharding, shape): 
+          rank = len(shape.shape) 
+          max_shared_dims = min(len(sharding.spec), rank-1) 
+          names = tuple(sharding.spec[:max_shared_dims]) + tuple(None for _ in range(rank - max_shared_dims)) 
+          return NamedSharding(sharding.mesh, P(*names)) 
+ 
+      def partition(arg_shapes, arg_shardings, result_shape, result_sharding): 
+          return fft, \ 
+              supported_sharding(arg_shardings[0], arg_shapes[0]), \ 
+              [supported_sharding(arg_shardings[0], arg_shapes[0])] 
+ 
+      def infer_sharding_from_operands(arg_shapes, arg_shardings, shape): 
+          return supported_sharding(arg_shardings[0], arg_shapes[0]) 
+ 
+      @custom_partitioning 
+      def my_fft(x): 
+          return fft(x) 
+ 
+      my_fft.def_partition( 
+          infer_sharding_from_operands=infer_sharding_from_operands, 
+          partition=partition) 
+ 
+    Now create a 2D array sharded along the first axis, pass it through ``my_fft`` 
+    and notice how it is still sharded as expected, and identical to the output 
+    of ``fft``. However, inspecting the HLO 
+    (using ``lower(x).compile().runtime_executable().hlo_modules()``) reveals that 
+    ``my_fft`` does not create any all-gather or dynamic-slice, while ``fft`` does. 
+ 
+    .. code-block:: 
+ 
+      with Mesh(np.array(jax.devices()), ('x',)): 
+        x = np.asarray(np.random.randn(32*1024, 1024), dtype=np.complex64) 
+        y = pjit(lambda x: x, in_shardings=None, out_shardings=P('x'))(x) 
+        pjit_my_fft = pjit(my_fft, in_shardings=P('x'), out_shardings=P('x')) 
+        pjit_fft    = pjit(fft,    in_shardings=P('x'), out_shardings=P('x')) 
+        print(pjit_my_fft(y)) 
+        print(pjit_fft(y)) 
+        # dynamic-slice or all-gather are not present in the HLO for my_fft, because x is a 2D array 
+        assert(re.search(_PATTERN, pjit_my_fft.lower(x).compile().runtime_executable().hlo_modules()[0].to_string()) is None) 
+        # dynamic-slice or all-gather are present in the HLO for fft 
+        assert(re.search(_PATTERN, pjit_fft.lower(x).compile().runtime_executable().hlo_modules()[0].to_string())    is not None) 
+ 
+    .. code-block:: 
+ 
+      # my_fft 
+      [[-38.840824   +0.j        -40.649452  +11.845365j 
+      ... 
+        -1.6937828  +0.8402481j  15.999859   -4.0156755j]] 
+ 
+      # jax.numpy.fft.fft 
+      [[-38.840824   +0.j        -40.649452  +11.845365j 
+        ... 
+        -1.6937828  +0.8402481j  15.999859   -4.0156755j]] 
+ 
+    Because of the logic in ``supported_sharding``, ``my_fft`` also works on 1-dimensional arrays. 
+    However, in this case, the HLO of ``my_fft`` does show a a dynamic-slice, since the last dimension 
+    is the dimension along which FFTs are calculated and needs to be replicated on all devices before 
+    the computation can be done. 
+ 
+    .. code-block:: 
+ 
+      with Mesh(np.array(jax.devices()), ('x',)): 
+        x = np.asarray(np.random.randn(32*1024*1024), dtype=np.complex64) 
+        y = pjit(lambda x: x, in_shardings=None, out_shardings=P('x'))(x) 
+        pjit_my_fft = pjit(my_fft, in_shardings=P('x'), out_shardings=P('x')) 
+        pjit_fft    = pjit(fft,    in_shardings=P('x'), out_shardings=P('x')) 
+        print(pjit_my_fft(y)) 
+        print(pjit_fft(y)) 
+        # dynamic-slice or all-gather are present in the HLO for my_fft, because x is a 1D array 
+        assert(re.search(_PATTERN, pjit_my_fft.lower(x).compile().runtime_executable().hlo_modules()[0].to_string()) is None) 
+        # dynamic-slice or all-gather are present in the HLO for fft 
+        assert(re.search(_PATTERN, pjit_fft.lower(x).compile().runtime_executable().hlo_modules()[0].to_string())    is not None) 
+ 
+    .. code-block:: 
+ 
+      # my_fft 
+      [    7.217285   +0.j     -3012.4937  +4287.635j   -405.83594 +3042.984j 
+      ...  1422.4502  +7271.4297j  -405.84033 -3042.983j 
+      -3012.4963  -4287.6343j] 
+ 
+      # jax.numpy.fft.fft 
+      [    7.217285   +0.j     -3012.4937  +4287.635j   -405.83594 +3042.984j 
+      ...  1422.4502  +7271.4297j  -405.84033 -3042.983j 
+      -3012.4963  -4287.6343j] 
+ 
+  &quot;&quot;&quot;</span>
+
+  <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">fun</span><span class="s2">, </span><span class="s1">static_argnums=()):</span>
+    <span class="s1">self.fun = fun</span>
+    <span class="s1">self.partition = </span><span class="s2">None</span>
+    <span class="s1">self.static_argnums = static_argnums</span>
+    <span class="s1">self.propagate_user_sharding = </span><span class="s2">None</span>
+    <span class="s1">self.infer_sharding_from_operands = </span><span class="s2">None</span>
+
+  <span class="s1">__getattr__ = custom_api_util.forward_attr</span>
+
+  <span class="s2">def </span><span class="s1">def_partition(self</span><span class="s2">, </span><span class="s1">partition</span><span class="s2">, </span><span class="s1">infer_sharding_from_operands</span><span class="s2">,</span>
+                    <span class="s1">propagate_user_sharding=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s1">self.partition = partition</span>
+    <span class="s1">self.propagate_user_sharding = propagate_user_sharding</span>
+    <span class="s1">self.infer_sharding_from_operands = infer_sharding_from_operands</span>
+    <span class="s2">return </span><span class="s1">partition</span>
+
+  <span class="s2">def </span><span class="s1">__call__(self</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+    <span class="s1">args = _resolve_kwargs(self.fun</span><span class="s2">, </span><span class="s1">args</span><span class="s2">, </span><span class="s1">kwargs)</span>
+    <span class="s2">if </span><span class="s1">self.static_argnums:</span>
+      <span class="s1">static_argnums = set(self.static_argnums)</span>
+      <span class="s1">args = tuple(x </span><span class="s2">if </span><span class="s1">i </span><span class="s2">in </span><span class="s1">static_argnums </span><span class="s2">else </span><span class="s1">x </span><span class="s2">for </span><span class="s1">i</span><span class="s2">, </span><span class="s1">x </span><span class="s2">in </span><span class="s1">enumerate(args))</span>
+      <span class="s1">dyn_argnums = [i </span><span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range(len(args)) </span><span class="s2">if </span><span class="s1">i </span><span class="s2">not in </span><span class="s1">static_argnums]</span>
+      <span class="s1">f_</span><span class="s2">, </span><span class="s1">dyn_args = argnums_partial(</span>
+          <span class="s1">lu.wrap_init(self.fun)</span><span class="s2">,</span>
+          <span class="s1">dyn_argnums</span><span class="s2">,</span>
+          <span class="s1">args</span><span class="s2">,</span>
+          <span class="s1">require_static_args_hashable=</span><span class="s2">False,</span>
+      <span class="s1">)</span>
+      <span class="s1">static_args = [args[i] </span><span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">self.static_argnums]</span>
+      <span class="s1">_check_for_tracers(static_args)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+      <span class="s1">static_args = []</span>
+      <span class="s1">f_</span><span class="s2">, </span><span class="s1">dyn_args = lu.wrap_init(self.fun)</span><span class="s2">, </span><span class="s1">args</span>
+    <span class="s1">args_flat</span><span class="s2">, </span><span class="s1">in_tree = tree_util.tree_flatten(dyn_args)</span>
+    <span class="s1">flat_fun</span><span class="s2">, </span><span class="s1">out_tree = flatten_fun_nokwargs(f_</span><span class="s2">, </span><span class="s1">in_tree)</span>
+    <span class="s1">in_avals = [core.raise_to_shaped(core.get_aval(x)) </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">args_flat]</span>
+    <span class="s1">debug = pe.debug_info(self.fun</span><span class="s2">, </span><span class="s1">in_tree</span><span class="s2">, </span><span class="s1">out_tree</span><span class="s2">, False,</span>
+                          <span class="s3">&quot;custom_partitioning&quot;</span><span class="s1">)</span>
+    <span class="s1">jaxpr</span><span class="s2">, </span><span class="s1">_</span><span class="s2">, </span><span class="s1">consts = pe.trace_to_jaxpr_dynamic(flat_fun</span><span class="s2">, </span><span class="s1">in_avals</span><span class="s2">, </span><span class="s1">debug)</span>
+    <span class="s2">assert not </span><span class="s1">len(consts)</span>
+    <span class="s1">closed_call = core.ClosedJaxpr(pe.convert_constvars_jaxpr(jaxpr)</span><span class="s2">, </span><span class="s1">())</span>
+    <span class="s1">out_flat = custom_partitioning_p.bind(</span>
+        <span class="s1">*consts</span><span class="s2">,</span>
+        <span class="s1">*args_flat</span><span class="s2">,</span>
+        <span class="s1">call=closed_call</span><span class="s2">,</span>
+        <span class="s1">partition=self.partition</span><span class="s2">,</span>
+        <span class="s1">propagate_user_sharding=self.propagate_user_sharding</span><span class="s2">,</span>
+        <span class="s1">infer_sharding_from_operands=self.infer_sharding_from_operands</span><span class="s2">,</span>
+        <span class="s1">in_tree=in_tree</span><span class="s2">,</span>
+        <span class="s1">out_tree=out_tree()</span><span class="s2">,</span>
+        <span class="s1">static_args=static_args</span>
+    <span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">tree_util.tree_unflatten(out_tree()</span><span class="s2">, </span><span class="s1">out_flat)</span>
+
+
+<span class="s2">def </span><span class="s1">_custom_partitioning_lowering_rule(ctx: mlir.LoweringRuleContext</span><span class="s2">, </span><span class="s1">*values</span><span class="s2">,</span>
+                                       <span class="s1">call</span><span class="s2">, </span><span class="s1">in_tree</span><span class="s2">, </span><span class="s1">out_tree</span><span class="s2">,</span>
+                                       <span class="s1">propagate_user_sharding</span><span class="s2">, </span><span class="s1">partition</span><span class="s2">,</span>
+                                       <span class="s1">infer_sharding_from_operands</span><span class="s2">,</span>
+                                       <span class="s1">static_args):</span>
+  <span class="s1">mesh = mesh_lib.thread_resources.env.physical_mesh</span>
+  <span class="s1">axis_context = ctx.module_context.axis_context</span>
+
+  <span class="s2">if </span><span class="s1">isinstance(axis_context</span><span class="s2">, </span><span class="s1">mlir.ShardingContext):</span>
+    <span class="s1">devices = axis_context.device_assignment</span>
+  <span class="s2">elif </span><span class="s1">isinstance(axis_context</span><span class="s2">, </span><span class="s1">mlir.SPMDAxisContext):</span>
+    <span class="s1">devices = list(axis_context.mesh.devices.flat)</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s1">devices = </span><span class="s2">None</span>
+
+  <span class="s2">if not </span><span class="s1">devices </span><span class="s2">or </span><span class="s1">len(devices) == </span><span class="s5">1</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">mlir.lower_fun(</span>
+        <span class="s1">core.jaxpr_as_fun(call)</span><span class="s2">, </span><span class="s1">multiple_results=</span><span class="s2">True</span><span class="s1">)(ctx</span><span class="s2">, </span><span class="s1">*values)</span>
+
+  <span class="s2">def </span><span class="s1">to_mesh_pspec_sharding(op_sharding: xc.OpSharding):</span>
+    <span class="s2">if </span><span class="s1">mesh.empty:</span>
+      <span class="s2">from </span><span class="s1">jax._src.sharding_impls </span><span class="s2">import </span><span class="s1">GSPMDSharding</span>
+      <span class="s2">assert </span><span class="s1">devices </span><span class="s2">is not None</span>
+      <span class="s2">return </span><span class="s1">GSPMDSharding(devices</span><span class="s2">, </span><span class="s1">op_sharding)</span>
+    <span class="s1">pspec = pjit.parse_flatten_op_sharding(op_sharding</span><span class="s2">,</span>
+                                           <span class="s1">mesh)[</span><span class="s5">0</span><span class="s1">].get_partition_spec()</span>
+    <span class="s2">return </span><span class="s1">jax.sharding.NamedSharding(mesh</span><span class="s2">, </span><span class="s1">pspec)</span>
+
+  <span class="s1">sharding_callback_info = _ShardingCallbackInfo(propagate_user_sharding</span><span class="s2">, </span><span class="s1">partition</span><span class="s2">,</span>
+                                                <span class="s1">to_mesh_pspec_sharding</span><span class="s2">,</span>
+                                                <span class="s1">infer_sharding_from_operands</span><span class="s2">,</span>
+                                                <span class="s1">ctx.module_context</span><span class="s2">, </span><span class="s1">mesh</span><span class="s2">, </span><span class="s1">static_args)</span>
+  <span class="s1">key = str(id(sharding_callback_info))</span>
+  <span class="s1">_sharding_callbacks[key] = sharding_callback_info</span>
+  <span class="s0"># We need to make sure `sharding_callback_info` is still alive when the SPMD</span>
+  <span class="s0"># partitioner runs so we keep it alive by attaching it to the executable.</span>
+  <span class="s1">ctx.module_context.add_keepalive(sharding_callback_info)</span>
+
+  <span class="s1">mlir_shapes = [mlir.aval_to_ir_types(s) </span><span class="s2">for </span><span class="s1">s </span><span class="s2">in </span><span class="s1">call.out_avals]</span>
+  <span class="s2">if </span><span class="s1">len(mlir_shapes) == </span><span class="s5">1</span><span class="s1">:</span>
+    <span class="s1">out_type = mlir_shapes[</span><span class="s5">0</span><span class="s1">]</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s1">out_type = [ir.TupleType.get_tuple(mlir_shapes)]</span>
+
+  <span class="s1">out = hlo.CustomCallOp(</span>
+      <span class="s1">out_type</span><span class="s2">,</span>
+      <span class="s1">list(values)</span><span class="s2">,</span>
+      <span class="s1">call_target_name=ir.StringAttr.get(_CUSTOM_PARTITIONING_CALL_NAME)</span><span class="s2">,</span>
+      <span class="s1">has_side_effect=ir.BoolAttr.get(</span><span class="s2">False</span><span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">api_version=mlir.i32_attr(</span><span class="s5">2</span><span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">called_computations=ir.ArrayAttr.get([])</span><span class="s2">,</span>
+      <span class="s1">backend_config=ir.StringAttr.get(key)</span><span class="s2">,</span>
+      <span class="s1">operand_layouts=</span><span class="s2">None,</span>
+      <span class="s1">result_layouts=</span><span class="s2">None</span><span class="s1">)</span>
+  <span class="s2">if </span><span class="s1">len(mlir_shapes) == </span><span class="s5">1</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">[out.result]</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">[</span>
+        <span class="s1">hlo.GetTupleElementOp(out</span><span class="s2">, </span><span class="s1">mlir.i32_attr(i)).result</span>
+        <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range(len(mlir_shapes))</span>
+    <span class="s1">]</span>
+
+
+<span class="s1">mlir.register_lowering(custom_partitioning_p</span><span class="s2">,</span>
+                       <span class="s1">_custom_partitioning_lowering_rule)</span>
+
+<span class="s1">xc.register_custom_call_partitioner(  </span><span class="s0"># pytype: disable=module-attr</span>
+    <span class="s1">_CUSTOM_PARTITIONING_CALL_NAME</span><span class="s2">,</span>
+    <span class="s1">_custom_partitioning_propagate_user_sharding</span><span class="s2">,</span>
+    <span class="s1">_custom_partitioning_partition</span><span class="s2">,</span>
+    <span class="s1">_custom_partitioning_infer_sharding_from_operands</span><span class="s2">, True</span><span class="s1">)</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,688 @@
+<html>
+<head>
+<title>call_tf.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+call_tf.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2021 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+<span class="s2">&quot;&quot;&quot;Allows JAX to call TensorFlow functions with support for autodiff. 
+ 
+**Experimental: please give feedback, and expect changes.** 
+ 
+This module introduces the function :func:`call_tf` that allows JAX to call 
+TensorFlow functions. 
+ 
+For examples and details, see 
+https://github.com/google/jax/blob/main/jax/experimental/jax2tf/README.md#calling-tensorflow-functions-from-jax. 
+ 
+&quot;&quot;&quot;</span>
+<span class="s3">import </span><span class="s1">base64</span>
+<span class="s3">import </span><span class="s1">enum</span>
+<span class="s3">import </span><span class="s1">functools</span>
+<span class="s3">from </span><span class="s1">typing </span><span class="s3">import </span><span class="s1">Any</span><span class="s3">, </span><span class="s1">Callable</span><span class="s3">, </span><span class="s1">Optional</span><span class="s3">, </span><span class="s1">Sequence</span><span class="s3">, </span><span class="s1">Tuple</span><span class="s3">, </span><span class="s1">List</span>
+
+<span class="s3">from </span><span class="s1">absl </span><span class="s3">import </span><span class="s1">logging</span>
+
+<span class="s3">import </span><span class="s1">jax</span>
+<span class="s3">from </span><span class="s1">jax </span><span class="s3">import </span><span class="s1">dlpack</span>
+<span class="s3">from </span><span class="s1">jax </span><span class="s3">import </span><span class="s1">dtypes</span>
+<span class="s3">from </span><span class="s1">jax </span><span class="s3">import </span><span class="s1">numpy </span><span class="s3">as </span><span class="s1">jnp</span>
+<span class="s3">from </span><span class="s1">jax </span><span class="s3">import </span><span class="s1">tree_util</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">core</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">ad_checkpoint</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">custom_derivatives</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">ad_util</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">effects</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">util</span>
+<span class="s3">from </span><span class="s1">jax._src.lax </span><span class="s3">import </span><span class="s1">control_flow </span><span class="s3">as </span><span class="s1">lax_control_flow</span>
+<span class="s3">from </span><span class="s1">jax._src.lib.mlir </span><span class="s3">import </span><span class="s1">ir</span>
+<span class="s3">from </span><span class="s1">jax._src.lib.mlir.dialects </span><span class="s3">import </span><span class="s1">func </span><span class="s3">as </span><span class="s1">func_dialect</span>
+<span class="s3">from </span><span class="s1">jax._src.lib.mlir.dialects </span><span class="s3">import </span><span class="s1">hlo</span>
+<span class="s3">from </span><span class="s1">jax._src.lib </span><span class="s3">import </span><span class="s1">xla_client</span>
+<span class="s3">from </span><span class="s1">jax.experimental.jax2tf </span><span class="s3">import </span><span class="s1">jax2tf </span><span class="s3">as </span><span class="s1">jax2tf_internal</span>
+<span class="s3">from </span><span class="s1">jax.interpreters </span><span class="s3">import </span><span class="s1">mlir</span>
+<span class="s3">from </span><span class="s1">jax.interpreters </span><span class="s3">import </span><span class="s1">xla</span>
+
+<span class="s3">import </span><span class="s1">numpy </span><span class="s3">as </span><span class="s1">np</span>
+<span class="s3">import </span><span class="s1">tensorflow </span><span class="s3">as </span><span class="s1">tf  </span><span class="s0"># type: ignore[import]</span>
+
+<span class="s1">map = util.safe_map</span>
+<span class="s1">zip = util.safe_zip</span>
+
+<span class="s1">TfConcreteFunction = Any</span>
+<span class="s1">TfVal = jax2tf_internal.TfVal</span>
+
+<span class="s0"># The platforms for which to use DLPack to avoid copying (only works on GPU</span>
+<span class="s0"># and CPU at the moment, and only for DeviceArray). For CPU we don't need</span>
+<span class="s0"># DLPack, if we are careful.</span>
+<span class="s1">_DLPACK_PLATFORMS = (</span><span class="s4">&quot;gpu&quot;</span><span class="s3">,</span><span class="s1">)</span>
+
+
+<span class="s3">def </span><span class="s1">call_tf(</span>
+    <span class="s1">callable_tf: Callable</span><span class="s3">,</span>
+    <span class="s1">has_side_effects=</span><span class="s3">True,</span>
+    <span class="s1">output_shape_dtype=</span><span class="s3">None,</span>
+    <span class="s1">use_custom_call=</span><span class="s3">False,</span>
+<span class="s1">) -&gt; Callable:</span>
+  <span class="s2">&quot;&quot;&quot;Calls a TensorFlow function from JAX, with support for reverse autodiff. 
+ 
+  The ``callable_tf`` will be called with TensorFlow-compatible arguments ( 
+  numpy.ndarray, ``tf.Tensor`` or ``tf.Variable``) or pytrees thereof. The 
+  function must return the same type of results. 
+ 
+  If ``call_tf`` appears in a JAX staging context (:func:`jax.jit`, 
+  or :func:`jax.pmap`, or :func:`jax.xmap`, or a control-flow primitive) then 
+  ``callable_tf`` will be compiled with ``tf.function(callable_tf, 
+  jit_compile=True)`` 
+  and the resulting XLA computation will be embedded in JAX's XLA computation. 
+ 
+  If ``call_tf`` appears outside a JAX staging context, it will be called inline 
+  using TensorFlow eager mode. 
+ 
+  The ``call_tf`` supports JAX's reverse-mode autodiff, in which case the 
+  ``callable_tf`` will be differentiated using ``tf.GradientTape``. This means 
+  that the gradient will be TensorFlow-accurate, e.g., will respect the 
+  custom gradients that may be defined for the code in ``callable_tf``. 
+ 
+  For an example and more details see the 
+  `README 
+  &lt;https://github.com/google/jax/blob/main/jax/experimental/jax2tf/README.md#calling-tensorflow-functions-from-jax&gt;`_. 
+ 
+  Args: 
+    callable_tf: a TensorFlow Callable that can take a pytree of TensorFlow 
+      arguments. 
+    has_side_effects: if True then it ensures that instances of this primitive 
+      are not removed or replicated by JAX optimizations such as dead-code 
+      elimination. 
+    output_shape_dtype: An optional declaration of the expected shapes and 
+      dtypes from the called TensorFlow function. If given it will be used 
+      during JAX tracing to form the abstract values of the results of the 
+      `call_tf`. If not given then we form a `tf.Graph` for the called 
+      TensorFlow function and we use the TensorFlow-inferred shapes and types. 
+      Must be a pytree matching the structure of the nested structure returned 
+      from the TensorFlow function, containing objects with `.shape` and 
+      `.dtype` attributes, e.g., `jax.ShapeDtypeStruct` or `jax.Array`. 
+    use_custom_call: PLEASE DO NOT USE IT since it is experimental. We may 
+      change the name in the future. 
+  Returns: a JAX callable that can be invoked with JAX pytree arguments, in 
+    op-by-op mode or in a staged context. This callable can be used with JAX's 
+    reverse-mode autodiff (:func:`jax.grad`). 
+  &quot;&quot;&quot;</span>
+
+  <span class="s0"># TODO(johnqiangzhang): use_custom_call only work together with jax.convert</span>
+  <span class="s0"># native_serialization. currently we need users set both options manually.</span>
+  <span class="s0"># We need derive this automatically from jax2tf.convert context automatically.</span>
+  <span class="s3">if </span><span class="s1">use_custom_call </span><span class="s3">and </span><span class="s1">output_shape_dtype </span><span class="s3">is None</span><span class="s1">:</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span>
+        <span class="s4">&quot;Please provide the output_shape_dtype if enable use_custom_call.&quot;</span>
+    <span class="s1">)</span>
+
+  <span class="s1">@jax.custom_vjp</span>
+  <span class="s3">def </span><span class="s1">make_call(*args_jax):</span>
+    <span class="s2">&quot;&quot;&quot;We wrap it all in `make_call` so that we can attach custom VJP.&quot;&quot;&quot;</span>
+
+    <span class="s1">args_flat_jax</span><span class="s3">, </span><span class="s1">args_treedef = tree_util.tree_flatten(args_jax)</span>
+    <span class="s0"># Canonicalize the arguments; e.g., makes them x32 if JAX is in 32-bit mode</span>
+    <span class="s3">def </span><span class="s1">canonical_arg(v):</span>
+      <span class="s1">v = v </span><span class="s3">if </span><span class="s1">getattr(v</span><span class="s3">, </span><span class="s4">&quot;dtype&quot;</span><span class="s3">, None</span><span class="s1">) </span><span class="s3">else </span><span class="s1">np.asarray(v)</span>
+      <span class="s1">dtype = dtypes.canonicalize_dtype(v.dtype)</span>
+      <span class="s3">if </span><span class="s1">dtype != v.dtype:</span>
+        <span class="s1">v = v.astype(dtype)</span>
+      <span class="s3">return </span><span class="s1">v</span>
+
+    <span class="s1">args_flat_jax = tuple(map(canonical_arg</span><span class="s3">, </span><span class="s1">args_flat_jax))</span>
+    <span class="s3">def </span><span class="s1">make_tensorspec(a_jax):</span>
+      <span class="s1">a_tf_dtype = jax2tf_internal._to_tf_dtype(a_jax.dtype)</span>
+      <span class="s1">a_tf_shape = [</span>
+          <span class="s1">d </span><span class="s3">if </span><span class="s1">core.is_constant_dim(d) </span><span class="s3">else None for </span><span class="s1">d </span><span class="s3">in </span><span class="s1">a_jax.shape]</span>
+      <span class="s3">return </span><span class="s1">tf.TensorSpec(a_tf_shape</span><span class="s3">, </span><span class="s1">a_tf_dtype)</span>
+    <span class="s1">args_flat_sig_tf = tuple(map(make_tensorspec</span><span class="s3">, </span><span class="s1">args_flat_jax))</span>
+
+    <span class="s3">if </span><span class="s1">output_shape_dtype </span><span class="s3">is not None</span><span class="s1">:</span>
+      <span class="s1">output_shape_dtype_flat</span><span class="s3">, </span><span class="s1">output_shape_dtype_tree = tree_util.tree_flatten(output_shape_dtype)</span>
+      <span class="s1">output_avals = tuple(core.ShapedArray(st.shape</span><span class="s3">, </span><span class="s1">st.dtype) </span><span class="s3">for </span><span class="s1">st </span><span class="s3">in </span><span class="s1">output_shape_dtype_flat)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s1">output_avals</span><span class="s3">, </span><span class="s1">output_shape_dtype_tree = </span><span class="s3">None, None</span>
+
+    <span class="s1">res_treedef = </span><span class="s3">None  </span><span class="s0"># We'll store here the result treedef</span>
+    <span class="s1">res_tf_flat = </span><span class="s3">None  </span><span class="s0"># For error reporting</span>
+    <span class="s0"># The function below will be called at least once, either in eager</span>
+    <span class="s0"># mode during jax2tf_call_tf or in graph mode during _get_concrete_function_tf()</span>
+    <span class="s3">def </span><span class="s1">callable_flat_tf(*args_tf_flat: TfVal) -&gt; Sequence[TfVal]:</span>
+      <span class="s1">args_tf = args_treedef.unflatten(args_tf_flat)</span>
+      <span class="s1">res_tf = callable_tf(*args_tf)</span>
+      <span class="s3">nonlocal </span><span class="s1">res_treedef</span><span class="s3">, </span><span class="s1">res_tf_flat</span>
+      <span class="s1">res_tf_flat</span><span class="s3">, </span><span class="s1">res_treedef_now = tree_util.tree_flatten(res_tf)</span>
+      <span class="s3">assert </span><span class="s1">res_treedef </span><span class="s3">is None or </span><span class="s1">res_treedef == res_treedef_now</span><span class="s3">, </span><span class="s1">(</span>
+          <span class="s4">f&quot;Subsequent calls had different results. Previous </span><span class="s3">{</span><span class="s1">res_treedef</span><span class="s3">} </span><span class="s4">and now </span><span class="s3">{</span><span class="s1">res_treedef_now</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+      <span class="s1">res_treedef = res_treedef_now</span>
+      <span class="s3">if </span><span class="s1">output_avals </span><span class="s3">is not None</span><span class="s1">:</span>
+        <span class="s3">if </span><span class="s1">res_treedef != output_shape_dtype_tree:</span>
+          <span class="s3">raise </span><span class="s1">ValueError(</span>
+              <span class="s4">&quot;The pytree of the TensorFlow function results does not match the &quot;</span>
+              <span class="s4">&quot;pytree of the declared output_shape_dtype:</span><span class="s3">\n</span><span class="s4">&quot;</span>
+              <span class="s4">f&quot;results pytree: </span><span class="s3">{</span><span class="s1">res_treedef</span><span class="s3">}\n</span><span class="s4">output_shape_dtype tree: </span><span class="s3">{</span><span class="s1">output_shape_dtype_tree</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+        <span class="s3">assert </span><span class="s1">len(output_avals) == len(res_tf_flat)</span>
+
+      <span class="s3">try</span><span class="s1">:</span>
+        <span class="s1">checked_res_tf_flat = [</span>
+            <span class="s1">check_tf_result(i</span><span class="s3">, </span><span class="s1">r_tf</span><span class="s3">, </span><span class="s1">r_aval)</span>
+            <span class="s3">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">(r_tf</span><span class="s3">, </span><span class="s1">r_aval) </span><span class="s3">in </span><span class="s1">enumerate(</span>
+                <span class="s1">zip(</span>
+                    <span class="s1">res_tf_flat</span><span class="s3">,</span>
+                    <span class="s1">(</span>
+                        <span class="s1">output_avals</span>
+                        <span class="s3">if </span><span class="s1">output_avals </span><span class="s3">is not None</span>
+                        <span class="s3">else </span><span class="s1">(</span><span class="s3">None,</span><span class="s1">) * len(res_tf_flat)</span>
+                    <span class="s1">)</span><span class="s3">,</span>
+                <span class="s1">)</span>
+            <span class="s1">)</span>
+        <span class="s1">]</span>
+        <span class="s3">return </span><span class="s1">checked_res_tf_flat</span>
+      <span class="s3">except </span><span class="s1">Exception </span><span class="s3">as </span><span class="s1">e:  </span><span class="s0"># pylint: disable=broad-except</span>
+        <span class="s0"># When a TensorFlow function is not XLA-compilable.</span>
+        <span class="s0"># TODO(johnqiangzhang): We skip the output shape check for use_custom_call.</span>
+        <span class="s0"># Since non-compilable functions may not have a defined output shape in the</span>
+        <span class="s0"># concrete_fn. I will add this check later.</span>
+        <span class="s3">if </span><span class="s1">use_custom_call:</span>
+          <span class="s3">return </span><span class="s1">[]</span>
+        <span class="s3">else</span><span class="s1">:</span>
+          <span class="s3">raise </span><span class="s1">e</span>
+
+    <span class="s0"># Prepare a tf.function ahead of time, to cache the concrete functions. This</span>
+    <span class="s0"># won't be used in op-by-op execution mode.</span>
+    <span class="s1">function_flat_tf = tf.function(callable_flat_tf</span><span class="s3">, </span><span class="s1">autograph=</span><span class="s3">False, </span><span class="s1">jit_compile=</span><span class="s3">True</span><span class="s1">)</span>
+
+    <span class="s1">res_jax_flat = call_tf_p.bind(</span>
+        <span class="s1">*args_flat_jax</span><span class="s3">,</span>
+        <span class="s0"># Carry the actual function such that op-by-op call can call in TF eager mode.</span>
+        <span class="s1">callable_flat_tf=callable_flat_tf</span><span class="s3">,</span>
+        <span class="s1">function_flat_tf=function_flat_tf</span><span class="s3">,</span>
+        <span class="s1">args_flat_sig_tf=args_flat_sig_tf</span><span class="s3">,</span>
+        <span class="s1">output_avals=output_avals</span><span class="s3">,</span>
+        <span class="s1">has_side_effects=has_side_effects</span><span class="s3">,</span>
+        <span class="s1">use_custom_call=use_custom_call</span><span class="s3">,</span>
+    <span class="s1">)</span>
+
+    <span class="s0"># We must have called callable_flat_tf by nοw</span>
+    <span class="s3">assert </span><span class="s1">res_treedef </span><span class="s3">is not None</span>
+    <span class="s0"># Sometimes, in compiled mode, we get a different number of results than we</span>
+    <span class="s0"># got when tracing the TF function (and building the res_treedef). This</span>
+    <span class="s0"># can happen, e.g., when returning tf.TensorArray, which appears as one</span>
+    <span class="s0"># leaf when tracing but after compilation we get a tuple. See</span>
+    <span class="s0"># call_tf_test.test_error_bad_result_tensorarray.</span>
+    <span class="s3">if </span><span class="s1">res_treedef.num_leaves != len(res_jax_flat):</span>
+      <span class="s0"># It is not clear if this error can happen once we have check_tf_result</span>
+      <span class="s0"># in callable_flat_tf, but we keep it for safety.</span>
+      <span class="s1">msg = (</span><span class="s4">f&quot;Incorrect number of results (</span><span class="s3">{</span><span class="s1">len(res_jax_flat)</span><span class="s3">}</span><span class="s4">) from the &quot;</span>
+             <span class="s4">&quot;called TF function after compilation. &quot;</span>
+             <span class="s4">f&quot;Expected </span><span class="s3">{</span><span class="s1">res_treedef.num_leaves</span><span class="s3">} </span><span class="s4">leaves based on observed &quot;</span>
+             <span class="s4">f&quot;results during tracing: </span><span class="s3">{</span><span class="s1">res_tf_flat</span><span class="s3">}</span><span class="s4">.&quot;</span><span class="s1">)</span>
+      <span class="s3">raise </span><span class="s1">ValueError(msg)</span>
+    <span class="s3">return </span><span class="s1">res_treedef.unflatten(res_jax_flat)</span>
+
+  <span class="s0"># Define the fwd and bwd custom_vjp functions</span>
+  <span class="s3">def </span><span class="s1">make_call_vjp_fwd(*args_jax):</span>
+    <span class="s0"># Return the primal arguments as the residual</span>
+    <span class="s3">return </span><span class="s1">make_call(*args_jax)</span><span class="s3">, </span><span class="s1">args_jax</span>
+
+  <span class="s3">def </span><span class="s1">make_call_vjp_bwd(residual_jax</span><span class="s3">, </span><span class="s1">ct_res_jax):</span>
+    <span class="s1">args_jax = residual_jax  </span><span class="s0"># residual is the primal argument</span>
+
+    <span class="s3">def </span><span class="s1">tf_vjp_fun(args_tf</span><span class="s3">, </span><span class="s1">ct_res_tf):</span>
+      <span class="s2">&quot;&quot;&quot;Invoke TF gradient.&quot;&quot;&quot;</span>
+
+      <span class="s0"># TF does not like us to watch non-float vars</span>
+      <span class="s3">def </span><span class="s1">replace_non_float(arg_tf):</span>
+        <span class="s3">if </span><span class="s1">arg_tf.dtype.is_floating </span><span class="s3">or </span><span class="s1">arg_tf.dtype.is_complex:</span>
+          <span class="s3">return </span><span class="s1">arg_tf</span>
+        <span class="s3">else</span><span class="s1">:</span>
+          <span class="s0"># When watched, this will be ignored. When use in results it will</span>
+          <span class="s0"># result in a floating 0. gradient, which JAX will ignore (and</span>
+          <span class="s0"># replace it with a float0)</span>
+          <span class="s3">return </span><span class="s1">tf.zeros(()</span><span class="s3">, </span><span class="s1">dtype=tf.float32)</span>
+
+      <span class="s1">watched_args_tf = tf.nest.map_structure(replace_non_float</span><span class="s3">, </span><span class="s1">args_tf)</span>
+      <span class="s3">with </span><span class="s1">tf.GradientTape(persistent=</span><span class="s3">True</span><span class="s1">) </span><span class="s3">as </span><span class="s1">tape:</span>
+        <span class="s1">tape.watch(watched_args_tf)</span>
+        <span class="s1">res = callable_tf(*args_tf)</span>
+
+      <span class="s1">tf.nest.assert_same_structure(res</span><span class="s3">, </span><span class="s1">ct_res_tf)</span>
+      <span class="s1">dres_darg = tape.gradient(</span>
+          <span class="s1">tf.nest.map_structure(replace_non_float</span><span class="s3">, </span><span class="s1">res)</span><span class="s3">,</span>
+          <span class="s1">sources=watched_args_tf</span><span class="s3">,</span>
+          <span class="s1">output_gradients=ct_res_tf</span><span class="s3">,</span>
+          <span class="s1">unconnected_gradients=tf.UnconnectedGradients.ZERO)</span>
+
+      <span class="s1">dres_darg = tree_util.tree_map(</span>
+          <span class="s3">lambda </span><span class="s1">x: x </span><span class="s3">if </span><span class="s1">x </span><span class="s3">is None else </span><span class="s1">tf.convert_to_tensor(x)</span><span class="s3">,</span>
+          <span class="s1">dres_darg</span><span class="s3">,</span>
+      <span class="s1">)</span>
+      <span class="s1">tf.nest.assert_same_structure(dres_darg</span><span class="s3">, </span><span class="s1">args_tf)</span>
+      <span class="s3">return </span><span class="s1">dres_darg</span>
+
+    <span class="s0"># Use call_tf to call the VJP function</span>
+    <span class="s1">ct_args_jax = call_tf(tf_vjp_fun)(args_jax</span><span class="s3">, </span><span class="s1">ct_res_jax)</span>
+    <span class="s0"># We must make the float0s that JAX expects</span>
+    <span class="s3">def </span><span class="s1">fix_float0(arg_jax</span><span class="s3">, </span><span class="s1">ct_arg_jax):</span>
+      <span class="s1">arg_dtype = dtypes.result_type(arg_jax)  </span><span class="s0"># May be scalar</span>
+      <span class="s1">ct_arg_dtype = core.primal_dtype_to_tangent_dtype(arg_dtype)</span>
+      <span class="s3">if </span><span class="s1">ct_arg_dtype != ct_arg_jax.dtype:</span>
+        <span class="s3">return </span><span class="s1">ad_util.zeros_like_aval(core.ShapedArray(np.shape(arg_jax)</span><span class="s3">,</span>
+                                                        <span class="s1">ct_arg_dtype))</span>
+      <span class="s3">return </span><span class="s1">ct_arg_jax</span>
+
+    <span class="s1">ct_args_jax_fixed = tree_util.tree_map(fix_float0</span><span class="s3">, </span><span class="s1">args_jax</span><span class="s3">, </span><span class="s1">ct_args_jax)</span>
+    <span class="s3">return </span><span class="s1">ct_args_jax_fixed</span>
+
+  <span class="s1">make_call.defvjp(make_call_vjp_fwd</span><span class="s3">, </span><span class="s1">make_call_vjp_bwd)</span>
+  <span class="s3">return </span><span class="s1">util.wraps(callable_tf)(make_call)</span>
+
+
+<span class="s3">def </span><span class="s1">check_tf_result(idx: int</span><span class="s3">, </span><span class="s1">r_tf: TfVal</span><span class="s3">, </span><span class="s1">r_aval: Optional[core.ShapedArray]) -&gt; TfVal:</span>
+  <span class="s0"># Check that the TF function returns values of expected types. This</span>
+  <span class="s0"># improves error reporting, preventing hard-to-diagnose errors downstream</span>
+  <span class="s3">try</span><span class="s1">:</span>
+    <span class="s1">jax2tf_internal._tfval_to_tensor_jax_dtype(r_tf)</span>
+  <span class="s3">except </span><span class="s1">Exception </span><span class="s3">as </span><span class="s1">e:</span>
+    <span class="s1">msg = (</span><span class="s4">&quot;The called TF function returns a result that is not &quot;</span>
+           <span class="s4">f&quot;convertible to JAX: </span><span class="s3">{</span><span class="s1">r_tf</span><span class="s3">}</span><span class="s4">.&quot;</span><span class="s1">)</span>
+    <span class="s3">raise </span><span class="s1">ValueError(msg) </span><span class="s3">from </span><span class="s1">e</span>
+
+  <span class="s3">if </span><span class="s1">r_aval </span><span class="s3">is None</span><span class="s1">:</span>
+    <span class="s3">return </span><span class="s1">r_tf</span>
+  <span class="s0"># We convert to TF type, and canonicalize to 32-bit if necessary</span>
+  <span class="s1">r_aval_dtype_tf = jax2tf_internal._to_tf_dtype(r_aval.dtype)</span>
+  <span class="s0"># Checking shapes is trickier in presence of dynamic shapes. I wish we could</span>
+  <span class="s0"># check at runtime that the returned shape matches the declared shape. I wish</span>
+  <span class="s0"># that tf.ensure_shape did this, but it can only take shapes that contain None</span>
+  <span class="s0"># not computed shapes. However, in eager mode we should be able to resolve</span>
+  <span class="s0"># the declared shapes to constants and we get better checking.</span>
+  <span class="s3">if </span><span class="s1">tf.executing_eagerly():</span>
+    <span class="s1">r_aval_shape_tf = jax2tf_internal._eval_shape(r_aval.shape)</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s1">r_aval_shape_tf = jax2tf_internal._aval_to_tf_shape(r_aval)</span>
+  <span class="s0"># We do as much checking as we can here, instead of relying on tf.ensure_shape</span>
+  <span class="s0"># because the latter gives different errors in eager vs. compiled mode.</span>
+  <span class="s3">if </span><span class="s1">(r_tf.dtype != r_aval_dtype_tf </span><span class="s3">or</span>
+      <span class="s1">len(r_tf.shape) != len(r_aval_shape_tf) </span><span class="s3">or</span>
+      <span class="s1">any(r_aval_d </span><span class="s3">is not None and </span><span class="s1">r_tf_d </span><span class="s3">is not None and </span><span class="s1">r_aval_d != r_tf_d</span>
+          <span class="s3">for </span><span class="s1">r_tf_d</span><span class="s3">, </span><span class="s1">r_aval_d </span><span class="s3">in </span><span class="s1">zip(r_tf.shape</span><span class="s3">, </span><span class="s1">r_aval_shape_tf))):</span>
+    <span class="s1">msg = (</span><span class="s4">&quot;The shapes or dtypes returned by the TensorFlow function &quot;</span>
+           <span class="s4">&quot;do not match the declared output_shape_dtype:</span><span class="s3">\n</span><span class="s4">&quot;</span>
+           <span class="s4">f&quot;Result[</span><span class="s3">{</span><span class="s1">idx</span><span class="s3">}</span><span class="s4">] is </span><span class="s3">{</span><span class="s1">r_tf.dtype</span><span class="s3">}</span><span class="s4">[</span><span class="s3">{</span><span class="s1">r_tf.shape</span><span class="s3">}</span><span class="s4">] vs. expected </span><span class="s3">{</span><span class="s1">r_aval_dtype_tf</span><span class="s3">}</span><span class="s4">[</span><span class="s3">{</span><span class="s1">r_aval_shape_tf</span><span class="s3">}</span><span class="s4">]&quot;</span><span class="s1">)</span>
+    <span class="s3">raise </span><span class="s1">ValueError(msg)</span>
+  <span class="s0"># At this point tf.ensure_shape does not do much, it should never throw an</span>
+  <span class="s0"># error, albeit it may refine the shape a bit.</span>
+  <span class="s3">return </span><span class="s1">tf.ensure_shape(r_tf</span><span class="s3">, </span><span class="s1">r_aval_shape_tf)</span>
+
+
+<span class="s1">call_tf_p = core.Primitive(</span><span class="s4">&quot;call_tf&quot;</span><span class="s1">)</span>
+<span class="s1">call_tf_p.multiple_results = </span><span class="s3">True</span>
+
+<span class="s0"># The impl will be used in op-by-op mode and calls callable_tf in TF eager mode.</span>
+<span class="s3">def </span><span class="s1">_call_tf_impl(*args_jax_flat</span><span class="s3">, </span><span class="s1">callable_flat_tf</span><span class="s3">, </span><span class="s1">**_):</span>
+  <span class="s0"># On GPU we use dlpack to avoid copies of data to the host.</span>
+  <span class="s3">def </span><span class="s1">_arg_jax_to_tf(arg_jax):</span>
+    <span class="s3">if </span><span class="s1">(isinstance(arg_jax</span><span class="s3">, </span><span class="s1">jax.Array) </span><span class="s3">and</span>
+        <span class="s1">arg_jax.device().platform </span><span class="s3">in </span><span class="s1">_DLPACK_PLATFORMS </span><span class="s3">and</span>
+        <span class="s1">arg_jax.dtype </span><span class="s3">in </span><span class="s1">dlpack.SUPPORTED_DTYPES):</span>
+      <span class="s1">arg_dlpack = jax.dlpack.to_dlpack(arg_jax</span><span class="s3">, </span><span class="s1">take_ownership=</span><span class="s3">False</span><span class="s1">)</span>
+      <span class="s3">return </span><span class="s1">tf.experimental.dlpack.from_dlpack(arg_dlpack)</span>
+    <span class="s0"># The following avoids copies to the host on CPU, always for DeviceArray</span>
+    <span class="s0"># and even for ndarray if they are sufficiently aligned.</span>
+    <span class="s0"># TODO(necula): on TPU this copies to the host!</span>
+    <span class="s3">return </span><span class="s1">tf.constant(np.asarray(arg_jax))</span>
+
+  <span class="s1">args_tf_flat = tuple(map(_arg_jax_to_tf</span><span class="s3">, </span><span class="s1">args_jax_flat))</span>
+  <span class="s3">with </span><span class="s1">jax2tf_internal.inside_call_tf():</span>
+    <span class="s0"># Call in TF eager mode</span>
+    <span class="s1">res_tf_flat = callable_flat_tf(*args_tf_flat)</span>
+
+  <span class="s3">def </span><span class="s1">_res_tf_to_jax(res_tf: TfVal):</span>
+    <span class="s1">res_tf</span><span class="s3">, </span><span class="s1">_ = jax2tf_internal._tfval_to_tensor_jax_dtype(res_tf)</span>
+    <span class="s3">if </span><span class="s1">isinstance(res_tf</span><span class="s3">, </span><span class="s1">tf.Tensor) </span><span class="s3">and </span><span class="s1">res_tf.dtype </span><span class="s3">in </span><span class="s1">dlpack.SUPPORTED_DTYPES:</span>
+      <span class="s1">res_tf_platform = tf.DeviceSpec.from_string(res_tf.backing_device).device_type</span>
+      <span class="s1">res_jax_platform = res_tf_platform.lower()</span>
+      <span class="s3">if </span><span class="s1">res_jax_platform </span><span class="s3">in </span><span class="s1">_DLPACK_PLATFORMS:</span>
+        <span class="s1">res_dlpack = tf.experimental.dlpack.to_dlpack(res_tf)</span>
+        <span class="s3">return </span><span class="s1">jax.dlpack.from_dlpack(res_dlpack)</span>
+
+    <span class="s0"># When working with a bfloat16 scalar tf.Tensor,np.asarray() can fail.</span>
+    <span class="s0"># To handle this special case, we create a numpy copy.</span>
+    <span class="s3">if </span><span class="s1">res_tf.shape == tf.TensorShape([]) </span><span class="s3">and </span><span class="s1">res_tf.dtype == tf.bfloat16:</span>
+      <span class="s3">return </span><span class="s1">jax.device_put(jnp.array(res_tf.numpy()))</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s3">return </span><span class="s1">jax.device_put(np.asarray(res_tf))</span>
+
+  <span class="s3">return </span><span class="s1">list(map(_res_tf_to_jax</span><span class="s3">, </span><span class="s1">res_tf_flat))</span>
+
+
+<span class="s1">call_tf_p.def_impl(_call_tf_impl)</span>
+
+<span class="s1">@functools.lru_cache(maxsize=</span><span class="s5">128</span><span class="s1">)</span>
+<span class="s3">def </span><span class="s1">_get_concrete_function_tf(function_flat_tf</span><span class="s3">, </span><span class="s1">args_flat_sig_tf):  </span><span class="s0"># -&gt; tf.ConcreteFunction</span>
+  <span class="s3">with </span><span class="s1">jax2tf_internal.inside_call_tf():</span>
+    <span class="s3">return </span><span class="s1">function_flat_tf.get_concrete_function(*args_flat_sig_tf)</span>
+
+
+<span class="s0"># Mark the effectful instances of call_tf</span>
+<span class="s3">class </span><span class="s1">CallTfEffect(effects.Effect):</span>
+  <span class="s1">__str__ = </span><span class="s3">lambda </span><span class="s1">_: </span><span class="s4">&quot;CallTfEffect&quot;</span>
+
+<span class="s1">call_tf_effect = CallTfEffect()</span>
+
+<span class="s1">effects.lowerable_effects.add_type(CallTfEffect)</span>
+<span class="s1">effects.control_flow_allowed_effects.add_type(CallTfEffect)</span>
+<span class="s1">effects.remat_allowed_effects.add_type(CallTfEffect)</span>
+<span class="s1">effects.custom_derivatives_allowed_effects.add_type(CallTfEffect)</span>
+
+
+<span class="s3">def </span><span class="s1">_call_tf_abstract_eval(*args_flat_avals</span><span class="s3">,</span>
+                           <span class="s1">function_flat_tf</span><span class="s3">,</span>
+                           <span class="s1">args_flat_sig_tf</span><span class="s3">,</span>
+                           <span class="s1">has_side_effects</span><span class="s3">,</span>
+                           <span class="s1">output_avals</span><span class="s3">, </span><span class="s1">**__):</span>
+  <span class="s0"># Called only when we form a Jaxpr, i.e., under jit, scan, etc.</span>
+  <span class="s1">effects = {call_tf_effect} </span><span class="s3">if </span><span class="s1">has_side_effects </span><span class="s3">else </span><span class="s1">set()</span>
+
+  <span class="s0"># If not output_avals is given, then we ask TF to infer the output shapes.</span>
+  <span class="s0"># We call this even if output_avals is given because it will ensure that</span>
+  <span class="s0"># callable_flat_tf is called. Since _get_concrete_function_tf is cached</span>
+  <span class="s0"># there is a small cost of calling it more often than needed.</span>
+  <span class="s1">concrete_function_flat_tf = _get_concrete_function_tf(function_flat_tf</span><span class="s3">,</span>
+                                                        <span class="s1">args_flat_sig_tf)</span>
+
+  <span class="s3">if </span><span class="s1">output_avals </span><span class="s3">is not None</span><span class="s1">:</span>
+    <span class="s3">return </span><span class="s1">output_avals</span><span class="s3">, </span><span class="s1">effects</span>
+
+  <span class="s3">def </span><span class="s1">is_fully_known_shape(s):</span>
+    <span class="s3">return </span><span class="s1">s.rank </span><span class="s3">is not None and </span><span class="s1">all([d </span><span class="s3">is not None for </span><span class="s1">d </span><span class="s3">in </span><span class="s1">s])</span>
+
+  <span class="s3">if </span><span class="s1">all(is_fully_known_shape(s)</span>
+        <span class="s3">for </span><span class="s1">s </span><span class="s3">in </span><span class="s1">concrete_function_flat_tf.output_shapes):</span>
+    <span class="s1">avals_from_tf = tuple(</span>
+        <span class="s0"># We convert to JAX type, and canonicalize to 32-bit if necessary</span>
+        <span class="s1">core.ShapedArray(shape</span><span class="s3">, </span><span class="s1">jax2tf_internal._to_jax_dtype(dtype))</span>
+        <span class="s3">for </span><span class="s1">dtype</span><span class="s3">, </span><span class="s1">shape </span><span class="s3">in </span><span class="s1">zip(concrete_function_flat_tf.output_dtypes</span><span class="s3">,</span>
+                                <span class="s1">concrete_function_flat_tf.output_shapes))</span>
+    <span class="s3">return </span><span class="s1">avals_from_tf</span><span class="s3">, </span><span class="s1">effects</span>
+
+  <span class="s1">msg = (</span><span class="s4">&quot;call_tf cannot call functions whose output has dynamic shape. &quot;</span>
+    <span class="s4">f&quot;Found output shapes: </span><span class="s3">{</span><span class="s1">concrete_function_flat_tf.output_shapes</span><span class="s3">}</span><span class="s4">. &quot;</span>
+    <span class="s4">&quot;Consider using the `output_shape_dtype` argument to call_tf. &quot;</span>
+    <span class="s4">&quot;</span><span class="s3">\n</span><span class="s4">See https://github.com/google/jax/blob/main/jax/experimental/jax2tf/README.md#limitations-of-call_tf&quot;</span>
+      <span class="s4">&quot; for a discussion.&quot;</span><span class="s1">)</span>
+  <span class="s3">raise </span><span class="s1">ValueError(msg)</span>
+
+<span class="s1">call_tf_p.def_effectful_abstract_eval(_call_tf_abstract_eval)</span>
+
+
+<span class="s3">def </span><span class="s1">_call_tf_lowering(</span>
+    <span class="s1">ctx</span><span class="s3">,</span>
+    <span class="s1">*args_op</span><span class="s3">,</span>
+    <span class="s1">platform</span><span class="s3">,</span>
+    <span class="s1">function_flat_tf</span><span class="s3">,</span>
+    <span class="s1">args_flat_sig_tf</span><span class="s3">,</span>
+    <span class="s1">has_side_effects</span><span class="s3">,</span>
+    <span class="s1">use_custom_call</span><span class="s3">,</span>
+    <span class="s1">output_avals</span><span class="s3">,</span>
+    <span class="s1">**_</span><span class="s3">,</span>
+<span class="s1">):</span>
+  <span class="s0"># This will most likely hit the cache, because we used it for abstract_eval</span>
+  <span class="s0"># We use the same TF lowering device as for the embedding JAX computation.</span>
+  <span class="s0"># One example when this is needed is when the code refers to variables on one</span>
+  <span class="s0"># device. Or, for sharding annotations (only supported on TPU).</span>
+  <span class="s3">if </span><span class="s1">platform </span><span class="s3">in </span><span class="s1">[</span><span class="s4">&quot;cpu&quot;</span><span class="s3">, </span><span class="s4">&quot;tpu&quot;</span><span class="s1">]:</span>
+    <span class="s1">tf_platform = platform.upper()</span>
+  <span class="s3">elif </span><span class="s1">platform == </span><span class="s4">&quot;cuda&quot;</span><span class="s1">:</span>
+    <span class="s1">tf_platform = </span><span class="s4">&quot;GPU&quot;</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;platform {platform} not supported&quot;</span><span class="s1">)</span>
+  <span class="s1">code_gen</span><span class="s3">, </span><span class="s1">_ = _code_generator_and_avals(</span>
+      <span class="s1">function_flat_tf</span><span class="s3">,</span>
+      <span class="s1">args_flat_sig_tf</span><span class="s3">,  </span><span class="s0"># type: ignore</span>
+      <span class="s1">tf_platform</span><span class="s3">,</span>
+      <span class="s1">use_custom_call</span><span class="s3">,</span>
+      <span class="s1">has_side_effects</span><span class="s3">,</span>
+      <span class="s1">output_avals</span><span class="s3">,</span>
+  <span class="s1">)</span>
+  <span class="s3">assert </span><span class="s1">code_gen </span><span class="s3">is not None</span>
+  <span class="s3">return </span><span class="s1">code_gen(ctx.module_context</span><span class="s3">, </span><span class="s1">args_op)</span>
+
+
+<span class="s1">@functools.lru_cache(maxsize=</span><span class="s5">128</span><span class="s1">)</span>
+<span class="s3">def </span><span class="s1">_code_generator_and_avals(</span>
+    <span class="s1">function_flat_tf</span><span class="s3">,</span>
+    <span class="s1">args_flat_sig_tf</span><span class="s3">,</span>
+    <span class="s1">tf_platform</span><span class="s3">,</span>
+    <span class="s1">use_custom_call</span><span class="s3">,</span>
+    <span class="s1">has_side_effects</span><span class="s3">,</span>
+    <span class="s1">output_avals</span><span class="s3">,</span>
+<span class="s1">) -&gt; Tuple[</span>
+    <span class="s1">Optional[</span>
+        <span class="s1">Callable[[mlir.ModuleContext</span><span class="s3">, </span><span class="s1">Sequence[ir.Value]]</span><span class="s3">, </span><span class="s1">Sequence[ir.Value]]</span>
+    <span class="s1">]</span><span class="s3">,</span>
+    <span class="s1">Sequence[core.ShapedArray]</span><span class="s3">,</span>
+<span class="s1">]:</span>
+  <span class="s0"># TODO(necula): we have refactored the code to not need to lower the code</span>
+  <span class="s0"># just in order to get the avals, so in fact the returned avals from this</span>
+  <span class="s0"># function are never used. We keep it here for now in case we detect</span>
+  <span class="s0"># a regressions, but if not we should simplify this function.</span>
+
+  <span class="s0"># Returns and caches a code generator (taking a builder and the</span>
+  <span class="s0"># XlaOps for the arguments) and a sequence of result abstract shapes.</span>
+
+  <span class="s1">concrete_function_flat_tf = _get_concrete_function_tf(function_flat_tf</span><span class="s3">, </span><span class="s1">args_flat_sig_tf)</span>
+
+  <span class="s1">captured_inputs = []</span>
+  <span class="s3">if </span><span class="s1">concrete_function_flat_tf.captured_inputs:</span>
+    <span class="s0"># The function uses either captured variables or tensors.</span>
+    <span class="s1">msg = (</span>
+        <span class="s4">&quot;call_tf works best with a TensorFlow function that does not capture &quot;</span>
+        <span class="s4">&quot;variables or tensors from the context. &quot;</span>
+        <span class="s4">&quot;See https://github.com/google/jax/blob/main/jax/experimental/jax2tf/README.md#limitations-of-call_tf for a discussion. &quot;</span>
+        <span class="s4">f&quot;The following captures were found </span><span class="s3">{</span><span class="s1">concrete_function_flat_tf.captured_inputs</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+    <span class="s1">logging.warning(msg)</span>
+    <span class="s3">for </span><span class="s1">inp </span><span class="s3">in </span><span class="s1">concrete_function_flat_tf.captured_inputs:</span>
+      <span class="s3">if </span><span class="s1">inp.dtype == tf.resource:  </span><span class="s0"># A variable; lookup by handle</span>
+        <span class="s1">inp_vars = [v </span><span class="s3">for </span><span class="s1">v </span><span class="s3">in </span><span class="s1">concrete_function_flat_tf.variables </span><span class="s3">if </span><span class="s1">inp </span><span class="s3">is </span><span class="s1">v.handle]</span>
+        <span class="s3">assert </span><span class="s1">len(inp_vars) == </span><span class="s5">1</span><span class="s3">, </span><span class="s4">f&quot;Found </span><span class="s3">{</span><span class="s1">inp_vars</span><span class="s3">}</span><span class="s4">&quot;</span>
+        <span class="s1">captured_inputs.append(inp_vars[</span><span class="s5">0</span><span class="s1">])</span>
+      <span class="s3">else</span><span class="s1">:</span>
+        <span class="s1">captured_inputs.append(inp)</span>
+
+  <span class="s3">def </span><span class="s1">code_gen_custom_call(ctx</span><span class="s3">, </span><span class="s1">args_op):  </span><span class="s0"># pylint: disable=unused-argument</span>
+    <span class="s1">captured_ops = tuple(</span>
+        <span class="s1">mlir.ir_constant(np.asarray(inp)</span><span class="s3">, </span><span class="s1">canonicalize_types=</span><span class="s3">False</span><span class="s1">)</span>
+        <span class="s3">for </span><span class="s1">inp </span><span class="s3">in </span><span class="s1">captured_inputs</span>
+    <span class="s1">)</span>
+    <span class="s3">with </span><span class="s1">jax2tf_internal.inside_call_tf():</span>
+      <span class="s3">return </span><span class="s1">emit_tf_embedded_graph_custom_call(</span>
+          <span class="s1">concrete_function_flat_tf</span><span class="s3">,</span>
+          <span class="s1">tuple(args_op) + captured_ops</span><span class="s3">,</span>
+          <span class="s1">has_side_effects</span><span class="s3">,</span>
+          <span class="s1">output_avals</span><span class="s3">,</span>
+      <span class="s1">)</span>
+
+  <span class="s3">if </span><span class="s1">use_custom_call:</span>
+    <span class="s3">return </span><span class="s1">code_gen_custom_call</span><span class="s3">, </span><span class="s1">()</span>
+
+  <span class="s3">def </span><span class="s1">convert_to_spec(x):</span>
+    <span class="s3">if </span><span class="s1">isinstance(x</span><span class="s3">, </span><span class="s1">tf.TensorSpec):</span>
+      <span class="s3">return </span><span class="s1">x</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s3">return </span><span class="s1">tf.TensorSpec.from_tensor(x)</span>
+
+  <span class="s1">args_tf_flat = [convert_to_spec(a) </span><span class="s3">for </span><span class="s1">a </span><span class="s3">in </span><span class="s1">args_flat_sig_tf]</span>
+
+  <span class="s3">with </span><span class="s1">jax2tf_internal.inside_call_tf():</span>
+    <span class="s0"># When the TF computation uses variables on a particular device, we must</span>
+    <span class="s0"># get_compiler_ir for that exact device.</span>
+    <span class="s1">tf_device_name = </span><span class="s4">f&quot;/device:</span><span class="s3">{</span><span class="s1">tf_platform</span><span class="s3">}</span><span class="s4">:0&quot;</span>
+    <span class="s3">try</span><span class="s1">:</span>
+      <span class="s1">func_tf_hlo = function_flat_tf.experimental_get_compiler_ir(*args_tf_flat)(</span>
+        <span class="s1">stage=</span><span class="s4">&quot;hlo_serialized&quot;</span><span class="s3">, </span><span class="s1">device_name=tf_device_name)</span>
+    <span class="s3">except </span><span class="s1">Exception </span><span class="s3">as </span><span class="s1">e:</span>
+      <span class="s1">msg = (</span><span class="s4">&quot;Error compiling TensorFlow function. call_tf can used &quot; </span><span class="s1">+</span>
+              <span class="s4">&quot;in a staged context (under jax.jit, lax.scan, etc.) only with &quot; </span><span class="s1">+</span>
+              <span class="s4">&quot;compilable functions with static output shapes. &quot; </span><span class="s1">+</span>
+              <span class="s4">&quot;See https://github.com/google/jax/blob/main/jax/experimental/jax2tf/README.md#limitations-of-call_tf for a discussion.&quot;</span><span class="s1">)</span>
+      <span class="s3">raise </span><span class="s1">ValueError(msg) </span><span class="s3">from </span><span class="s1">e</span>
+
+  <span class="s1">xla_comp = xla_client.XlaComputation(func_tf_hlo)</span>
+
+  <span class="s0"># Canonicalize the results; e.g., makes them x32 if JAX is in 32-bit mode</span>
+  <span class="s3">def </span><span class="s1">canonical_res_aval(res_shape: xla_client.Shape) -&gt; core.ShapedArray:</span>
+    <span class="s3">if not </span><span class="s1">res_shape.is_static():</span>
+      <span class="s1">msg = (</span><span class="s4">&quot;Compiled TensorFlow function has dynamic output shape &quot; </span><span class="s1">+</span>
+             <span class="s4">f&quot;</span><span class="s3">{</span><span class="s1">res_shape</span><span class="s3">}</span><span class="s4">. call_tf can used &quot; </span><span class="s1">+</span>
+             <span class="s4">&quot;in a staged context (under jax.jit, lax.scan, etc.) only with &quot; </span><span class="s1">+</span>
+             <span class="s4">&quot;compilable functions with static output shapes. &quot; </span><span class="s1">+</span>
+             <span class="s4">&quot;See https://github.com/google/jax/blob/main/jax/experimental/jax2tf/README.md#limitations-of-call_tf for a discussion.&quot;</span><span class="s1">)</span>
+      <span class="s3">raise </span><span class="s1">ValueError(msg)</span>
+
+    <span class="s1">res_dtype = res_shape.numpy_dtype()</span>
+    <span class="s1">jax_res_dtype = dtypes.canonicalize_dtype(res_dtype)</span>
+    <span class="s3">return </span><span class="s1">core.ShapedArray(res_shape.dimensions()</span><span class="s3">, </span><span class="s1">jax_res_dtype)</span>
+
+  <span class="s1">result_shape = xla_comp.program_shape().result_shape()</span>
+  <span class="s3">if not </span><span class="s1">result_shape.is_tuple():</span>
+    <span class="s0"># TF does not wrap singletons as tuples, but JAX expects tuples because</span>
+    <span class="s0"># call_tf is a multiple_results primitive.</span>
+    <span class="s1">result_shapes = (result_shape</span><span class="s3">,</span><span class="s1">)</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s1">result_shapes = result_shape.tuple_shapes()  </span><span class="s0"># type: ignore</span>
+
+  <span class="s1">result_avals = tuple(map(canonical_res_aval</span><span class="s3">, </span><span class="s1">result_shapes))  </span><span class="s0"># type: ignore</span>
+
+  <span class="s3">def </span><span class="s1">code_gen(ctx: mlir.ModuleContext</span><span class="s3">, </span><span class="s1">args_op: Sequence[ir.Value]</span>
+              <span class="s1">) -&gt; Sequence[ir.Value]:</span>
+    <span class="s1">captured_ops = tuple(mlir.ir_constant(np.asarray(inp)</span><span class="s3">,</span>
+                                          <span class="s1">canonicalize_types=</span><span class="s3">False</span><span class="s1">)</span>
+                         <span class="s3">for </span><span class="s1">inp </span><span class="s3">in </span><span class="s1">captured_inputs)</span>
+    <span class="s1">submodule = mlir.xla_computation_to_mlir_module(xla_comp)</span>
+    <span class="s1">symtab = ir.SymbolTable(submodule.operation)</span>
+    <span class="s1">callee_result_types = symtab[</span><span class="s4">&quot;main&quot;</span><span class="s1">].type.results</span>
+    <span class="s1">fn = mlir.merge_mlir_modules(ctx.module</span><span class="s3">, </span><span class="s4">f&quot;call_tf_</span><span class="s3">{</span><span class="s1">function_flat_tf.name</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s3">,</span>
+                                 <span class="s1">submodule)</span>
+    <span class="s1">call = func_dialect.CallOp(callee_result_types</span><span class="s3">,</span>
+                               <span class="s1">ir.FlatSymbolRefAttr.get(fn)</span><span class="s3">,</span>
+                               <span class="s1">tuple(args_op) + captured_ops)</span>
+    <span class="s3">if </span><span class="s1">result_shape.is_tuple():</span>
+      <span class="s1">flat_results = [hlo.GetTupleElementOp(call</span><span class="s3">, </span><span class="s1">mlir.i32_attr(i)).result</span>
+                      <span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">range(len(result_shapes))]</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s1">flat_results = call.results</span>
+
+    <span class="s1">outputs = []</span>
+    <span class="s3">for </span><span class="s1">op</span><span class="s3">, </span><span class="s1">res_aval</span><span class="s3">, </span><span class="s1">res_shape </span><span class="s3">in </span><span class="s1">zip(flat_results</span><span class="s3">, </span><span class="s1">result_avals</span><span class="s3">,</span>
+                                       <span class="s1">result_shapes):</span>
+      <span class="s3">if </span><span class="s1">res_aval.dtype != res_shape.numpy_dtype():</span>
+        <span class="s1">op = hlo.ConvertOp(mlir.aval_to_ir_type(res_aval)</span><span class="s3">, </span><span class="s1">op).result</span>
+      <span class="s1">outputs.append(op)</span>
+    <span class="s3">return </span><span class="s1">outputs</span>
+
+  <span class="s3">return </span><span class="s1">code_gen</span><span class="s3">, </span><span class="s1">result_avals</span>
+
+<span class="s3">def </span><span class="s1">_register_call_lowering(platform):</span>
+  <span class="s1">mlir.register_lowering(call_tf_p</span><span class="s3">, </span><span class="s1">functools.partial(_call_tf_lowering</span><span class="s3">,</span>
+                                                      <span class="s1">platform=platform)</span><span class="s3">,</span>
+                         <span class="s1">platform=platform)</span>
+<span class="s3">for </span><span class="s1">platform </span><span class="s3">in </span><span class="s1">(</span><span class="s4">&quot;cpu&quot;</span><span class="s3">, </span><span class="s4">&quot;cuda&quot;</span><span class="s3">, </span><span class="s4">&quot;tpu&quot;</span><span class="s1">):</span>
+  <span class="s1">_register_call_lowering(platform)</span>
+
+<span class="s0"># Support the call_tf under jax2tf.convert in eager mode</span>
+<span class="s3">def </span><span class="s1">_jax2tf_call_tf(*args: TfVal</span><span class="s3">,</span>
+                    <span class="s1">callable_flat_tf: Callable</span><span class="s3">,</span>
+                    <span class="s1">**_) -&gt; TfVal:</span>
+  <span class="s3">with </span><span class="s1">jax2tf_internal.inside_call_tf():</span>
+    <span class="s1">res_tf_flat = callable_flat_tf(*args)</span>
+  <span class="s3">return </span><span class="s1">res_tf_flat</span>
+
+<span class="s1">jax2tf_internal.tf_impl[call_tf_p] = _jax2tf_call_tf</span>
+
+
+<span class="s3">def </span><span class="s1">emit_tf_embedded_graph_custom_call(</span>
+    <span class="s1">concrete_function_flat_tf</span><span class="s3">,</span>
+    <span class="s1">operands: List[ir.Value]</span><span class="s3">,</span>
+    <span class="s1">has_side_effects</span><span class="s3">,</span>
+    <span class="s1">output_avals</span><span class="s3">,</span>
+<span class="s1">):</span>
+  <span class="s2">&quot;&quot;&quot;Emits MLIR about tf.graph custom_call. 
+ 
+  All call_tf caller function information is stored in tf.metadata. 
+  This includes: 
+  (1) The caller function name: This name will be used by the runtime to execute 
+  the callback. 
+  (2) The FunctionDef Dict: This list includes the caller function and all 
+  related callees. By storing this information in tf.metadata, we can easily 
+  retrieve it at runtime. 
+  (3) The platform where to run this call_tf function. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">call_target_name = </span><span class="s4">&quot;tf_embedded_graph&quot;</span>
+
+  <span class="s0"># Generate metadata as attributes:</span>
+  <span class="s1">func_def_list = [concrete_function_flat_tf.function_def] + [</span>
+      <span class="s1">func.definition</span>
+      <span class="s3">for </span><span class="s1">func </span><span class="s3">in </span><span class="s1">concrete_function_flat_tf.graph._functions.values()</span>
+  <span class="s1">]</span>
+  <span class="s0"># TODO(gleasonk): Here, we encode the tf.FunctionDef bytes using the base64</span>
+  <span class="s0"># algorithm. We do this because StableHLO does not currently have a standard</span>
+  <span class="s0"># way to store bytes.</span>
+  <span class="s1">tf_metadata = {</span>
+      <span class="s4">&quot;call_tf_func_name&quot;</span><span class="s1">: ir.StringAttr.get(concrete_function_flat_tf.name)</span><span class="s3">,</span>
+      <span class="s4">&quot;function_def_list&quot;</span><span class="s1">: ir.ArrayAttr.get(</span>
+          <span class="s1">[</span>
+              <span class="s1">ir.StringAttr.get(base64.b64encode(f.SerializeToString()))</span>
+              <span class="s3">for </span><span class="s1">f </span><span class="s3">in </span><span class="s1">func_def_list</span>
+          <span class="s1">]</span><span class="s3">,</span>
+      <span class="s1">)</span><span class="s3">,</span>
+  <span class="s1">}</span>
+
+  <span class="s1">result_avals = output_avals</span>
+
+  <span class="s1">result_types = util.flatten(</span>
+      <span class="s1">[mlir.aval_to_ir_types(aval) </span><span class="s3">for </span><span class="s1">aval </span><span class="s3">in </span><span class="s1">result_avals]</span>
+  <span class="s1">)</span>
+
+  <span class="s1">result = hlo.CustomCallOp(</span>
+      <span class="s1">result_types</span><span class="s3">,</span>
+      <span class="s1">operands</span><span class="s3">,</span>
+      <span class="s1">call_target_name=ir.StringAttr.get(call_target_name)</span><span class="s3">,</span>
+      <span class="s1">has_side_effect=ir.BoolAttr.get(has_side_effects)</span><span class="s3">,</span>
+      <span class="s1">api_version=mlir.i32_attr(</span><span class="s5">2</span><span class="s1">)</span><span class="s3">,</span>
+      <span class="s1">called_computations=ir.ArrayAttr.get([])</span><span class="s3">,</span>
+      <span class="s1">backend_config=ir.StringAttr.get(</span><span class="s4">&quot;&quot;</span><span class="s1">)</span><span class="s3">,</span>
+  <span class="s1">)</span>
+  <span class="s0"># Store TF metadata in unregistered attribute</span>
+  <span class="s1">result.attributes[</span><span class="s4">&quot;tf_metadata&quot;</span><span class="s1">] = ir.DictAttr.get(tf_metadata)</span>
+  <span class="s3">return </span><span class="s1">result.results</span>
+</pre>
+</body>
+</html>

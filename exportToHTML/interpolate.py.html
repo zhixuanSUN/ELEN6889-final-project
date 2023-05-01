@@ -1,0 +1,179 @@
+<html>
+<head>
+<title>interpolate.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #6897bb;}
+.s4 { color: #808080;}
+.s5 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+interpolate.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">itertools </span><span class="s0">import </span><span class="s1">product</span>
+<span class="s0">import </span><span class="s1">scipy.interpolate </span><span class="s0">as </span><span class="s1">osp_interpolate</span>
+
+<span class="s0">from </span><span class="s1">jax.numpy </span><span class="s0">import </span><span class="s1">(asarray</span><span class="s0">, </span><span class="s1">broadcast_arrays</span><span class="s0">, </span><span class="s1">can_cast</span><span class="s0">,</span>
+                       <span class="s1">empty</span><span class="s0">, </span><span class="s1">nan</span><span class="s0">, </span><span class="s1">searchsorted</span><span class="s0">, </span><span class="s1">where</span><span class="s0">, </span><span class="s1">zeros)</span>
+<span class="s0">from </span><span class="s1">jax._src.tree_util </span><span class="s0">import </span><span class="s1">register_pytree_node</span>
+<span class="s0">from </span><span class="s1">jax._src.numpy.util </span><span class="s0">import </span><span class="s1">check_arraylike</span><span class="s0">, </span><span class="s1">promote_dtypes_inexact</span><span class="s0">, </span><span class="s1">_wraps</span>
+
+
+<span class="s0">def </span><span class="s1">_ndim_coords_from_arrays(points</span><span class="s0">, </span><span class="s1">ndim=</span><span class="s0">None</span><span class="s1">):</span>
+  <span class="s2">&quot;&quot;&quot;Convert a tuple of coordinate arrays to a (..., ndim)-shaped array.&quot;&quot;&quot;</span>
+  <span class="s0">if </span><span class="s1">isinstance(points</span><span class="s0">, </span><span class="s1">tuple) </span><span class="s0">and </span><span class="s1">len(points) == </span><span class="s3">1</span><span class="s1">:</span>
+    <span class="s4"># handle argument tuple</span>
+    <span class="s1">points = points[</span><span class="s3">0</span><span class="s1">]</span>
+  <span class="s0">if </span><span class="s1">isinstance(points</span><span class="s0">, </span><span class="s1">tuple):</span>
+    <span class="s1">p = broadcast_arrays(*points)</span>
+    <span class="s0">for </span><span class="s1">p_other </span><span class="s0">in </span><span class="s1">p[</span><span class="s3">1</span><span class="s1">:]:</span>
+      <span class="s0">if </span><span class="s1">p_other.shape != p[</span><span class="s3">0</span><span class="s1">].shape:</span>
+        <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s5">&quot;coordinate arrays do not have the same shape&quot;</span><span class="s1">)</span>
+    <span class="s1">points = empty(p[</span><span class="s3">0</span><span class="s1">].shape + (len(points)</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">dtype=float)</span>
+    <span class="s0">for </span><span class="s1">j</span><span class="s0">, </span><span class="s1">item </span><span class="s0">in </span><span class="s1">enumerate(p):</span>
+      <span class="s1">points = points.at[...</span><span class="s0">, </span><span class="s1">j].set(item)</span>
+  <span class="s0">else</span><span class="s1">:</span>
+    <span class="s1">check_arraylike(</span><span class="s5">&quot;_ndim_coords_from_arrays&quot;</span><span class="s0">, </span><span class="s1">points)</span>
+    <span class="s1">points = asarray(points)  </span><span class="s4"># SciPy: asanyarray(points)</span>
+    <span class="s0">if </span><span class="s1">points.ndim == </span><span class="s3">1</span><span class="s1">:</span>
+      <span class="s0">if </span><span class="s1">ndim </span><span class="s0">is None</span><span class="s1">:</span>
+        <span class="s1">points = points.reshape(-</span><span class="s3">1</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span>
+      <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">points = points.reshape(-</span><span class="s3">1</span><span class="s0">, </span><span class="s1">ndim)</span>
+  <span class="s0">return </span><span class="s1">points</span>
+
+
+<span class="s1">@_wraps(</span>
+    <span class="s1">osp_interpolate.RegularGridInterpolator</span><span class="s0">,</span>
+    <span class="s1">lax_description=</span><span class="s5">&quot;&quot;&quot; 
+In the JAX version, `bounds_error` defaults to and must always be `False` since no 
+bound error may be raised under JIT. 
+ 
+Furthermore, in contrast to SciPy no input validation is performed. 
+&quot;&quot;&quot;</span><span class="s1">)</span>
+<span class="s0">class </span><span class="s1">RegularGridInterpolator:</span>
+  <span class="s4"># Based on SciPy's implementation which in turn is originally based on an</span>
+  <span class="s4"># implementation by Johannes Buchner</span>
+
+  <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">,</span>
+               <span class="s1">points</span><span class="s0">,</span>
+               <span class="s1">values</span><span class="s0">,</span>
+               <span class="s1">method=</span><span class="s5">&quot;linear&quot;</span><span class="s0">,</span>
+               <span class="s1">bounds_error=</span><span class="s0">False,</span>
+               <span class="s1">fill_value=nan):</span>
+    <span class="s0">if </span><span class="s1">method </span><span class="s0">not in </span><span class="s1">(</span><span class="s5">&quot;linear&quot;</span><span class="s0">, </span><span class="s5">&quot;nearest&quot;</span><span class="s1">):</span>
+      <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s5">f&quot;method </span><span class="s0">{</span><span class="s1">method</span><span class="s0">!r} </span><span class="s5">is not defined&quot;</span><span class="s1">)</span>
+    <span class="s1">self.method = method</span>
+    <span class="s1">self.bounds_error = bounds_error</span>
+    <span class="s0">if </span><span class="s1">self.bounds_error:</span>
+      <span class="s0">raise </span><span class="s1">NotImplementedError(</span><span class="s5">&quot;`bounds_error` takes no effect under JIT&quot;</span><span class="s1">)</span>
+
+    <span class="s1">check_arraylike(</span><span class="s5">&quot;RegularGridInterpolator&quot;</span><span class="s0">, </span><span class="s1">values)</span>
+    <span class="s0">if </span><span class="s1">len(points) &gt; values.ndim:</span>
+      <span class="s1">ve = </span><span class="s5">f&quot;there are </span><span class="s0">{</span><span class="s1">len(points)</span><span class="s0">} </span><span class="s5">point arrays, but values has </span><span class="s0">{</span><span class="s1">values.ndim</span><span class="s0">} </span><span class="s5">dimensions&quot;</span>
+      <span class="s0">raise </span><span class="s1">ValueError(ve)</span>
+
+    <span class="s1">values</span><span class="s0">, </span><span class="s1">= promote_dtypes_inexact(values)</span>
+
+    <span class="s0">if </span><span class="s1">fill_value </span><span class="s0">is not None</span><span class="s1">:</span>
+      <span class="s1">check_arraylike(</span><span class="s5">&quot;RegularGridInterpolator&quot;</span><span class="s0">, </span><span class="s1">fill_value)</span>
+      <span class="s1">fill_value = asarray(fill_value)</span>
+      <span class="s0">if not </span><span class="s1">can_cast(fill_value.dtype</span><span class="s0">, </span><span class="s1">values.dtype</span><span class="s0">, </span><span class="s1">casting=</span><span class="s5">'same_kind'</span><span class="s1">):</span>
+        <span class="s1">ve = </span><span class="s5">&quot;fill_value must be either 'None' or of a type compatible with values&quot;</span>
+        <span class="s0">raise </span><span class="s1">ValueError(ve)</span>
+    <span class="s1">self.fill_value = fill_value</span>
+
+    <span class="s4"># TODO: assert sanity of `points` similar to SciPy but in a JIT-able way</span>
+    <span class="s1">check_arraylike(</span><span class="s5">&quot;RegularGridInterpolator&quot;</span><span class="s0">, </span><span class="s1">*points)</span>
+    <span class="s1">self.grid = tuple(asarray(p) </span><span class="s0">for </span><span class="s1">p </span><span class="s0">in </span><span class="s1">points)</span>
+    <span class="s1">self.values = values</span>
+
+  <span class="s1">@_wraps(osp_interpolate.RegularGridInterpolator.__call__</span><span class="s0">, </span><span class="s1">update_doc=</span><span class="s0">False</span><span class="s1">)</span>
+  <span class="s0">def </span><span class="s1">__call__(self</span><span class="s0">, </span><span class="s1">xi</span><span class="s0">, </span><span class="s1">method=</span><span class="s0">None</span><span class="s1">):</span>
+    <span class="s1">method = self.method </span><span class="s0">if </span><span class="s1">method </span><span class="s0">is None else </span><span class="s1">method</span>
+    <span class="s0">if </span><span class="s1">method </span><span class="s0">not in </span><span class="s1">(</span><span class="s5">&quot;linear&quot;</span><span class="s0">, </span><span class="s5">&quot;nearest&quot;</span><span class="s1">):</span>
+      <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s5">f&quot;method </span><span class="s0">{</span><span class="s1">method</span><span class="s0">!r} </span><span class="s5">is not defined&quot;</span><span class="s1">)</span>
+
+    <span class="s1">ndim = len(self.grid)</span>
+    <span class="s1">xi = _ndim_coords_from_arrays(xi</span><span class="s0">, </span><span class="s1">ndim=ndim)</span>
+    <span class="s0">if </span><span class="s1">xi.shape[-</span><span class="s3">1</span><span class="s1">] != len(self.grid):</span>
+      <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s5">&quot;the requested sample points xi have dimension&quot;</span>
+                       <span class="s5">f&quot; </span><span class="s0">{</span><span class="s1">xi.shape[</span><span class="s3">1</span><span class="s1">]</span><span class="s0">}</span><span class="s5">, but this RegularGridInterpolator has&quot;</span>
+                       <span class="s5">f&quot; dimension </span><span class="s0">{</span><span class="s1">ndim</span><span class="s0">}</span><span class="s5">&quot;</span><span class="s1">)</span>
+
+    <span class="s1">xi_shape = xi.shape</span>
+    <span class="s1">xi = xi.reshape(-</span><span class="s3">1</span><span class="s0">, </span><span class="s1">xi_shape[-</span><span class="s3">1</span><span class="s1">])</span>
+
+    <span class="s1">indices</span><span class="s0">, </span><span class="s1">norm_distances</span><span class="s0">, </span><span class="s1">out_of_bounds = self._find_indices(xi.T)</span>
+    <span class="s0">if </span><span class="s1">method == </span><span class="s5">&quot;linear&quot;</span><span class="s1">:</span>
+      <span class="s1">result = self._evaluate_linear(indices</span><span class="s0">, </span><span class="s1">norm_distances)</span>
+    <span class="s0">elif </span><span class="s1">method == </span><span class="s5">&quot;nearest&quot;</span><span class="s1">:</span>
+      <span class="s1">result = self._evaluate_nearest(indices</span><span class="s0">, </span><span class="s1">norm_distances)</span>
+    <span class="s0">else</span><span class="s1">:</span>
+      <span class="s0">raise </span><span class="s1">AssertionError(</span><span class="s5">&quot;method must be bound&quot;</span><span class="s1">)</span>
+    <span class="s0">if not </span><span class="s1">self.bounds_error </span><span class="s0">and </span><span class="s1">self.fill_value </span><span class="s0">is not None</span><span class="s1">:</span>
+      <span class="s1">bc_shp = result.shape[:</span><span class="s3">1</span><span class="s1">] + (</span><span class="s3">1</span><span class="s0">,</span><span class="s1">) * (result.ndim - </span><span class="s3">1</span><span class="s1">)</span>
+      <span class="s1">result = where(out_of_bounds.reshape(bc_shp)</span><span class="s0">, </span><span class="s1">self.fill_value</span><span class="s0">, </span><span class="s1">result)</span>
+
+    <span class="s0">return </span><span class="s1">result.reshape(xi_shape[:-</span><span class="s3">1</span><span class="s1">] + self.values.shape[ndim:])</span>
+
+  <span class="s0">def </span><span class="s1">_evaluate_linear(self</span><span class="s0">, </span><span class="s1">indices</span><span class="s0">, </span><span class="s1">norm_distances):</span>
+    <span class="s4"># slice for broadcasting over trailing dimensions in self.values</span>
+    <span class="s1">vslice = (slice(</span><span class="s0">None</span><span class="s1">)</span><span class="s0">,</span><span class="s1">) + (</span><span class="s0">None,</span><span class="s1">) * (self.values.ndim - len(indices))</span>
+
+    <span class="s4"># find relevant values</span>
+    <span class="s4"># each i and i+1 represents a edge</span>
+    <span class="s1">edges = product(*[[i</span><span class="s0">, </span><span class="s1">i + </span><span class="s3">1</span><span class="s1">] </span><span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">indices])</span>
+    <span class="s1">values = asarray(</span><span class="s3">0.</span><span class="s1">)</span>
+    <span class="s0">for </span><span class="s1">edge_indices </span><span class="s0">in </span><span class="s1">edges:</span>
+      <span class="s1">weight = asarray(</span><span class="s3">1.</span><span class="s1">)</span>
+      <span class="s0">for </span><span class="s1">ei</span><span class="s0">, </span><span class="s1">i</span><span class="s0">, </span><span class="s1">yi </span><span class="s0">in </span><span class="s1">zip(edge_indices</span><span class="s0">, </span><span class="s1">indices</span><span class="s0">, </span><span class="s1">norm_distances):</span>
+        <span class="s1">weight *= where(ei == i</span><span class="s0">, </span><span class="s3">1 </span><span class="s1">- yi</span><span class="s0">, </span><span class="s1">yi)</span>
+      <span class="s1">values += self.values[edge_indices] * weight[vslice]</span>
+    <span class="s0">return </span><span class="s1">values</span>
+
+  <span class="s0">def </span><span class="s1">_evaluate_nearest(self</span><span class="s0">, </span><span class="s1">indices</span><span class="s0">, </span><span class="s1">norm_distances):</span>
+    <span class="s1">idx_res = [</span>
+        <span class="s1">where(yi &lt;= </span><span class="s3">.5</span><span class="s0">, </span><span class="s1">i</span><span class="s0">, </span><span class="s1">i + </span><span class="s3">1</span><span class="s1">) </span><span class="s0">for </span><span class="s1">i</span><span class="s0">, </span><span class="s1">yi </span><span class="s0">in </span><span class="s1">zip(indices</span><span class="s0">, </span><span class="s1">norm_distances)</span>
+    <span class="s1">]</span>
+    <span class="s0">return </span><span class="s1">self.values[tuple(idx_res)]</span>
+
+  <span class="s0">def </span><span class="s1">_find_indices(self</span><span class="s0">, </span><span class="s1">xi):</span>
+    <span class="s4"># find relevant edges between which xi are situated</span>
+    <span class="s1">indices = []</span>
+    <span class="s4"># compute distance to lower edge in unity units</span>
+    <span class="s1">norm_distances = []</span>
+    <span class="s4"># check for out of bounds xi</span>
+    <span class="s1">out_of_bounds = zeros((xi.shape[</span><span class="s3">1</span><span class="s1">]</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">dtype=bool)</span>
+    <span class="s4"># iterate through dimensions</span>
+    <span class="s0">for </span><span class="s1">x</span><span class="s0">, </span><span class="s1">g </span><span class="s0">in </span><span class="s1">zip(xi</span><span class="s0">, </span><span class="s1">self.grid):</span>
+      <span class="s1">i = searchsorted(g</span><span class="s0">, </span><span class="s1">x) - </span><span class="s3">1</span>
+      <span class="s1">i = where(i &lt; </span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s0">, </span><span class="s1">i)</span>
+      <span class="s1">i = where(i &gt; g.size - </span><span class="s3">2</span><span class="s0">, </span><span class="s1">g.size - </span><span class="s3">2</span><span class="s0">, </span><span class="s1">i)</span>
+      <span class="s1">indices.append(i)</span>
+      <span class="s1">norm_distances.append((x - g[i]) / (g[i + </span><span class="s3">1</span><span class="s1">] - g[i]))</span>
+      <span class="s0">if not </span><span class="s1">self.bounds_error:</span>
+        <span class="s1">out_of_bounds += x &lt; g[</span><span class="s3">0</span><span class="s1">]</span>
+        <span class="s1">out_of_bounds += x &gt; g[-</span><span class="s3">1</span><span class="s1">]</span>
+    <span class="s0">return </span><span class="s1">indices</span><span class="s0">, </span><span class="s1">norm_distances</span><span class="s0">, </span><span class="s1">out_of_bounds</span>
+
+
+<span class="s1">register_pytree_node(</span>
+    <span class="s1">RegularGridInterpolator</span><span class="s0">,</span>
+    <span class="s0">lambda </span><span class="s1">obj: ((obj.grid</span><span class="s0">, </span><span class="s1">obj.values</span><span class="s0">, </span><span class="s1">obj.fill_value)</span><span class="s0">,</span>
+                 <span class="s1">(obj.method</span><span class="s0">, </span><span class="s1">obj.bounds_error))</span><span class="s0">,</span>
+    <span class="s0">lambda </span><span class="s1">aux</span><span class="s0">, </span><span class="s1">children: RegularGridInterpolator(</span>
+        <span class="s1">*children[:</span><span class="s3">2</span><span class="s1">]</span><span class="s0">,  </span><span class="s4"># type: ignore[index]</span>
+        <span class="s1">*aux</span><span class="s0">,</span>
+        <span class="s1">*children[</span><span class="s3">2</span><span class="s1">:])</span><span class="s0">,  </span><span class="s4"># type: ignore[index]</span>
+<span class="s1">)</span>
+</pre>
+</body>
+</html>

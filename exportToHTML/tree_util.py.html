@@ -1,0 +1,906 @@
+<html>
+<head>
+<title>tree_util.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #629755; font-style: italic;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+tree_util.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2018 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">collections</span>
+<span class="s2">from </span><span class="s1">dataclasses </span><span class="s2">import </span><span class="s1">dataclass</span>
+<span class="s2">import </span><span class="s1">difflib</span>
+<span class="s2">import </span><span class="s1">functools</span>
+<span class="s2">from </span><span class="s1">functools </span><span class="s2">import </span><span class="s1">partial</span>
+<span class="s2">import </span><span class="s1">operator </span><span class="s2">as </span><span class="s1">op</span>
+<span class="s2">import </span><span class="s1">textwrap</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">(Any</span><span class="s2">, </span><span class="s1">Callable</span><span class="s2">, </span><span class="s1">Hashable</span><span class="s2">, </span><span class="s1">Iterable</span><span class="s2">, </span><span class="s1">List</span><span class="s2">, </span><span class="s1">NamedTuple</span><span class="s2">,</span>
+                    <span class="s1">Optional</span><span class="s2">, </span><span class="s1">Tuple</span><span class="s2">, </span><span class="s1">Type</span><span class="s2">, </span><span class="s1">TypeVar</span><span class="s2">, </span><span class="s1">Union</span><span class="s2">, </span><span class="s1">overload)</span>
+<span class="s2">import </span><span class="s1">warnings</span>
+
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">traceback_util</span>
+<span class="s2">from </span><span class="s1">jax._src.lib </span><span class="s2">import </span><span class="s1">pytree</span>
+<span class="s2">from </span><span class="s1">jax._src.util </span><span class="s2">import </span><span class="s1">safe_zip</span>
+<span class="s2">from </span><span class="s1">jax._src.util </span><span class="s2">import </span><span class="s1">unzip2</span>
+
+
+<span class="s1">traceback_util.register_exclusion(__file__)</span>
+
+<span class="s1">T = TypeVar(</span><span class="s3">&quot;T&quot;</span><span class="s1">)</span>
+<span class="s1">U = TypeVar(</span><span class="s3">&quot;U&quot;</span><span class="s2">, </span><span class="s1">bound=Type[Any])</span>
+
+<span class="s1">Leaf = Any</span>
+<span class="s1">PyTreeDef = pytree.PyTreeDef</span>
+
+
+<span class="s2">def </span><span class="s1">tree_flatten(tree: Any</span><span class="s2">,</span>
+                 <span class="s1">is_leaf: Optional[Callable[[Any]</span><span class="s2">, </span><span class="s1">bool]] = </span><span class="s2">None</span>
+                 <span class="s1">) -&gt; Tuple[List[Leaf]</span><span class="s2">, </span><span class="s1">PyTreeDef]:</span>
+  <span class="s4">&quot;&quot;&quot;Flattens a pytree. 
+ 
+  The flattening order (i.e. the order of elements in the output list) 
+  is deterministic, corresponding to a left-to-right depth-first tree 
+  traversal. 
+ 
+  Args: 
+    tree: a pytree to flatten. 
+    is_leaf: an optionally specified function that will be called at each 
+      flattening step. It should return a boolean, with true stopping the 
+      traversal and the whole subtree being treated as a leaf, and false 
+      indicating the flattening should traverse the current object. 
+  Returns: 
+    A pair where the first element is a list of leaf values and the second 
+    element is a treedef representing the structure of the flattened tree. 
+  &quot;&quot;&quot;</span>
+  <span class="s2">return </span><span class="s1">pytree.flatten(tree</span><span class="s2">, </span><span class="s1">is_leaf)</span>
+
+
+<span class="s2">def </span><span class="s1">tree_unflatten(treedef: PyTreeDef</span><span class="s2">, </span><span class="s1">leaves: Iterable[Leaf]) -&gt; Any:</span>
+  <span class="s4">&quot;&quot;&quot;Reconstructs a pytree from the treedef and the leaves. 
+ 
+  The inverse of :func:`tree_flatten`. 
+ 
+  Args: 
+    treedef: the treedef to reconstruct 
+    leaves: the iterable of leaves to use for reconstruction. The iterable 
+      must match the leaves of the treedef. 
+ 
+  Returns: 
+    The reconstructed pytree, containing the ``leaves`` placed in the structure 
+    described by ``treedef``. 
+  &quot;&quot;&quot;</span>
+  <span class="s2">return </span><span class="s1">treedef.unflatten(leaves)</span>
+
+<span class="s2">def </span><span class="s1">tree_leaves(tree: Any</span><span class="s2">,</span>
+                <span class="s1">is_leaf: Optional[Callable[[Any]</span><span class="s2">, </span><span class="s1">bool]] = </span><span class="s2">None</span>
+                <span class="s1">) -&gt; List[Leaf]:</span>
+  <span class="s4">&quot;&quot;&quot;Gets the leaves of a pytree.&quot;&quot;&quot;</span>
+  <span class="s2">return </span><span class="s1">pytree.flatten(tree</span><span class="s2">, </span><span class="s1">is_leaf)[</span><span class="s5">0</span><span class="s1">]</span>
+
+<span class="s2">def </span><span class="s1">tree_structure(tree: Any</span><span class="s2">,</span>
+                   <span class="s1">is_leaf: Optional[Callable[[Any]</span><span class="s2">, </span><span class="s1">bool]] = </span><span class="s2">None</span><span class="s1">) -&gt; PyTreeDef:</span>
+  <span class="s4">&quot;&quot;&quot;Gets the treedef for a pytree.&quot;&quot;&quot;</span>
+  <span class="s2">return </span><span class="s1">pytree.flatten(tree</span><span class="s2">, </span><span class="s1">is_leaf)[</span><span class="s5">1</span><span class="s1">]</span>
+
+<span class="s2">def </span><span class="s1">treedef_tuple(treedefs: Iterable[PyTreeDef]) -&gt; PyTreeDef:</span>
+  <span class="s4">&quot;&quot;&quot;Makes a tuple treedef from an iterable of child treedefs.&quot;&quot;&quot;</span>
+  <span class="s2">return </span><span class="s1">pytree.tuple(list(treedefs))</span>
+
+<span class="s2">def </span><span class="s1">treedef_children(treedef: PyTreeDef) -&gt; List[PyTreeDef]:</span>
+  <span class="s2">return </span><span class="s1">treedef.children()</span>
+
+<span class="s2">def </span><span class="s1">treedef_is_leaf(treedef: PyTreeDef) -&gt; bool:</span>
+  <span class="s2">return </span><span class="s1">treedef.num_nodes == </span><span class="s5">1</span>
+
+<span class="s2">def </span><span class="s1">treedef_is_strict_leaf(treedef: PyTreeDef) -&gt; bool:</span>
+  <span class="s2">return </span><span class="s1">treedef.num_nodes == </span><span class="s5">1 </span><span class="s2">and </span><span class="s1">treedef.num_leaves == </span><span class="s5">1</span>
+
+<span class="s2">def </span><span class="s1">all_leaves(iterable: Iterable[Any]</span><span class="s2">,</span>
+               <span class="s1">is_leaf: Optional[Callable[[Any]</span><span class="s2">, </span><span class="s1">bool]] = </span><span class="s2">None</span><span class="s1">) -&gt; bool:</span>
+  <span class="s4">&quot;&quot;&quot;Tests whether all elements in the given iterable are all leaves. 
+ 
+  &gt;&gt;&gt; tree = {&quot;a&quot;: [1, 2, 3]} 
+  &gt;&gt;&gt; assert all_leaves(jax.tree_util.tree_leaves(tree)) 
+  &gt;&gt;&gt; assert not all_leaves([tree]) 
+ 
+  This function is useful in advanced cases, for example if a library allows 
+  arbitrary map operations on a flat iterable of leaves it may want to check 
+  if the result is still a flat iterable of leaves. 
+ 
+  Args: 
+    iterable: Iterable of leaves. 
+ 
+  Returns: 
+    A boolean indicating if all elements in the input are leaves. 
+  &quot;&quot;&quot;</span>
+  <span class="s2">if </span><span class="s1">is_leaf </span><span class="s2">is None</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">pytree.all_leaves(iterable)</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s1">lst = list(iterable)</span>
+    <span class="s2">return </span><span class="s1">lst == tree_leaves(lst</span><span class="s2">, </span><span class="s1">is_leaf)</span>
+
+
+<span class="s1">_Children = TypeVar(</span><span class="s3">&quot;_Children&quot;</span><span class="s2">, </span><span class="s1">bound=Iterable[Any])</span>
+<span class="s1">_AuxData = TypeVar(</span><span class="s3">&quot;_AuxData&quot;</span><span class="s2">, </span><span class="s1">bound=Hashable)</span>
+
+<span class="s2">def </span><span class="s1">register_pytree_node(nodetype: Type[T]</span><span class="s2">,</span>
+                         <span class="s1">flatten_func: Callable[[T]</span><span class="s2">, </span><span class="s1">Tuple[_Children</span><span class="s2">, </span><span class="s1">_AuxData]]</span><span class="s2">,</span>
+                         <span class="s1">unflatten_func: Callable[[_AuxData</span><span class="s2">, </span><span class="s1">_Children]</span><span class="s2">, </span><span class="s1">T]):</span>
+  <span class="s4">&quot;&quot;&quot;Extends the set of types that are considered internal nodes in pytrees. 
+ 
+  See :ref:`example usage &lt;pytrees&gt;`. 
+ 
+  Args: 
+    nodetype: a Python type to treat as an internal pytree node. 
+    flatten_func: a function to be used during flattening, taking a value of 
+      type ``nodetype`` and returning a pair, with (1) an iterable for the 
+      children to be flattened recursively, and (2) some hashable auxiliary 
+      data to be stored in the treedef and to be passed to the 
+      ``unflatten_func``. 
+    unflatten_func: a function taking two arguments: the auxiliary data that was 
+      returned by ``flatten_func`` and stored in the treedef, and the 
+      unflattened children. The function should return an instance of 
+      ``nodetype``. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">pytree.register_node(nodetype</span><span class="s2">, </span><span class="s1">flatten_func</span><span class="s2">, </span><span class="s1">unflatten_func)</span>
+  <span class="s1">_registry[nodetype] = _RegistryEntry(flatten_func</span><span class="s2">, </span><span class="s1">unflatten_func)</span>
+
+<span class="s2">def </span><span class="s1">register_pytree_node_class(cls: U) -&gt; U:</span>
+  <span class="s4">&quot;&quot;&quot;Extends the set of types that are considered internal nodes in pytrees. 
+ 
+  This function is a thin wrapper around ``register_pytree_node``, and provides 
+  a class-oriented interface:: 
+ 
+    @register_pytree_node_class 
+    class Special: 
+      def __init__(self, x, y): 
+        self.x = x 
+        self.y = y 
+      def tree_flatten(self): 
+        return ((self.x, self.y), None) 
+      @classmethod 
+      def tree_unflatten(cls, aux_data, children): 
+        return cls(*children) 
+  &quot;&quot;&quot;</span>
+  <span class="s1">register_pytree_node(cls</span><span class="s2">, </span><span class="s1">op.methodcaller(</span><span class="s3">'tree_flatten'</span><span class="s1">)</span><span class="s2">, </span><span class="s1">cls.tree_unflatten)</span>
+  <span class="s2">return </span><span class="s1">cls</span>
+
+<span class="s2">def </span><span class="s1">tree_map(f: Callable[...</span><span class="s2">, </span><span class="s1">Any]</span><span class="s2">, </span><span class="s1">tree: Any</span><span class="s2">, </span><span class="s1">*rest: Any</span><span class="s2">,</span>
+             <span class="s1">is_leaf: Optional[Callable[[Any]</span><span class="s2">, </span><span class="s1">bool]] = </span><span class="s2">None</span><span class="s1">) -&gt; Any:</span>
+  <span class="s4">&quot;&quot;&quot;Maps a multi-input function over pytree args to produce a new pytree. 
+ 
+  Args: 
+    f: function that takes ``1 + len(rest)`` arguments, to be applied at the 
+      corresponding leaves of the pytrees. 
+    tree: a pytree to be mapped over, with each leaf providing the first 
+      positional argument to ``f``. 
+    rest: a tuple of pytrees, each of which has the same structure as ``tree`` 
+      or has ``tree`` as a prefix. 
+    is_leaf: an optionally specified function that will be called at each 
+      flattening step. It should return a boolean, which indicates whether 
+      the flattening should traverse the current object, or if it should be 
+      stopped immediately, with the whole subtree being treated as a leaf. 
+ 
+  Returns: 
+    A new pytree with the same structure as ``tree`` but with the value at each 
+    leaf given by ``f(x, *xs)`` where ``x`` is the value at the corresponding 
+    leaf in ``tree`` and ``xs`` is the tuple of values at corresponding nodes in 
+    ``rest``. 
+ 
+  Examples: 
+ 
+    &gt;&gt;&gt; import jax.tree_util 
+    &gt;&gt;&gt; jax.tree_util.tree_map(lambda x: x + 1, {&quot;x&quot;: 7, &quot;y&quot;: 42}) 
+    {'x': 8, 'y': 43} 
+ 
+    If multiple inputs are passed, the structure of the tree is taken from the 
+    first input; subsequent inputs need only have ``tree`` as a prefix: 
+ 
+    &gt;&gt;&gt; jax.tree_util.tree_map(lambda x, y: [x] + y, [5, 6], [[7, 9], [1, 2]]) 
+    [[5, 7, 9], [6, 1, 2]] 
+  &quot;&quot;&quot;</span>
+  <span class="s1">leaves</span><span class="s2">, </span><span class="s1">treedef = tree_flatten(tree</span><span class="s2">, </span><span class="s1">is_leaf)</span>
+  <span class="s1">all_leaves = [leaves] + [treedef.flatten_up_to(r) </span><span class="s2">for </span><span class="s1">r </span><span class="s2">in </span><span class="s1">rest]</span>
+  <span class="s2">return </span><span class="s1">treedef.unflatten(f(*xs) </span><span class="s2">for </span><span class="s1">xs </span><span class="s2">in </span><span class="s1">zip(*all_leaves))</span>
+
+<span class="s2">def </span><span class="s1">build_tree(treedef: PyTreeDef</span><span class="s2">, </span><span class="s1">xs: Any) -&gt; Any:</span>
+  <span class="s2">return </span><span class="s1">treedef.from_iterable_tree(xs)</span>
+
+<span class="s2">def </span><span class="s1">tree_transpose(outer_treedef: PyTreeDef</span><span class="s2">,</span>
+                   <span class="s1">inner_treedef: PyTreeDef</span><span class="s2">,</span>
+                   <span class="s1">pytree_to_transpose: Any) -&gt; Any:</span>
+  <span class="s4">&quot;&quot;&quot;Transform a tree having tree structure (outer, inner) into one having structure 
+  (inner, outer). 
+  &quot;&quot;&quot;</span>
+  <span class="s1">flat</span><span class="s2">, </span><span class="s1">treedef = tree_flatten(pytree_to_transpose)</span>
+  <span class="s1">inner_size = inner_treedef.num_leaves</span>
+  <span class="s1">outer_size = outer_treedef.num_leaves</span>
+  <span class="s2">if </span><span class="s1">treedef.num_leaves != (inner_size * outer_size):</span>
+    <span class="s1">expected_treedef = outer_treedef.compose(inner_treedef)</span>
+    <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">f&quot;Mismatch</span><span class="s2">\n{</span><span class="s1">treedef</span><span class="s2">}\n </span><span class="s3">!= </span><span class="s2">\n{</span><span class="s1">expected_treedef</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+  <span class="s1">iter_flat = iter(flat)</span>
+  <span class="s1">lol = [[next(iter_flat) </span><span class="s2">for </span><span class="s1">_ </span><span class="s2">in </span><span class="s1">range(inner_size)] </span><span class="s2">for </span><span class="s1">__ </span><span class="s2">in </span><span class="s1">range(outer_size)]</span>
+  <span class="s1">transposed_lol = zip(*lol)</span>
+  <span class="s1">subtrees = map(partial(tree_unflatten</span><span class="s2">, </span><span class="s1">outer_treedef)</span><span class="s2">, </span><span class="s1">transposed_lol)</span>
+  <span class="s2">return </span><span class="s1">tree_unflatten(inner_treedef</span><span class="s2">, </span><span class="s1">subtrees)</span>
+
+<span class="s0"># TODO(mattjj): remove the Python-side registry when the C++-side registry is</span>
+<span class="s0"># sufficiently queryable that we can express _replace_nones. That may mean once</span>
+<span class="s0"># we have a flatten_one function.</span>
+<span class="s1">_RegistryEntry = collections.namedtuple(</span><span class="s3">&quot;_RegistryEntry&quot;</span><span class="s2">, </span><span class="s1">[</span><span class="s3">&quot;to_iter&quot;</span><span class="s2">, </span><span class="s3">&quot;from_iter&quot;</span><span class="s1">])</span>
+<span class="s1">_registry = {</span>
+    <span class="s1">tuple: _RegistryEntry(</span><span class="s2">lambda </span><span class="s1">xs: (xs</span><span class="s2">, None</span><span class="s1">)</span><span class="s2">, lambda </span><span class="s1">_</span><span class="s2">, </span><span class="s1">xs: tuple(xs))</span><span class="s2">,</span>
+    <span class="s1">list: _RegistryEntry(</span><span class="s2">lambda </span><span class="s1">xs: (xs</span><span class="s2">, None</span><span class="s1">)</span><span class="s2">, lambda </span><span class="s1">_</span><span class="s2">, </span><span class="s1">xs: list(xs))</span><span class="s2">,</span>
+    <span class="s1">dict: _RegistryEntry(</span><span class="s2">lambda </span><span class="s1">xs: unzip2(sorted(xs.items()))[::-</span><span class="s5">1</span><span class="s1">]</span><span class="s2">,</span>
+                         <span class="s2">lambda </span><span class="s1">keys</span><span class="s2">, </span><span class="s1">xs: dict(zip(keys</span><span class="s2">, </span><span class="s1">xs)))</span><span class="s2">,</span>
+    <span class="s1">type(</span><span class="s2">None</span><span class="s1">): _RegistryEntry(</span><span class="s2">lambda </span><span class="s1">z: (()</span><span class="s2">, None</span><span class="s1">)</span><span class="s2">, lambda </span><span class="s1">_</span><span class="s2">, </span><span class="s1">xs: </span><span class="s2">None</span><span class="s1">)</span><span class="s2">,</span>
+<span class="s1">}</span>
+<span class="s2">def </span><span class="s1">_replace_nones(sentinel</span><span class="s2">, </span><span class="s1">tree):</span>
+  <span class="s4">&quot;&quot;&quot;Replaces ``None`` in ``tree`` with ``sentinel``.&quot;&quot;&quot;</span>
+  <span class="s2">if </span><span class="s1">tree </span><span class="s2">is None</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">sentinel</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s1">handler = _registry.get(type(tree))</span>
+    <span class="s2">if </span><span class="s1">handler:</span>
+      <span class="s1">children</span><span class="s2">, </span><span class="s1">metadata = handler.to_iter(tree)</span>
+      <span class="s1">proc_children = [_replace_nones(sentinel</span><span class="s2">, </span><span class="s1">child) </span><span class="s2">for </span><span class="s1">child </span><span class="s2">in </span><span class="s1">children]</span>
+      <span class="s2">return </span><span class="s1">handler.from_iter(metadata</span><span class="s2">, </span><span class="s1">proc_children)</span>
+    <span class="s2">elif </span><span class="s1">isinstance(tree</span><span class="s2">, </span><span class="s1">tuple) </span><span class="s2">and </span><span class="s1">hasattr(tree</span><span class="s2">, </span><span class="s3">'_fields'</span><span class="s1">):</span>
+      <span class="s0"># handle namedtuple as a special case, based on heuristic</span>
+      <span class="s1">children = iter(tree)</span>
+      <span class="s1">proc_children = [_replace_nones(sentinel</span><span class="s2">, </span><span class="s1">child) </span><span class="s2">for </span><span class="s1">child </span><span class="s2">in </span><span class="s1">children]</span>
+      <span class="s2">return </span><span class="s1">type(tree)(*proc_children)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+      <span class="s2">return </span><span class="s1">tree</span>
+
+<span class="s1">no_initializer = object()</span>
+
+<span class="s1">@overload</span>
+<span class="s2">def </span><span class="s1">tree_reduce(function: Callable[[T</span><span class="s2">, </span><span class="s1">Any]</span><span class="s2">, </span><span class="s1">T]</span><span class="s2">,</span>
+                <span class="s1">tree: Any) -&gt; T:</span>
+    <span class="s1">...</span>
+
+<span class="s1">@overload</span>
+<span class="s2">def </span><span class="s1">tree_reduce(function: Callable[[T</span><span class="s2">, </span><span class="s1">Any]</span><span class="s2">, </span><span class="s1">T]</span><span class="s2">,</span>
+                <span class="s1">tree: Any</span><span class="s2">,</span>
+                <span class="s1">initializer: T) -&gt; T:</span>
+    <span class="s1">...</span>
+
+<span class="s2">def </span><span class="s1">tree_reduce(function: Callable[[T</span><span class="s2">, </span><span class="s1">Any]</span><span class="s2">, </span><span class="s1">T]</span><span class="s2">,</span>
+                <span class="s1">tree: Any</span><span class="s2">,</span>
+                <span class="s1">initializer: Any = no_initializer) -&gt; T:</span>
+  <span class="s2">if </span><span class="s1">initializer </span><span class="s2">is </span><span class="s1">no_initializer:</span>
+    <span class="s2">return </span><span class="s1">functools.reduce(function</span><span class="s2">, </span><span class="s1">tree_leaves(tree))</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">functools.reduce(function</span><span class="s2">, </span><span class="s1">tree_leaves(tree)</span><span class="s2">, </span><span class="s1">initializer)</span>
+
+<span class="s2">def </span><span class="s1">tree_all(tree: Any) -&gt; bool:</span>
+  <span class="s2">return </span><span class="s1">all(tree_leaves(tree))</span>
+
+<span class="s1">register_pytree_node(</span>
+  <span class="s1">collections.OrderedDict</span><span class="s2">,</span>
+  <span class="s2">lambda </span><span class="s1">x: (tuple(x.values())</span><span class="s2">, </span><span class="s1">tuple(x.keys()))</span><span class="s2">,</span>
+  <span class="s2">lambda </span><span class="s1">keys</span><span class="s2">, </span><span class="s1">values: collections.OrderedDict(safe_zip(keys</span><span class="s2">, </span><span class="s1">values)))</span>
+
+<span class="s1">register_pytree_node(</span>
+  <span class="s1">collections.defaultdict</span><span class="s2">,</span>
+  <span class="s2">lambda </span><span class="s1">x: (tuple(x.values())</span><span class="s2">, </span><span class="s1">(x.default_factory</span><span class="s2">, </span><span class="s1">tuple(x.keys())))</span><span class="s2">,</span>
+  <span class="s2">lambda </span><span class="s1">s</span><span class="s2">, </span><span class="s1">values: collections.defaultdict(s[</span><span class="s5">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">safe_zip(s[</span><span class="s5">1</span><span class="s1">]</span><span class="s2">, </span><span class="s1">values)))  </span><span class="s0"># type: ignore[index,call-overload]</span>
+
+
+<span class="s2">class </span><span class="s1">_HashableCallableShim:</span>
+  <span class="s4">&quot;&quot;&quot;Object that delegates __call__, __hash__, and __eq__ to another object.&quot;&quot;&quot;</span>
+  <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">fun):</span>
+    <span class="s1">self.fun = fun</span>
+
+  <span class="s2">def </span><span class="s1">__call__(self</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kw):</span>
+    <span class="s2">return </span><span class="s1">self.fun(*args</span><span class="s2">, </span><span class="s1">**kw)</span>
+
+  <span class="s2">def </span><span class="s1">__hash__(self):</span>
+    <span class="s2">return </span><span class="s1">hash(self.fun)</span>
+
+  <span class="s2">def </span><span class="s1">__eq__(self</span><span class="s2">, </span><span class="s1">other):</span>
+    <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">_HashableCallableShim):</span>
+      <span class="s2">return </span><span class="s1">self.fun == other.fun</span>
+    <span class="s2">return </span><span class="s1">self.fun == other</span>
+
+  <span class="s2">def </span><span class="s1">__repr__(self):</span>
+    <span class="s2">return </span><span class="s3">f'_HashableCallableShim(</span><span class="s2">{</span><span class="s1">repr(self.fun)</span><span class="s2">}</span><span class="s3">)'</span>
+
+
+<span class="s2">class </span><span class="s1">Partial(functools.partial):</span>
+  <span class="s4">&quot;&quot;&quot;A version of functools.partial that works in pytrees. 
+ 
+  Use it for partial function evaluation in a way that is compatible with JAX's 
+  transformations, e.g., ``Partial(func, *args, **kwargs)``. 
+ 
+  (You need to explicitly opt-in to this behavior because we didn't want to give 
+  functools.partial different semantics than normal function closures.) 
+ 
+  For example, here is a basic usage of ``Partial`` in a manner similar to 
+  ``functools.partial``: 
+ 
+  &gt;&gt;&gt; import jax.numpy as jnp 
+  &gt;&gt;&gt; add_one = Partial(jnp.add, 1) 
+  &gt;&gt;&gt; add_one(2) 
+  Array(3, dtype=int32, weak_type=True) 
+ 
+  Pytree compatibility means that the resulting partial function can be passed 
+  as an argument within transformed JAX functions, which is not possible with a 
+  standard ``functools.partial`` function: 
+ 
+  &gt;&gt;&gt; from jax import jit 
+  &gt;&gt;&gt; @jit 
+  ... def call_func(f, *args): 
+  ...   return f(*args) 
+  ... 
+  &gt;&gt;&gt; call_func(add_one, 2) 
+  Array(3, dtype=int32, weak_type=True) 
+ 
+  Passing zero arguments to ``Partial`` effectively wraps the original function, 
+  making it a valid argument in JAX transformed functions: 
+ 
+  &gt;&gt;&gt; call_func(Partial(jnp.add), 1, 2) 
+  Array(3, dtype=int32, weak_type=True) 
+ 
+  Had we passed ``jnp.add`` to ``call_func`` directly, it would have resulted in a 
+  ``TypeError``. 
+ 
+  Note that if the result of ``Partial`` is used in the context where the 
+  value is traced, it results in all bound arguments being traced when passed 
+  to the partially-evaluated function: 
+ 
+  &gt;&gt;&gt; print_zero = Partial(print, 0) 
+  &gt;&gt;&gt; print_zero() 
+  0 
+  &gt;&gt;&gt; call_func(print_zero)  # doctest:+ELLIPSIS 
+  Traced&lt;ShapedArray(int32[], weak_type=True)&gt;with&lt;DynamicJaxprTrace...&gt; 
+  &quot;&quot;&quot;</span>
+  <span class="s2">def </span><span class="s1">__new__(klass</span><span class="s2">, </span><span class="s1">func</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kw):</span>
+    <span class="s0"># In Python 3.10+, if func is itself a functools.partial instance,</span>
+    <span class="s0"># functools.partial.__new__ would merge the arguments of this Partial</span>
+    <span class="s0"># instance with the arguments of the func. We box func in a class that does</span>
+    <span class="s0"># not (yet) have a `func` attribute to defeat this optimization, since we</span>
+    <span class="s0"># care exactly which arguments are considered part of the pytree.</span>
+    <span class="s2">if </span><span class="s1">isinstance(func</span><span class="s2">, </span><span class="s1">functools.partial):</span>
+      <span class="s1">original_func = func</span>
+      <span class="s1">func = _HashableCallableShim(original_func)</span>
+      <span class="s1">out = super().__new__(klass</span><span class="s2">, </span><span class="s1">func</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kw)</span>
+      <span class="s1">func.func = original_func.func</span>
+      <span class="s1">func.args = original_func.args</span>
+      <span class="s1">func.keywords = original_func.keywords</span>
+      <span class="s2">return </span><span class="s1">out</span>
+    <span class="s2">else</span><span class="s1">:</span>
+      <span class="s2">return </span><span class="s1">super().__new__(klass</span><span class="s2">, </span><span class="s1">func</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kw)</span>
+
+
+<span class="s1">register_pytree_node(</span>
+    <span class="s1">Partial</span><span class="s2">,</span>
+    <span class="s2">lambda </span><span class="s1">partial_: ((partial_.args</span><span class="s2">, </span><span class="s1">partial_.keywords)</span><span class="s2">, </span><span class="s1">partial_.func)</span><span class="s2">,</span>
+    <span class="s2">lambda </span><span class="s1">func</span><span class="s2">, </span><span class="s1">xs: Partial(func</span><span class="s2">, </span><span class="s1">*xs[</span><span class="s5">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">**xs[</span><span class="s5">1</span><span class="s1">])</span><span class="s2">,  </span><span class="s0"># type: ignore[index]</span>
+<span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">broadcast_prefix(prefix_tree: Any</span><span class="s2">, </span><span class="s1">full_tree: Any</span><span class="s2">,</span>
+                     <span class="s1">is_leaf: Optional[Callable[[Any]</span><span class="s2">, </span><span class="s1">bool]] = </span><span class="s2">None</span>
+                     <span class="s1">) -&gt; List[Any]:</span>
+  <span class="s0"># If prefix_tree is not a tree prefix of full_tree, this code can raise a</span>
+  <span class="s0"># ValueError; use prefix_errors to find disagreements and raise more precise</span>
+  <span class="s0"># error messages.</span>
+  <span class="s1">result = []</span>
+  <span class="s1">num_leaves = </span><span class="s2">lambda </span><span class="s1">t: tree_structure(t).num_leaves</span>
+  <span class="s1">add_leaves = </span><span class="s2">lambda </span><span class="s1">x</span><span class="s2">, </span><span class="s1">subtree: result.extend([x] * num_leaves(subtree))</span>
+  <span class="s1">tree_map(add_leaves</span><span class="s2">, </span><span class="s1">prefix_tree</span><span class="s2">, </span><span class="s1">full_tree</span><span class="s2">, </span><span class="s1">is_leaf=is_leaf)</span>
+  <span class="s2">return </span><span class="s1">result</span>
+
+<span class="s2">def </span><span class="s1">flatten_one_level(pytree: Any) -&gt; Tuple[List[Any]</span><span class="s2">, </span><span class="s1">Hashable]:</span>
+  <span class="s4">&quot;&quot;&quot;Flatten the given pytree node by one level. 
+ 
+  Args: 
+    pytree: A valid pytree node, either built-in or registered via 
+      ``register_pytree_node`` or ``register_pytree_with_keys``. 
+ 
+  Returns: 
+    A pair of the pytree's flattened children and its hashable metadata. 
+ 
+  Raises: 
+    ValueError: If the given pytree is not a built-in or registered container 
+    via ``register_pytree_node`` or ``register_pytree_with_keys``. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">handler = _registry.get(type(pytree))</span>
+  <span class="s2">if </span><span class="s1">handler:</span>
+    <span class="s1">children</span><span class="s2">, </span><span class="s1">meta = handler.to_iter(pytree)</span>
+    <span class="s2">return </span><span class="s1">list(children)</span><span class="s2">, </span><span class="s1">meta</span>
+  <span class="s2">elif </span><span class="s1">isinstance(pytree</span><span class="s2">, </span><span class="s1">tuple) </span><span class="s2">and </span><span class="s1">hasattr(pytree</span><span class="s2">, </span><span class="s3">'_fields'</span><span class="s1">):</span>
+    <span class="s0"># handle namedtuple as a special case, based on heuristic</span>
+    <span class="s2">return </span><span class="s1">[getattr(pytree</span><span class="s2">, </span><span class="s1">s) </span><span class="s2">for </span><span class="s1">s </span><span class="s2">in </span><span class="s1">pytree._fields]</span><span class="s2">, None</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">f&quot;can't tree-flatten type: </span><span class="s2">{</span><span class="s1">type(pytree)</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+
+<span class="s2">def </span><span class="s1">prefix_errors(prefix_tree: Any</span><span class="s2">, </span><span class="s1">full_tree: Any</span><span class="s2">,</span>
+                  <span class="s1">is_leaf: Optional[Callable[[Any]</span><span class="s2">, </span><span class="s1">bool]] = </span><span class="s2">None,</span>
+                  <span class="s1">) -&gt; List[Callable[[str]</span><span class="s2">, </span><span class="s1">ValueError]]:</span>
+  <span class="s2">return </span><span class="s1">list(_prefix_error(()</span><span class="s2">, </span><span class="s1">prefix_tree</span><span class="s2">, </span><span class="s1">full_tree</span><span class="s2">, </span><span class="s1">is_leaf))</span>
+
+<span class="s2">def </span><span class="s1">equality_errors(</span>
+    <span class="s1">tree1: Any</span><span class="s2">, </span><span class="s1">tree2: Any</span><span class="s2">, </span><span class="s1">is_leaf: Optional[Callable[[Any]</span><span class="s2">, </span><span class="s1">bool]] = </span><span class="s2">None,</span>
+<span class="s1">) -&gt; Iterable[Tuple[KeyPath</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">str]]:</span>
+  <span class="s2">yield from </span><span class="s1">_equality_errors(()</span><span class="s2">, </span><span class="s1">tree1</span><span class="s2">, </span><span class="s1">tree2</span><span class="s2">, </span><span class="s1">is_leaf)</span>
+
+<span class="s0"># TODO(mattjj): maybe share some logic with _prefix_error?</span>
+<span class="s2">def </span><span class="s1">_equality_errors(path</span><span class="s2">, </span><span class="s1">t1</span><span class="s2">, </span><span class="s1">t2</span><span class="s2">, </span><span class="s1">is_leaf):</span>
+  <span class="s0"># If both are leaves, this isn't a structure equality error.</span>
+  <span class="s2">if </span><span class="s1">(treedef_is_strict_leaf(tree_structure(t1</span><span class="s2">, </span><span class="s1">is_leaf=is_leaf)) </span><span class="s2">and</span>
+      <span class="s1">treedef_is_strict_leaf(tree_structure(t2</span><span class="s2">, </span><span class="s1">is_leaf=is_leaf))): </span><span class="s2">return</span>
+
+  <span class="s0"># The trees may disagree because they are different types:</span>
+  <span class="s2">if </span><span class="s1">type(t1) != type(t2):</span>
+    <span class="s2">yield </span><span class="s1">path</span><span class="s2">, </span><span class="s1">str(type(t1))</span><span class="s2">, </span><span class="s1">str(type(t2))</span><span class="s2">, </span><span class="s3">'their Python types differ'</span>
+    <span class="s2">return  </span><span class="s0"># no more errors to find</span>
+
+  <span class="s0"># Or they may disagree because their roots have different numbers or keys of</span>
+  <span class="s0"># children (with special-case handling of list/tuple):</span>
+  <span class="s2">if </span><span class="s1">isinstance(t1</span><span class="s2">, </span><span class="s1">(list</span><span class="s2">, </span><span class="s1">tuple)):</span>
+    <span class="s2">assert </span><span class="s1">type(t1) == type(t2)</span>
+    <span class="s2">if </span><span class="s1">len(t1) != len(t2):</span>
+      <span class="s2">yield </span><span class="s1">(path</span><span class="s2">,</span>
+             <span class="s3">f'</span><span class="s2">{</span><span class="s1">type(t1).__name__</span><span class="s2">} </span><span class="s3">of length </span><span class="s2">{</span><span class="s1">len(t1)</span><span class="s2">}</span><span class="s3">'</span><span class="s2">,</span>
+             <span class="s3">f'</span><span class="s2">{</span><span class="s1">type(t2).__name__</span><span class="s2">} </span><span class="s3">of length </span><span class="s2">{</span><span class="s1">len(t2)</span><span class="s2">}</span><span class="s3">'</span><span class="s2">,</span>
+             <span class="s3">'the lengths do not match'</span><span class="s1">)</span>
+      <span class="s2">return  </span><span class="s0"># no more errors to find</span>
+  <span class="s1">t1_children</span><span class="s2">, </span><span class="s1">t1_meta = flatten_one_level(t1)</span>
+  <span class="s1">t2_children</span><span class="s2">, </span><span class="s1">t2_meta = flatten_one_level(t2)</span>
+  <span class="s1">t1_keys</span><span class="s2">, </span><span class="s1">t2_keys = _child_keys(t1)</span><span class="s2">, </span><span class="s1">_child_keys(t2)</span>
+  <span class="s2">try</span><span class="s1">:</span>
+    <span class="s1">diff = </span><span class="s3">' '</span><span class="s1">.join(repr(k.key) </span><span class="s2">for </span><span class="s1">k </span><span class="s2">in</span>
+                    <span class="s1">set(t1_keys).symmetric_difference(set(t2_keys)))</span>
+  <span class="s2">except</span><span class="s1">:</span>
+    <span class="s1">diff = </span><span class="s3">''</span>
+  <span class="s2">if </span><span class="s1">len(t1_children) != len(t2_children):</span>
+    <span class="s2">yield </span><span class="s1">(path</span><span class="s2">,</span>
+           <span class="s3">f'</span><span class="s2">{</span><span class="s1">type(t1)</span><span class="s2">} </span><span class="s3">with </span><span class="s2">{</span><span class="s1">len(t1_children)</span><span class="s2">} </span><span class="s3">child'</span>
+           <span class="s3">f'</span><span class="s2">{</span><span class="s3">&quot;ren&quot; </span><span class="s2">if </span><span class="s1">len(t1_children) &gt; </span><span class="s5">1 </span><span class="s2">else </span><span class="s3">&quot;&quot;</span><span class="s2">}</span><span class="s3">'</span><span class="s2">,</span>
+           <span class="s3">f'</span><span class="s2">{</span><span class="s1">type(t2)</span><span class="s2">} </span><span class="s3">with </span><span class="s2">{</span><span class="s1">len(t2_children)</span><span class="s2">} </span><span class="s3">child'</span>
+           <span class="s3">f'</span><span class="s2">{</span><span class="s3">&quot;ren&quot; </span><span class="s2">if </span><span class="s1">len(t2_children) &gt; </span><span class="s5">1 </span><span class="s2">else </span><span class="s3">&quot;&quot;</span><span class="s2">}</span><span class="s3">'</span><span class="s2">,</span>
+           <span class="s3">'the numbers of children do not match' </span><span class="s1">+</span>
+           <span class="s1">(diff </span><span class="s2">and </span><span class="s3">f', with the symmetric difference of key sets: </span><span class="s2">{{{</span><span class="s1">diff</span><span class="s2">}}}</span><span class="s3">'</span><span class="s1">)</span>
+           <span class="s1">)</span>
+    <span class="s2">return  </span><span class="s0"># no more errors to find</span>
+
+  <span class="s0"># Or they may disagree if their roots have different pytree metadata:</span>
+  <span class="s2">if </span><span class="s1">t1_meta != t2_meta:</span>
+    <span class="s2">yield </span><span class="s1">(path</span><span class="s2">,</span>
+           <span class="s3">f'</span><span class="s2">{</span><span class="s1">type(t1)</span><span class="s2">} </span><span class="s3">with pytree metadata </span><span class="s2">{</span><span class="s1">t1_meta</span><span class="s2">}</span><span class="s3">'</span><span class="s2">,</span>
+           <span class="s3">f'</span><span class="s2">{</span><span class="s1">type(t2)</span><span class="s2">} </span><span class="s3">with pytree metadata </span><span class="s2">{</span><span class="s1">t2_meta</span><span class="s2">}</span><span class="s3">'</span><span class="s2">,</span>
+           <span class="s3">'the pytree node metadata does not match'</span><span class="s1">)</span>
+    <span class="s2">return  </span><span class="s0"># no more errors to find</span>
+
+  <span class="s0"># If the root types and numbers of children agree, there must be a mismatch in</span>
+  <span class="s0"># a subtree, so recurse:</span>
+  <span class="s2">assert </span><span class="s1">t1_keys == t2_keys</span><span class="s2">, </span><span class="s1">\</span>
+      <span class="s3">f&quot;equal pytree nodes gave different tree keys: </span><span class="s2">{</span><span class="s1">t1_keys</span><span class="s2">} </span><span class="s3">and </span><span class="s2">{</span><span class="s1">t2_keys</span><span class="s2">}</span><span class="s3">&quot;</span>
+  <span class="s2">for </span><span class="s1">k</span><span class="s2">, </span><span class="s1">c1</span><span class="s2">, </span><span class="s1">c2 </span><span class="s2">in </span><span class="s1">zip(t1_keys</span><span class="s2">, </span><span class="s1">t1_children</span><span class="s2">, </span><span class="s1">t2_children):</span>
+    <span class="s2">yield from </span><span class="s1">_equality_errors((*path</span><span class="s2">, </span><span class="s1">k)</span><span class="s2">, </span><span class="s1">c1</span><span class="s2">, </span><span class="s1">c2</span><span class="s2">, </span><span class="s1">is_leaf)</span>
+
+
+<span class="s0"># TODO(ivyzheng): Remove old APIs when all users migrated.</span>
+
+<span class="s2">class </span><span class="s1">_DeprecatedKeyPathEntry(NamedTuple):</span>
+  <span class="s1">key: Any</span>
+  <span class="s2">def </span><span class="s1">pprint(self) -&gt; str:</span>
+    <span class="s2">assert False  </span><span class="s0"># must override</span>
+
+<span class="s2">class </span><span class="s1">GetitemKeyPathEntry(_DeprecatedKeyPathEntry):</span>
+  <span class="s2">def </span><span class="s1">pprint(self) -&gt; str:</span>
+    <span class="s2">return </span><span class="s3">f'[</span><span class="s2">{</span><span class="s1">repr(self.key)</span><span class="s2">}</span><span class="s3">]'</span>
+  <span class="s2">def </span><span class="s1">__str__(self):</span>
+    <span class="s2">return </span><span class="s1">self.pprint()</span>
+
+<span class="s2">class </span><span class="s1">AttributeKeyPathEntry(_DeprecatedKeyPathEntry):</span>
+  <span class="s2">def </span><span class="s1">pprint(self) -&gt; str:</span>
+    <span class="s2">return </span><span class="s3">f'.</span><span class="s2">{</span><span class="s1">self.key</span><span class="s2">}</span><span class="s3">'</span>
+  <span class="s2">def </span><span class="s1">__str__(self):</span>
+    <span class="s2">return </span><span class="s1">self.pprint()</span>
+
+<span class="s2">class </span><span class="s1">FlattenedKeyPathEntry(_DeprecatedKeyPathEntry):  </span><span class="s0"># fallback</span>
+  <span class="s2">def </span><span class="s1">pprint(self) -&gt; str:</span>
+    <span class="s2">return </span><span class="s3">f'[&lt;flat index </span><span class="s2">{</span><span class="s1">self.key</span><span class="s2">}</span><span class="s3">&gt;]'</span>
+  <span class="s2">def </span><span class="s1">__str__(self):</span>
+    <span class="s2">return </span><span class="s1">self.pprint()</span>
+
+
+<span class="s1">@dataclass(frozen=</span><span class="s2">True</span><span class="s1">)</span>
+<span class="s2">class </span><span class="s1">SequenceKey():</span>
+  <span class="s1">idx: int</span>
+  <span class="s2">def </span><span class="s1">__str__(self):</span>
+    <span class="s2">return </span><span class="s3">f'[</span><span class="s2">{</span><span class="s1">repr(self.idx)</span><span class="s2">}</span><span class="s3">]'</span>
+
+<span class="s1">@dataclass(frozen=</span><span class="s2">True</span><span class="s1">)</span>
+<span class="s2">class </span><span class="s1">DictKey():</span>
+  <span class="s1">key: Hashable</span>
+  <span class="s2">def </span><span class="s1">__str__(self):</span>
+    <span class="s2">return </span><span class="s3">f'[</span><span class="s2">{</span><span class="s1">repr(self.key)</span><span class="s2">}</span><span class="s3">]'</span>
+
+<span class="s1">@dataclass(frozen=</span><span class="s2">True</span><span class="s1">)</span>
+<span class="s2">class </span><span class="s1">GetAttrKey():</span>
+  <span class="s1">name: str</span>
+  <span class="s2">def </span><span class="s1">__str__(self):</span>
+    <span class="s2">return </span><span class="s3">f'.</span><span class="s2">{</span><span class="s1">self.name</span><span class="s2">}</span><span class="s3">'</span>
+
+<span class="s1">@dataclass(frozen=</span><span class="s2">True</span><span class="s1">)</span>
+<span class="s2">class </span><span class="s1">FlattenedIndexKey():</span>
+  <span class="s1">key: int</span>
+  <span class="s2">def </span><span class="s1">__str__(self):</span>
+    <span class="s2">return </span><span class="s3">f'[&lt;flat index </span><span class="s2">{</span><span class="s1">self.key</span><span class="s2">}</span><span class="s3">&gt;]'</span>
+
+<span class="s1">BuiltInKeyEntry = Union[SequenceKey</span><span class="s2">, </span><span class="s1">DictKey</span><span class="s2">, </span><span class="s1">GetAttrKey</span><span class="s2">, </span><span class="s1">FlattenedIndexKey]</span>
+
+<span class="s1">KeyEntry = TypeVar(</span><span class="s3">&quot;KeyEntry&quot;</span><span class="s2">, </span><span class="s1">bound=Hashable)</span>
+<span class="s1">KeyPath = Tuple[KeyEntry</span><span class="s2">, </span><span class="s1">...]</span>
+
+<span class="s2">def </span><span class="s1">keystr(keys: KeyPath):</span>
+  <span class="s2">return </span><span class="s3">''</span><span class="s1">.join([str(k) </span><span class="s2">for </span><span class="s1">k </span><span class="s2">in </span><span class="s1">keys])</span>
+
+
+<span class="s2">class </span><span class="s1">_RegistryWithKeypathsEntry(NamedTuple):</span>
+  <span class="s1">flatten_with_keys: Callable[...</span><span class="s2">, </span><span class="s1">Any]</span>
+  <span class="s1">unflatten_func: Callable[...</span><span class="s2">, </span><span class="s1">Any]</span>
+
+
+<span class="s2">def </span><span class="s1">register_keypaths(</span>
+    <span class="s1">ty: Type[T]</span><span class="s2">, </span><span class="s1">handler: Callable[[T]</span><span class="s2">, </span><span class="s1">Tuple[KeyEntry</span><span class="s2">, </span><span class="s1">...]]</span>
+<span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+  <span class="s4">&quot;&quot;&quot;[Deprecated] Register the method to get keypaths for type. 
+ 
+  Please use ``register_pytree_with_keys`` instead. 
+ 
+  Only works if the type was already registered with ``register_pytree_node``. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">warnings.warn(</span>
+      <span class="s1">(</span>
+          <span class="s3">&quot;jax.tree_util.register_keypaths is deprecated, and will be removed&quot;</span>
+          <span class="s3">&quot; in a future release. Please use `register_pytree_with_keys()`&quot;</span>
+          <span class="s3">&quot; instead.&quot;</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">category=FutureWarning</span><span class="s2">,</span>
+      <span class="s1">stacklevel=</span><span class="s5">2</span><span class="s2">,</span>
+  <span class="s1">)</span>
+  <span class="s1">_register_keypaths(ty</span><span class="s2">, </span><span class="s1">handler)</span>
+
+
+<span class="s2">def </span><span class="s1">_register_keypaths(</span>
+    <span class="s1">ty: Type[T]</span><span class="s2">, </span><span class="s1">handler: Callable[[T]</span><span class="s2">, </span><span class="s1">Tuple[KeyEntry</span><span class="s2">, </span><span class="s1">...]]</span>
+<span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+  <span class="s2">def </span><span class="s1">flatten_with_keys(xs):</span>
+    <span class="s1">children</span><span class="s2">, </span><span class="s1">treedef = _registry[ty].to_iter(xs)</span>
+    <span class="s2">return </span><span class="s1">list(zip(handler(xs)</span><span class="s2">, </span><span class="s1">children))</span><span class="s2">, </span><span class="s1">treedef</span>
+  <span class="s2">if </span><span class="s1">ty </span><span class="s2">in </span><span class="s1">_registry:</span>
+    <span class="s1">_registry_with_keypaths[ty] = _RegistryWithKeypathsEntry(</span>
+        <span class="s1">flatten_with_keys</span><span class="s2">, </span><span class="s1">_registry[ty].from_iter</span>
+    <span class="s1">)</span>
+
+
+<span class="s1">_registry_with_keypaths = {}</span>
+
+<span class="s1">_register_keypaths(</span>
+    <span class="s1">tuple</span><span class="s2">, lambda </span><span class="s1">xs: tuple(SequenceKey(i) </span><span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range(len(xs)))</span>
+<span class="s1">)</span>
+<span class="s1">_register_keypaths(</span>
+    <span class="s1">list</span><span class="s2">, lambda </span><span class="s1">xs: tuple(SequenceKey(i) </span><span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range(len(xs)))</span>
+<span class="s1">)</span>
+<span class="s1">_register_keypaths(dict</span><span class="s2">, lambda </span><span class="s1">xs: tuple(DictKey(k) </span><span class="s2">for </span><span class="s1">k </span><span class="s2">in </span><span class="s1">sorted(xs)))</span>
+
+<span class="s1">_register_keypaths(</span>
+    <span class="s1">collections.defaultdict</span><span class="s2">, lambda </span><span class="s1">x: tuple(DictKey(k) </span><span class="s2">for </span><span class="s1">k </span><span class="s2">in </span><span class="s1">x.keys())</span>
+<span class="s1">)</span>
+
+<span class="s1">_register_keypaths(</span>
+    <span class="s1">collections.OrderedDict</span><span class="s2">, lambda </span><span class="s1">x: tuple(DictKey(k) </span><span class="s2">for </span><span class="s1">k </span><span class="s2">in </span><span class="s1">x.keys())</span>
+<span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">register_pytree_with_keys(</span>
+    <span class="s1">nodetype: Type[T]</span><span class="s2">,</span>
+    <span class="s1">flatten_with_keys: Callable[</span>
+        <span class="s1">[T]</span><span class="s2">, </span><span class="s1">Tuple[Iterable[Tuple[KeyEntry</span><span class="s2">, </span><span class="s1">Any]]</span><span class="s2">, </span><span class="s1">_AuxData]</span>
+    <span class="s1">]</span><span class="s2">,</span>
+    <span class="s1">unflatten_func: Callable[[_AuxData</span><span class="s2">, </span><span class="s1">Iterable[Any]]</span><span class="s2">, </span><span class="s1">T]</span><span class="s2">,</span>
+    <span class="s1">flatten_func: Optional[</span>
+        <span class="s1">Callable[[T]</span><span class="s2">, </span><span class="s1">Tuple[Iterable[Any]</span><span class="s2">, </span><span class="s1">_AuxData]]</span>
+    <span class="s1">] = </span><span class="s2">None,</span>
+<span class="s1">):</span>
+  <span class="s4">&quot;&quot;&quot;Extends the set of types that are considered internal nodes in pytrees. 
+ 
+  This is a more powerful alternative to ``register_pytree_node`` that allows 
+  you to access each pytree leaf's key path when flattening and tree-mapping. 
+ 
+  Args: 
+    nodetype: a Python type to treat as an internal pytree node. 
+    flatten_with_keys: a function to be used during flattening, taking a value 
+      of type ``nodetype`` and returning a pair, with (1) an iterable for tuples 
+      of each key path and its child, and (2) some hashable auxiliary data to be 
+      stored in the treedef and to be passed to the ``unflatten_func``. 
+    unflatten_func: a function taking two arguments: the auxiliary data that was 
+      returned by ``flatten_func`` and stored in the treedef, and the 
+      unflattened children. The function should return an instance of 
+      ``nodetype``. 
+    flatten_func: an optional function similar to ``flatten_with_keys``, but 
+      returns only children and auxiliary data. It must return the children 
+      in the same order as ``flatten_with_keys``, and return the same aux data. 
+      This argument is optional and only needed for faster traversal when 
+      calling functions without keys like ``tree_map`` and ``tree_flatten``. 
+  &quot;&quot;&quot;</span>
+  <span class="s2">if not </span><span class="s1">flatten_func:</span>
+    <span class="s2">def </span><span class="s1">flatten_func_impl(tree):</span>
+      <span class="s1">key_children</span><span class="s2">, </span><span class="s1">treedef = flatten_with_keys(tree)</span>
+      <span class="s2">return </span><span class="s1">[c </span><span class="s2">for </span><span class="s1">_</span><span class="s2">, </span><span class="s1">c </span><span class="s2">in </span><span class="s1">key_children]</span><span class="s2">, </span><span class="s1">treedef</span>
+    <span class="s1">flatten_func = flatten_func_impl</span>
+
+  <span class="s1">register_pytree_node(nodetype</span><span class="s2">, </span><span class="s1">flatten_func</span><span class="s2">, </span><span class="s1">unflatten_func)</span>
+  <span class="s1">_registry_with_keypaths[nodetype] = _RegistryWithKeypathsEntry(</span>
+      <span class="s1">flatten_with_keys</span><span class="s2">, </span><span class="s1">unflatten_func</span>
+  <span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">register_pytree_with_keys_class(cls: U) -&gt; U:</span>
+  <span class="s4">&quot;&quot;&quot;Extends the set of types that are considered internal nodes in pytrees. 
+ 
+  This function is similar to ``register_pytree_node_class``, but requires a 
+  class that defines how it could be flattened with keys. 
+ 
+  It is a thin wrapper around ``register_pytree_with_keys``, and 
+  provides a class-oriented interface:: 
+ 
+    @register_pytree_with_keys_class 
+    class Special: 
+      def __init__(self, x, y): 
+        self.x = x 
+        self.y = y 
+      def tree_flatten_with_keys(self): 
+        return (((GetAttrKey('x'), self.x), (GetAttrKey('y'), self.y)), None) 
+      @classmethod 
+      def tree_unflatten(cls, aux_data, children): 
+        return cls(*children) 
+  &quot;&quot;&quot;</span>
+  <span class="s1">flatten_func = (</span>
+      <span class="s1">op.methodcaller(</span><span class="s3">&quot;tree_flatten&quot;</span><span class="s1">) </span><span class="s2">if </span><span class="s1">hasattr(cls</span><span class="s2">, </span><span class="s3">&quot;tree_flatten&quot;</span><span class="s1">) </span><span class="s2">else None</span>
+  <span class="s1">)</span>
+  <span class="s1">register_pytree_with_keys(</span>
+      <span class="s1">cls</span><span class="s2">, </span><span class="s1">op.methodcaller(</span><span class="s3">&quot;tree_flatten_with_keys&quot;</span><span class="s1">)</span><span class="s2">, </span><span class="s1">cls.tree_unflatten</span><span class="s2">,</span>
+      <span class="s1">flatten_func</span>
+  <span class="s1">)</span>
+  <span class="s2">return </span><span class="s1">cls</span>
+
+
+<span class="s2">def </span><span class="s1">tree_flatten_with_path(</span>
+    <span class="s1">tree: Any</span><span class="s2">, </span><span class="s1">is_leaf: Optional[Callable[[Any]</span><span class="s2">, </span><span class="s1">bool]] = </span><span class="s2">None</span>
+<span class="s1">) -&gt; Tuple[List[Tuple[KeyPath</span><span class="s2">, </span><span class="s1">Any]]</span><span class="s2">, </span><span class="s1">PyTreeDef]:</span>
+  <span class="s4">&quot;&quot;&quot;Flattens a pytree like ``tree_flatten``, but also returns each leaf's key path. 
+ 
+  Args: 
+    tree: a pytree to flatten. If it contains a custom type, it must be 
+      registered with ``register_pytree_with_keys``. 
+  Returns: 
+    A pair which the first element is a list of key-leaf pairs, each of 
+    which contains a leaf and its key path. The second element is a treedef 
+    representing the structure of the flattened tree. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">_</span><span class="s2">, </span><span class="s1">tree_def = tree_flatten(tree</span><span class="s2">, </span><span class="s1">is_leaf)</span>
+  <span class="s2">return </span><span class="s1">_generate_key_paths(tree</span><span class="s2">, </span><span class="s1">is_leaf)</span><span class="s2">, </span><span class="s1">tree_def</span>
+
+
+<span class="s2">def </span><span class="s1">generate_key_paths(</span>
+    <span class="s1">tree: Any</span><span class="s2">, </span><span class="s1">is_leaf: Optional[Callable[[Any]</span><span class="s2">, </span><span class="s1">bool]] = </span><span class="s2">None</span>
+<span class="s1">) -&gt; List[Tuple[KeyPath</span><span class="s2">, </span><span class="s1">Any]]:</span>
+  <span class="s2">return </span><span class="s1">list(_generate_key_paths_(()</span><span class="s2">, </span><span class="s1">tree</span><span class="s2">, </span><span class="s1">is_leaf))</span>
+<span class="s1">_generate_key_paths = generate_key_paths  </span><span class="s0"># alias for backward compat</span>
+
+
+<span class="s0"># The overall logic should be same as PyTreeDef::FlattenIntoImpl</span>
+<span class="s2">def </span><span class="s1">_generate_key_paths_(</span>
+    <span class="s1">key_path: KeyPath</span><span class="s2">,</span>
+    <span class="s1">tree: Any</span><span class="s2">,</span>
+    <span class="s1">is_leaf: Optional[Callable[[Any]</span><span class="s2">, </span><span class="s1">bool]] = </span><span class="s2">None,</span>
+<span class="s1">) -&gt; Iterable[Tuple[KeyPath</span><span class="s2">, </span><span class="s1">Any]]:</span>
+  <span class="s2">if </span><span class="s1">is_leaf </span><span class="s2">and </span><span class="s1">is_leaf(tree):</span>
+    <span class="s2">yield </span><span class="s1">key_path</span><span class="s2">, </span><span class="s1">tree</span>
+    <span class="s2">return</span>
+  <span class="s1">key_handler = _registry_with_keypaths.get(type(tree))</span>
+  <span class="s1">handler = _registry.get(type(tree))</span>
+  <span class="s2">if </span><span class="s1">key_handler:</span>
+    <span class="s1">key_children</span><span class="s2">, </span><span class="s1">_ = key_handler.flatten_with_keys(tree)</span>
+    <span class="s2">for </span><span class="s1">k</span><span class="s2">, </span><span class="s1">c </span><span class="s2">in </span><span class="s1">key_children:</span>
+      <span class="s2">yield from </span><span class="s1">_generate_key_paths_((*key_path</span><span class="s2">, </span><span class="s1">k)</span><span class="s2">, </span><span class="s1">c</span><span class="s2">, </span><span class="s1">is_leaf)</span>
+  <span class="s2">elif </span><span class="s1">handler:</span>
+    <span class="s1">children</span><span class="s2">, </span><span class="s1">_ = handler.to_iter(tree)</span>
+    <span class="s2">for </span><span class="s1">i</span><span class="s2">, </span><span class="s1">c </span><span class="s2">in </span><span class="s1">enumerate(children):</span>
+      <span class="s1">k = FlattenedIndexKey(i)</span>
+      <span class="s2">yield from </span><span class="s1">_generate_key_paths_((*key_path</span><span class="s2">, </span><span class="s1">k)</span><span class="s2">, </span><span class="s1">c</span><span class="s2">, </span><span class="s1">is_leaf)</span>
+  <span class="s2">elif </span><span class="s1">isinstance(tree</span><span class="s2">, </span><span class="s1">tuple) </span><span class="s2">and </span><span class="s1">hasattr(tree</span><span class="s2">, </span><span class="s3">'_fields'</span><span class="s1">):</span>
+    <span class="s0"># handle namedtuple as a special case, based on heuristic</span>
+    <span class="s1">key_children = [(GetAttrKey(s)</span><span class="s2">, </span><span class="s1">getattr(tree</span><span class="s2">, </span><span class="s1">s)) </span><span class="s2">for </span><span class="s1">s </span><span class="s2">in </span><span class="s1">tree._fields]</span>
+    <span class="s2">for </span><span class="s1">k</span><span class="s2">, </span><span class="s1">c </span><span class="s2">in </span><span class="s1">key_children:</span>
+      <span class="s2">yield from </span><span class="s1">_generate_key_paths_(tuple((*key_path</span><span class="s2">, </span><span class="s1">k))</span><span class="s2">, </span><span class="s1">c</span><span class="s2">, </span><span class="s1">is_leaf)</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s2">yield </span><span class="s1">key_path</span><span class="s2">, </span><span class="s1">tree  </span><span class="s0"># strict leaf type</span>
+
+
+<span class="s2">def </span><span class="s1">tree_map_with_path(f: Callable[...</span><span class="s2">, </span><span class="s1">Any]</span><span class="s2">,</span>
+                       <span class="s1">tree: Any</span><span class="s2">, </span><span class="s1">*rest: Any</span><span class="s2">,</span>
+                       <span class="s1">is_leaf: Optional[Callable[[Any]</span><span class="s2">, </span><span class="s1">bool]] = </span><span class="s2">None</span><span class="s1">) -&gt; Any:</span>
+  <span class="s4">&quot;&quot;&quot;Maps a multi-input function over pytree key path and args to produce a new pytree. 
+ 
+  This is a more powerful alternative of ``tree_map`` that can take the key path 
+  of each leaf as input argument as well. 
+ 
+  Args: 
+    f: function that takes ``2 + len(rest)`` arguments, aka. the key path and 
+      each corresponding leaves of the pytrees. 
+    tree: a pytree to be mapped over, with each leaf's key path as the first 
+      positional argument and the leaf itself as the second argument to ``f``. 
+    *rest: a tuple of pytrees, each of which has the same structure as ``tree`` 
+      or has ``tree`` as a prefix. 
+ 
+  Returns: 
+    A new pytree with the same structure as ``tree`` but with the value at each 
+    leaf given by ``f(kp, x, *xs)`` where ``kp`` is the key path of the leaf at 
+    the corresponding leaf in ``tree``, ``x`` is the leaf value and ``xs`` is 
+    the tuple of values at corresponding nodes in ``rest``. 
+  &quot;&quot;&quot;</span>
+
+  <span class="s1">keypath_leaves</span><span class="s2">, </span><span class="s1">treedef = tree_flatten_with_path(tree</span><span class="s2">, </span><span class="s1">is_leaf)</span>
+  <span class="s1">keypath_leaves = list(zip(*keypath_leaves))</span>
+  <span class="s1">all_keypath_leaves = keypath_leaves + [treedef.flatten_up_to(r) </span><span class="s2">for </span><span class="s1">r </span><span class="s2">in </span><span class="s1">rest]</span>
+  <span class="s2">return </span><span class="s1">treedef.unflatten(f(*xs) </span><span class="s2">for </span><span class="s1">xs </span><span class="s2">in </span><span class="s1">zip(*all_keypath_leaves))</span>
+
+
+<span class="s2">def </span><span class="s1">_child_keys(pytree: Any) -&gt; KeyPath:</span>
+  <span class="s2">assert not </span><span class="s1">treedef_is_strict_leaf(tree_structure(pytree))</span>
+  <span class="s1">handler = _registry_with_keypaths.get(type(pytree))</span>
+  <span class="s2">if </span><span class="s1">handler:</span>
+    <span class="s2">return </span><span class="s1">tuple(k </span><span class="s2">for </span><span class="s1">k</span><span class="s2">, </span><span class="s1">_ </span><span class="s2">in </span><span class="s1">handler.flatten_with_keys(pytree)[</span><span class="s5">0</span><span class="s1">])</span>
+  <span class="s2">elif </span><span class="s1">isinstance(pytree</span><span class="s2">, </span><span class="s1">tuple) </span><span class="s2">and </span><span class="s1">hasattr(pytree</span><span class="s2">, </span><span class="s3">'_fields'</span><span class="s1">):</span>
+    <span class="s0"># handle namedtuple as a special case, based on heuristic</span>
+    <span class="s2">return </span><span class="s1">tuple(GetAttrKey(s) </span><span class="s2">for </span><span class="s1">s </span><span class="s2">in </span><span class="s1">pytree._fields)</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s1">num_children = len(treedef_children(tree_structure(pytree)))</span>
+    <span class="s2">return </span><span class="s1">tuple(FlattenedIndexKey(i) </span><span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range(num_children))</span>
+
+
+<span class="s2">def </span><span class="s1">_prefix_error(key_path: KeyPath</span><span class="s2">, </span><span class="s1">prefix_tree: Any</span><span class="s2">, </span><span class="s1">full_tree: Any</span><span class="s2">,</span>
+                  <span class="s1">is_leaf: Optional[Callable[[Any]</span><span class="s2">, </span><span class="s1">bool]] = </span><span class="s2">None,</span>
+                  <span class="s1">) -&gt; Iterable[Callable[[str]</span><span class="s2">, </span><span class="s1">ValueError]]:</span>
+  <span class="s0"># A leaf is a valid prefix of any tree:</span>
+  <span class="s2">if </span><span class="s1">treedef_is_strict_leaf(tree_structure(prefix_tree</span><span class="s2">, </span><span class="s1">is_leaf=is_leaf)): </span><span class="s2">return</span>
+
+  <span class="s0"># The subtrees may disagree because their roots are of different types:</span>
+  <span class="s2">if </span><span class="s1">type(prefix_tree) != type(full_tree):</span>
+    <span class="s2">yield lambda </span><span class="s1">name: ValueError(</span>
+      <span class="s3">&quot;pytree structure error: different types at key path</span><span class="s2">\n</span><span class="s3">&quot;</span>
+      <span class="s3">f&quot;    </span><span class="s2">{{</span><span class="s3">name</span><span class="s2">}}{</span><span class="s1">keystr(key_path)</span><span class="s2">}\n</span><span class="s3">&quot;</span>
+      <span class="s3">f&quot;At that key path, the prefix pytree </span><span class="s2">{{</span><span class="s3">name</span><span class="s2">}} </span><span class="s3">has a subtree of type</span><span class="s2">\n</span><span class="s3">&quot;</span>
+      <span class="s3">f&quot;    </span><span class="s2">{</span><span class="s1">type(prefix_tree)</span><span class="s2">}\n</span><span class="s3">&quot;</span>
+      <span class="s3">f&quot;but at the same key path the full pytree has a subtree of different type</span><span class="s2">\n</span><span class="s3">&quot;</span>
+      <span class="s3">f&quot;    </span><span class="s2">{</span><span class="s1">type(full_tree)</span><span class="s2">}</span><span class="s3">.&quot;</span><span class="s1">.format(name=name))</span>
+    <span class="s2">return  </span><span class="s0"># don't look for more errors in this subtree</span>
+
+  <span class="s0"># Or they may disagree if their roots have different numbers or keys of</span>
+  <span class="s0"># children. Because both prefix_tree and full_tree have the same type at this</span>
+  <span class="s0"># point, and because prefix_tree is not a leaf, each can be flattened once:</span>
+  <span class="s1">prefix_tree_children</span><span class="s2">, </span><span class="s1">prefix_tree_meta = flatten_one_level(prefix_tree)</span>
+  <span class="s1">full_tree_children</span><span class="s2">, </span><span class="s1">full_tree_meta = flatten_one_level(full_tree)</span>
+  <span class="s1">prefix_tree_keys = _child_keys(prefix_tree)</span>
+  <span class="s1">full_tree_keys = _child_keys(full_tree)</span>
+  <span class="s0"># First we check special case types (list and tuple, though if they were</span>
+  <span class="s0"># pytrees we could check strings and sets here, basically Sequences) so that</span>
+  <span class="s0"># we can report length disagreement rather than integer keys:</span>
+  <span class="s2">if </span><span class="s1">isinstance(prefix_tree</span><span class="s2">, </span><span class="s1">(list</span><span class="s2">, </span><span class="s1">tuple)):</span>
+    <span class="s2">if </span><span class="s1">len(prefix_tree) != len(full_tree):</span>
+      <span class="s1">ty = type(prefix_tree)</span>
+      <span class="s2">yield lambda </span><span class="s1">name: ValueError(</span>
+          <span class="s3">f&quot;pytree structure error: different lengths of </span><span class="s2">{</span><span class="s1">ty.__name__</span><span class="s2">} </span><span class="s3">at key path</span><span class="s2">\n</span><span class="s3">&quot;</span>
+          <span class="s3">f&quot;    </span><span class="s2">{{</span><span class="s3">name</span><span class="s2">}}{</span><span class="s1">keystr(key_path)</span><span class="s2">}\n</span><span class="s3">&quot;</span>
+          <span class="s3">f&quot;At that key path, the prefix pytree </span><span class="s2">{{</span><span class="s3">name</span><span class="s2">}} </span><span class="s3">has a subtree of type &quot;</span>
+          <span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">ty.__name__</span><span class="s2">} </span><span class="s3">of length </span><span class="s2">{</span><span class="s1">len(prefix_tree)</span><span class="s2">}</span><span class="s3">, but the full pytree &quot;</span>
+          <span class="s3">f&quot;has a subtree of the same type but of length </span><span class="s2">{</span><span class="s1">len(full_tree)</span><span class="s2">}</span><span class="s3">.&quot;</span>
+          <span class="s1">.format(name=name))</span>
+      <span class="s2">return  </span><span class="s0"># don't look for more errors in this subtree</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s0"># Next we handle the general case of checking child keys.</span>
+    <span class="s2">try</span><span class="s1">:</span>
+      <span class="s1">diff = set(prefix_tree_keys).symmetric_difference(set(full_tree_keys))</span>
+    <span class="s2">except</span><span class="s1">:</span>
+      <span class="s1">diff = </span><span class="s2">None</span>
+    <span class="s2">if </span><span class="s1">len(prefix_tree_children) != len(full_tree_children):</span>
+      <span class="s2">yield lambda </span><span class="s1">name: ValueError(</span>
+        <span class="s3">&quot;pytree structure error: different numbers of pytree children at key path</span><span class="s2">\n</span><span class="s3">&quot;</span>
+        <span class="s3">f&quot;    </span><span class="s2">{{</span><span class="s3">name</span><span class="s2">}}{</span><span class="s1">keystr(key_path)</span><span class="s2">}\n</span><span class="s3">&quot;</span>
+        <span class="s3">f&quot;At that key path, the prefix pytree </span><span class="s2">{{</span><span class="s3">name</span><span class="s2">}} </span><span class="s3">has a subtree of type</span><span class="s2">\n</span><span class="s3">&quot;</span>
+        <span class="s3">f&quot;    </span><span class="s2">{</span><span class="s1">type(prefix_tree)</span><span class="s2">}\n</span><span class="s3">&quot;</span>
+        <span class="s3">f&quot;with </span><span class="s2">{</span><span class="s1">len(prefix_tree_children)</span><span class="s2">} </span><span class="s3">child keys</span><span class="s2">\n</span><span class="s3">&quot;</span>
+        <span class="s3">f&quot;    </span><span class="s2">{</span><span class="s3">' '</span><span class="s1">.join(str(k.key) </span><span class="s2">for </span><span class="s1">k </span><span class="s2">in </span><span class="s1">prefix_tree_keys)</span><span class="s2">}\n</span><span class="s3">&quot;</span>
+        <span class="s3">f&quot;but at the same key path the full pytree has a subtree of the same &quot;</span>
+        <span class="s3">f&quot;type but with </span><span class="s2">{</span><span class="s1">len(full_tree_children)</span><span class="s2">} </span><span class="s3">child keys</span><span class="s2">\n</span><span class="s3">&quot;</span>
+        <span class="s3">f&quot;    </span><span class="s2">{</span><span class="s3">' '</span><span class="s1">.join(str(k.key) </span><span class="s2">for </span><span class="s1">k </span><span class="s2">in </span><span class="s1">full_tree_keys)</span><span class="s2">}\n</span><span class="s3">&quot;</span>
+        <span class="s1">.format(name=name)</span>
+        <span class="s1">+ (</span><span class="s3">&quot;&quot; </span><span class="s2">if </span><span class="s1">diff </span><span class="s2">is None else</span>
+           <span class="s3">f&quot;so the symmetric difference on key sets is</span><span class="s2">\n</span><span class="s3">&quot;</span>
+           <span class="s3">f&quot;    </span><span class="s2">{</span><span class="s3">' '</span><span class="s1">.join(str(k.key) </span><span class="s2">for </span><span class="s1">k </span><span class="s2">in </span><span class="s1">diff)</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">))</span>
+      <span class="s2">return  </span><span class="s0"># don't look for more errors in this subtree</span>
+
+  <span class="s0"># Or they may disagree if their roots have different pytree metadata:</span>
+  <span class="s2">if </span><span class="s1">prefix_tree_meta != full_tree_meta:</span>
+    <span class="s1">prefix_tree_meta_str = str(prefix_tree_meta)</span>
+    <span class="s1">full_tree_meta_str = str(full_tree_meta)</span>
+    <span class="s1">metadata_diff = textwrap.indent(</span>
+        <span class="s3">'</span><span class="s2">\n</span><span class="s3">'</span><span class="s1">.join(difflib.ndiff(prefix_tree_meta_str.splitlines()</span><span class="s2">,</span>
+                                <span class="s1">full_tree_meta_str.splitlines()))</span><span class="s2">,</span>
+        <span class="s1">prefix=</span><span class="s3">&quot;    &quot;</span><span class="s1">)</span>
+    <span class="s2">yield lambda </span><span class="s1">name: ValueError(</span>
+      <span class="s3">&quot;pytree structure error: different pytree metadata at key path</span><span class="s2">\n</span><span class="s3">&quot;</span>
+      <span class="s3">f&quot;    </span><span class="s2">{{</span><span class="s3">name</span><span class="s2">}}{</span><span class="s1">keystr(key_path)</span><span class="s2">}\n</span><span class="s3">&quot;</span>
+      <span class="s3">f&quot;At that key path, the prefix pytree </span><span class="s2">{{</span><span class="s3">name</span><span class="s2">}} </span><span class="s3">has a subtree of type</span><span class="s2">\n</span><span class="s3">&quot;</span>
+      <span class="s3">f&quot;    </span><span class="s2">{</span><span class="s1">type(prefix_tree)</span><span class="s2">}\n</span><span class="s3">&quot;</span>
+      <span class="s3">f&quot;with metadata</span><span class="s2">\n</span><span class="s3">&quot;</span>
+      <span class="s3">f&quot;    </span><span class="s2">{</span><span class="s1">prefix_tree_meta_str</span><span class="s2">}\n</span><span class="s3">&quot;</span>
+      <span class="s3">f&quot;but at the same key path the full pytree has a subtree of the same &quot;</span>
+      <span class="s3">f&quot;type but with metadata</span><span class="s2">\n</span><span class="s3">&quot;</span>
+      <span class="s3">f&quot;    </span><span class="s2">{</span><span class="s1">full_tree_meta_str</span><span class="s2">}\n</span><span class="s3">&quot;</span>
+      <span class="s3">f&quot;so the diff in the metadata at these pytree nodes is</span><span class="s2">\n</span><span class="s3">&quot;</span>
+      <span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">metadata_diff</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">.format(name=name))</span>
+    <span class="s2">return  </span><span class="s0"># don't look for more errors in this subtree</span>
+
+  <span class="s0"># If the root types and numbers of children agree, there must be an error</span>
+  <span class="s0"># in a subtree, so recurse:</span>
+  <span class="s2">assert </span><span class="s1">prefix_tree_keys == full_tree_keys</span><span class="s2">, </span><span class="s1">\</span>
+    <span class="s1">(</span><span class="s3">&quot;equal pytree nodes gave differing prefix_tree_keys: &quot;</span>
+     <span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">prefix_tree_keys</span><span class="s2">} </span><span class="s3">and </span><span class="s2">{</span><span class="s1">full_tree_keys</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+  <span class="s2">for </span><span class="s1">k</span><span class="s2">, </span><span class="s1">t1</span><span class="s2">, </span><span class="s1">t2 </span><span class="s2">in </span><span class="s1">zip(prefix_tree_keys</span><span class="s2">, </span><span class="s1">prefix_tree_children</span><span class="s2">, </span><span class="s1">full_tree_children):</span>
+    <span class="s2">yield from </span><span class="s1">_prefix_error((*key_path</span><span class="s2">, </span><span class="s1">k)</span><span class="s2">, </span><span class="s1">t1</span><span class="s2">, </span><span class="s1">t2)</span>
+
+
+<span class="s0"># TODO(jakevdp) remove these deprecated wrappers &amp; their imports in jax/__init__.py</span>
+<span class="s2">def </span><span class="s1">_deprecate(f):</span>
+  <span class="s1">@functools.wraps(f)</span>
+  <span class="s2">def </span><span class="s1">wrapped(*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+    <span class="s1">warnings.warn(</span><span class="s3">f&quot;jax.</span><span class="s2">{</span><span class="s1">f.__name__</span><span class="s2">} </span><span class="s3">is deprecated, and will be removed in a future release. &quot;</span>
+                  <span class="s3">f&quot;Use jax.tree_util.</span><span class="s2">{</span><span class="s1">f.__name__</span><span class="s2">} </span><span class="s3">instead.&quot;</span><span class="s2">,</span>
+                  <span class="s1">category=FutureWarning</span><span class="s2">, </span><span class="s1">stacklevel=</span><span class="s5">2</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">f(*args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+  <span class="s2">return </span><span class="s1">wrapped</span>
+
+<span class="s2">def </span><span class="s1">__getattr__(name):</span>
+  <span class="s1">prefix = </span><span class="s3">&quot;_deprecated_&quot;</span>
+  <span class="s2">if </span><span class="s1">name.startswith(prefix):</span>
+    <span class="s1">name = name[len(prefix):]</span>
+    <span class="s2">return </span><span class="s1">_deprecate(globals()[name])</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s2">raise </span><span class="s1">AttributeError(</span><span class="s3">f&quot;module </span><span class="s2">{</span><span class="s1">__name__</span><span class="s2">} </span><span class="s3">has no attribute </span><span class="s2">{</span><span class="s1">name</span><span class="s2">!r}</span><span class="s3">&quot;</span><span class="s1">)</span>
+</pre>
+</body>
+</html>

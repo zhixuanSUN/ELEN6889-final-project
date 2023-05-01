@@ -1,0 +1,139 @@
+<html>
+<head>
+<title>utils.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6897bb;}
+.s4 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+utils.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2018 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s0"># This module contains utility functions split out of jax._src.lax.lax to</span>
+<span class="s0"># avoid cyclic dependencies. Definitions that are used at import time by</span>
+<span class="s0"># multiple modules can go here.</span>
+
+<span class="s2">import </span><span class="s1">builtins</span>
+<span class="s2">from </span><span class="s1">functools </span><span class="s2">import </span><span class="s1">partial</span>
+<span class="s2">import </span><span class="s1">operator</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Callable</span>
+
+<span class="s2">from </span><span class="s1">jax.interpreters </span><span class="s2">import </span><span class="s1">xla</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">core</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">dispatch</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">dtypes</span>
+<span class="s2">from </span><span class="s1">jax._src.util </span><span class="s2">import </span><span class="s1">safe_zip</span>
+<span class="s2">from </span><span class="s1">jax._src.lib </span><span class="s2">import </span><span class="s1">xla_client</span>
+
+<span class="s1">xops = xla_client.ops</span>
+
+<span class="s1">_max = builtins.max</span>
+
+<span class="s0"># ### primitives</span>
+
+
+<span class="s1">_input_dtype: Callable = </span><span class="s2">lambda </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**_: dtypes.canonicalize_dtype(args[</span><span class="s3">0</span><span class="s1">].dtype</span><span class="s2">, </span><span class="s1">allow_opaque_dtype=</span><span class="s2">True</span><span class="s1">)</span>
+
+<span class="s2">def </span><span class="s1">_argnum_weak_type(*argnums):</span>
+  <span class="s2">return lambda </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**_: all(args[i].weak_type </span><span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">argnums)</span>
+
+<span class="s2">def </span><span class="s1">standard_primitive(shape_rule</span><span class="s2">, </span><span class="s1">dtype_rule</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">translation_rule=</span><span class="s2">None,</span>
+                       <span class="s1">weak_type_rule=</span><span class="s2">None, </span><span class="s1">named_shape_rule=</span><span class="s2">None</span><span class="s1">):</span>
+  <span class="s1">weak_type_rule = weak_type_rule </span><span class="s2">or </span><span class="s1">_standard_weak_type_rule</span>
+  <span class="s1">named_shape_rule = named_shape_rule </span><span class="s2">or </span><span class="s1">standard_named_shape_rule</span>
+  <span class="s1">prim = core.Primitive(name)</span>
+  <span class="s1">prim.def_impl(partial(dispatch.apply_primitive</span><span class="s2">, </span><span class="s1">prim))</span>
+  <span class="s1">prim.def_abstract_eval(</span>
+      <span class="s1">partial(standard_abstract_eval</span><span class="s2">, </span><span class="s1">prim</span><span class="s2">, </span><span class="s1">shape_rule</span><span class="s2">, </span><span class="s1">dtype_rule</span><span class="s2">,</span>
+              <span class="s1">weak_type_rule</span><span class="s2">, </span><span class="s1">named_shape_rule))</span>
+  <span class="s2">if </span><span class="s1">translation_rule </span><span class="s2">is not None</span><span class="s1">:</span>
+    <span class="s1">xla.register_translation(prim</span><span class="s2">, </span><span class="s1">translation_rule)</span>
+  <span class="s2">return </span><span class="s1">prim</span>
+
+<span class="s2">def </span><span class="s1">standard_abstract_eval(prim</span><span class="s2">, </span><span class="s1">shape_rule</span><span class="s2">, </span><span class="s1">dtype_rule</span><span class="s2">, </span><span class="s1">weak_type_rule</span><span class="s2">,</span>
+                           <span class="s1">named_shape_rule</span><span class="s2">, </span><span class="s1">*avals</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+  <span class="s2">assert </span><span class="s1">all(isinstance(aval</span><span class="s2">, </span><span class="s1">core.UnshapedArray) </span><span class="s2">for </span><span class="s1">aval </span><span class="s2">in </span><span class="s1">avals)</span><span class="s2">, </span><span class="s1">avals</span>
+  <span class="s2">assert not </span><span class="s1">prim.multiple_results</span>
+  <span class="s1">weak_type = weak_type_rule(*avals</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+  <span class="s1">least_specialized = _max(map(type</span><span class="s2">, </span><span class="s1">avals)</span><span class="s2">,</span>
+                           <span class="s1">key=operator.attrgetter(</span><span class="s4">'array_abstraction_level'</span><span class="s1">))</span>
+  <span class="s2">if </span><span class="s1">least_specialized </span><span class="s2">is </span><span class="s1">core.ConcreteArray:</span>
+    <span class="s1">out = prim.impl(*[x.val </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">avals]</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+    <span class="s2">return </span><span class="s1">core.ConcreteArray(out.dtype</span><span class="s2">, </span><span class="s1">out</span><span class="s2">, </span><span class="s1">weak_type=weak_type)</span>
+  <span class="s2">elif </span><span class="s1">least_specialized </span><span class="s2">is </span><span class="s1">core.ShapedArray:</span>
+    <span class="s2">return </span><span class="s1">core.ShapedArray(shape_rule(*avals</span><span class="s2">, </span><span class="s1">**kwargs)</span><span class="s2">,</span>
+                            <span class="s1">dtype_rule(*avals</span><span class="s2">, </span><span class="s1">**kwargs)</span><span class="s2">, </span><span class="s1">weak_type=weak_type</span><span class="s2">,</span>
+                            <span class="s1">named_shape=named_shape_rule(*avals</span><span class="s2">, </span><span class="s1">**kwargs))</span>
+  <span class="s2">elif </span><span class="s1">least_specialized </span><span class="s2">is </span><span class="s1">core.DShapedArray:</span>
+    <span class="s1">shape = shape_rule(*avals</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+    <span class="s1">ty = (core.ShapedArray </span><span class="s2">if </span><span class="s1">all(type(d) </span><span class="s2">is </span><span class="s1">int </span><span class="s2">for </span><span class="s1">d </span><span class="s2">in </span><span class="s1">shape)</span>
+          <span class="s2">else </span><span class="s1">core.DShapedArray)</span>
+    <span class="s2">return </span><span class="s1">ty(shape</span><span class="s2">, </span><span class="s1">dtype_rule(*avals</span><span class="s2">, </span><span class="s1">**kwargs)</span><span class="s2">, </span><span class="s1">weak_type)</span>
+  <span class="s2">elif </span><span class="s1">least_specialized </span><span class="s2">is </span><span class="s1">core.UnshapedArray:</span>
+    <span class="s2">return </span><span class="s1">core.UnshapedArray(dtype_rule(*avals</span><span class="s2">, </span><span class="s1">**kwargs)</span><span class="s2">, </span><span class="s1">weak_type=weak_type)</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s2">raise </span><span class="s1">TypeError(avals</span><span class="s2">, </span><span class="s1">least_specialized)</span>
+
+<span class="s2">def </span><span class="s1">standard_multi_result_abstract_eval(</span>
+    <span class="s1">prim</span><span class="s2">, </span><span class="s1">shape_rule</span><span class="s2">, </span><span class="s1">dtype_rule</span><span class="s2">, </span><span class="s1">weak_type_rule</span><span class="s2">,</span>
+    <span class="s1">named_shape_rule</span><span class="s2">, </span><span class="s1">*avals</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+  <span class="s2">assert </span><span class="s1">prim.multiple_results</span>
+  <span class="s2">assert </span><span class="s1">all(isinstance(aval</span><span class="s2">, </span><span class="s1">core.UnshapedArray) </span><span class="s2">for </span><span class="s1">aval </span><span class="s2">in </span><span class="s1">avals)</span><span class="s2">, </span><span class="s1">avals</span>
+  <span class="s1">least_specialized = _max(map(type</span><span class="s2">, </span><span class="s1">avals)</span><span class="s2">,</span>
+                           <span class="s1">key=operator.attrgetter(</span><span class="s4">'array_abstraction_level'</span><span class="s1">))</span>
+  <span class="s1">weak_types = weak_type_rule(*avals</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+  <span class="s2">if </span><span class="s1">least_specialized </span><span class="s2">is </span><span class="s1">core.ConcreteArray:</span>
+    <span class="s1">out_vals = prim.impl(*[x.val </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">avals]</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+    <span class="s2">return </span><span class="s1">[core.ConcreteArray(val.dtype</span><span class="s2">, </span><span class="s1">val</span><span class="s2">, </span><span class="s1">weak_type=weak_type)</span>
+            <span class="s2">for </span><span class="s1">val</span><span class="s2">, </span><span class="s1">weak_type </span><span class="s2">in </span><span class="s1">safe_zip(out_vals</span><span class="s2">, </span><span class="s1">weak_types)]</span>
+  <span class="s2">elif </span><span class="s1">least_specialized </span><span class="s2">is </span><span class="s1">core.ShapedArray:</span>
+    <span class="s1">out_shapes = shape_rule(*avals</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+    <span class="s1">out_dtypes = dtype_rule(*avals</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+    <span class="s1">out_named_shapes = named_shape_rule(*avals</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+    <span class="s2">return </span><span class="s1">[core.ShapedArray(s</span><span class="s2">, </span><span class="s1">d</span><span class="s2">, </span><span class="s1">weak_type=weak_type</span><span class="s2">, </span><span class="s1">named_shape=named_shape)</span>
+            <span class="s2">for </span><span class="s1">s</span><span class="s2">, </span><span class="s1">d</span><span class="s2">, </span><span class="s1">weak_type</span><span class="s2">, </span><span class="s1">named_shape</span>
+            <span class="s2">in </span><span class="s1">safe_zip(out_shapes</span><span class="s2">, </span><span class="s1">out_dtypes</span><span class="s2">, </span><span class="s1">weak_types</span><span class="s2">, </span><span class="s1">out_named_shapes)]</span>
+  <span class="s2">elif </span><span class="s1">least_specialized </span><span class="s2">is </span><span class="s1">core.UnshapedArray:</span>
+    <span class="s1">out_dtypes = dtype_rule(*avals</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+    <span class="s2">return </span><span class="s1">[core.UnshapedArray(dtype</span><span class="s2">, </span><span class="s1">weak_type=weak_type)</span>
+            <span class="s2">for </span><span class="s1">dtype</span><span class="s2">, </span><span class="s1">weak_type </span><span class="s2">in </span><span class="s1">safe_zip(out_dtypes</span><span class="s2">, </span><span class="s1">weak_types)]</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s2">raise </span><span class="s1">TypeError(avals</span><span class="s2">, </span><span class="s1">least_specialized)</span>
+
+<span class="s2">def </span><span class="s1">standard_translate(prim):</span>
+  <span class="s1">xla_opname = </span><span class="s4">''</span><span class="s1">.join(term.capitalize() </span><span class="s2">for </span><span class="s1">term </span><span class="s2">in </span><span class="s1">prim.name.split(</span><span class="s4">'_'</span><span class="s1">))</span>
+  <span class="s1">op = getattr(xops</span><span class="s2">, </span><span class="s1">xla_opname)</span>
+  <span class="s2">def </span><span class="s1">translation_rule(ctx</span><span class="s2">, </span><span class="s1">avals_in</span><span class="s2">, </span><span class="s1">avals_out</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+    <span class="s2">del </span><span class="s1">ctx</span><span class="s2">, </span><span class="s1">avals_in</span><span class="s2">, </span><span class="s1">avals_out</span>
+    <span class="s2">return </span><span class="s1">[op(*args</span><span class="s2">, </span><span class="s1">**kwargs)]</span>
+  <span class="s2">return </span><span class="s1">translation_rule</span>
+
+<span class="s2">def </span><span class="s1">standard_named_shape_rule(*avals</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+  <span class="s2">return </span><span class="s1">core.join_named_shapes(*(a.named_shape </span><span class="s2">for </span><span class="s1">a </span><span class="s2">in </span><span class="s1">avals))</span>
+
+<span class="s2">def </span><span class="s1">_standard_weak_type_rule(*avals</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+  <span class="s2">return </span><span class="s1">all(aval.weak_type </span><span class="s2">for </span><span class="s1">aval </span><span class="s2">in </span><span class="s1">avals)</span>
+</pre>
+</body>
+</html>

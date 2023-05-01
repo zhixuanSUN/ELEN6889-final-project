@@ -1,0 +1,92 @@
+<html>
+<head>
+<title>effects.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #629755; font-style: italic;}
+.s4 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+effects.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2023 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Any</span><span class="s2">, </span><span class="s1">Iterable</span><span class="s2">, </span><span class="s1">Optional</span><span class="s2">, </span><span class="s1">Type</span><span class="s2">, </span><span class="s1">Set</span>
+
+<span class="s2">class </span><span class="s1">Effect:</span>
+  <span class="s3">&quot;&quot;&quot;A generic side-effect.&quot;&quot;&quot;</span>
+
+<span class="s1">Effects = Set[Effect]</span>
+
+<span class="s2">class </span><span class="s1">JaxprInputEffect(Effect):</span>
+  <span class="s3">&quot;&quot;&quot;A side-effect associated with the input of a jaxpr. 
+ 
+  Note that the `input_index` includes constvars. 
+  &quot;&quot;&quot;</span>
+
+  <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">input_index: Any):</span>
+    <span class="s1">self.input_index = input_index</span>
+
+  <span class="s2">def </span><span class="s1">replace(self</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">input_index: Optional[Any] = </span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s2">if </span><span class="s1">input_index </span><span class="s2">is None</span><span class="s1">:</span>
+      <span class="s1">input_index = self.input_index</span>
+    <span class="s2">return </span><span class="s1">self.__class__(input_index)</span>
+
+  <span class="s2">def </span><span class="s1">__eq__(self</span><span class="s2">, </span><span class="s1">other):</span>
+    <span class="s2">if not </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">JaxprInputEffect):</span>
+      <span class="s2">return </span><span class="s1">NotImplemented</span>
+    <span class="s2">return </span><span class="s1">self.input_index == other.input_index</span>
+
+  <span class="s2">def </span><span class="s1">__hash__(self):</span>
+    <span class="s2">return </span><span class="s1">hash((self.__class__</span><span class="s2">, </span><span class="s1">self.input_index))</span>
+
+  <span class="s2">def </span><span class="s1">__repr__(self):</span>
+    <span class="s2">return </span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">self.__class__.__name__</span><span class="s2">}</span><span class="s4">(</span><span class="s2">{</span><span class="s1">self.input_index</span><span class="s2">}</span><span class="s4">)&quot;</span>
+
+<span class="s2">class </span><span class="s1">EffectTypeSet:</span>
+
+  <span class="s2">def </span><span class="s1">__init__(self):</span>
+    <span class="s1">self._effect_types: Set[Type[Effect]] = set()</span>
+
+  <span class="s2">def </span><span class="s1">add_type(self</span><span class="s2">, </span><span class="s1">effect_type: Type[Effect]):</span>
+    <span class="s1">self._effect_types.add(effect_type)</span>
+
+  <span class="s2">def </span><span class="s1">contains(self</span><span class="s2">, </span><span class="s1">eff: Effect) -&gt; bool:</span>
+    <span class="s2">return </span><span class="s1">any(isinstance(eff</span><span class="s2">, </span><span class="s1">eff_type) </span><span class="s2">for </span><span class="s1">eff_type </span><span class="s2">in </span><span class="s1">self._effect_types)</span>
+
+  <span class="s2">def </span><span class="s1">filter_in(self</span><span class="s2">, </span><span class="s1">effects: Iterable[Effect]) -&gt; list[Effect]:</span>
+    <span class="s2">return </span><span class="s1">[eff </span><span class="s2">for </span><span class="s1">eff </span><span class="s2">in </span><span class="s1">effects </span><span class="s2">if </span><span class="s1">self.contains(eff)]</span>
+
+  <span class="s2">def </span><span class="s1">filter_not_in(self</span><span class="s2">, </span><span class="s1">effects: Iterable[Effect]) -&gt; list[Effect]:</span>
+    <span class="s2">return </span><span class="s1">[eff </span><span class="s2">for </span><span class="s1">eff </span><span class="s2">in </span><span class="s1">effects </span><span class="s2">if not </span><span class="s1">self.contains(eff)]</span>
+
+
+<span class="s1">no_effects: Effects = set()</span>
+<span class="s1">ordered_effects: EffectTypeSet = EffectTypeSet()</span>
+<span class="s1">lowerable_effects: EffectTypeSet = EffectTypeSet()</span>
+<span class="s1">control_flow_allowed_effects: EffectTypeSet = EffectTypeSet()</span>
+<span class="s1">custom_derivatives_allowed_effects: EffectTypeSet = EffectTypeSet()</span>
+<span class="s1">remat_allowed_effects: EffectTypeSet = EffectTypeSet()</span>
+</pre>
+</body>
+</html>

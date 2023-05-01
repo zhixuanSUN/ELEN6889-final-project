@@ -1,0 +1,351 @@
+<html>
+<head>
+<title>savedmodel_test.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6897bb;}
+.s4 { color: #629755; font-style: italic;}
+.s5 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+savedmodel_test.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2020 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s2">from </span><span class="s1">absl.testing </span><span class="s2">import </span><span class="s1">absltest</span>
+<span class="s2">import </span><span class="s1">os</span>
+
+<span class="s2">import </span><span class="s1">jax</span>
+<span class="s2">from </span><span class="s1">jax </span><span class="s2">import </span><span class="s1">lax</span>
+<span class="s2">import </span><span class="s1">jax.numpy </span><span class="s2">as </span><span class="s1">jnp</span>
+<span class="s2">import </span><span class="s1">numpy </span><span class="s2">as </span><span class="s1">np</span>
+<span class="s2">import </span><span class="s1">tensorflow </span><span class="s2">as </span><span class="s1">tf  </span><span class="s0"># type: ignore[import]</span>
+
+<span class="s2">from </span><span class="s1">jax.experimental </span><span class="s2">import </span><span class="s1">jax2tf</span>
+<span class="s2">from </span><span class="s1">jax.experimental.jax2tf.tests </span><span class="s2">import </span><span class="s1">tf_test_util</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">test_util </span><span class="s2">as </span><span class="s1">jtu</span>
+
+<span class="s2">from </span><span class="s1">jax.config </span><span class="s2">import </span><span class="s1">config</span>
+<span class="s1">config.parse_flags_with_absl()</span>
+
+
+<span class="s2">class </span><span class="s1">SavedModelTest(tf_test_util.JaxToTfTestCase):</span>
+
+  <span class="s2">def </span><span class="s1">test_eval(self):</span>
+    <span class="s1">f_jax = jax.jit(</span><span class="s2">lambda </span><span class="s1">x: jnp.sin(jnp.cos(x)))</span>
+    <span class="s1">model = tf.Module()</span>
+    <span class="s1">model.f = tf.function(jax2tf.convert(f_jax)</span><span class="s2">,</span>
+                          <span class="s1">autograph=</span><span class="s2">False,</span>
+                          <span class="s1">input_signature=[tf.TensorSpec([]</span><span class="s2">, </span><span class="s1">tf.float32)]</span>
+                          <span class="s1">)</span>
+    <span class="s1">x = np.array(</span><span class="s3">0.7</span><span class="s2">, </span><span class="s1">dtype=jnp.float32)</span>
+    <span class="s1">self.assertAllClose(model.f(x)</span><span class="s2">, </span><span class="s1">f_jax(x))</span>
+    <span class="s1">restored_model = tf_test_util.SaveAndLoadModel(model)</span>
+    <span class="s1">self.assertAllClose(restored_model.f(x)</span><span class="s2">, </span><span class="s1">f_jax(x))</span>
+
+  <span class="s2">def </span><span class="s1">test_gradient(self):</span>
+    <span class="s4">&quot;&quot;&quot;Save and restore the custom gradient.&quot;&quot;&quot;</span>
+    <span class="s1">@jax.custom_jvp</span>
+    <span class="s2">def </span><span class="s1">f_jax(x):</span>
+      <span class="s2">return </span><span class="s1">x * x</span>
+
+    <span class="s1">@f_jax.defjvp</span>
+    <span class="s2">def </span><span class="s1">f_jax_jvp(primals</span><span class="s2">, </span><span class="s1">tangents):</span>
+      <span class="s0"># 3 * x * x_t</span>
+      <span class="s1">x</span><span class="s2">, </span><span class="s1">= primals</span>
+      <span class="s1">x_dot</span><span class="s2">, </span><span class="s1">= tangents</span>
+      <span class="s1">primal_out = f_jax(x)</span>
+      <span class="s1">tangent_out = x * x_dot * </span><span class="s3">3.</span>
+      <span class="s2">return </span><span class="s1">primal_out</span><span class="s2">, </span><span class="s1">tangent_out</span>
+
+    <span class="s1">model = tf.Module()</span>
+    <span class="s1">model.f = tf.function(jax2tf.convert(f_jax</span><span class="s2">, </span><span class="s1">with_gradient=</span><span class="s2">True</span><span class="s1">)</span><span class="s2">,</span>
+                          <span class="s1">autograph=</span><span class="s2">False,</span>
+                          <span class="s1">input_signature=[tf.TensorSpec([]</span><span class="s2">, </span><span class="s1">tf.float32)])</span>
+    <span class="s1">x = np.array(</span><span class="s3">0.7</span><span class="s2">, </span><span class="s1">dtype=jnp.float32)</span>
+    <span class="s1">self.assertAllClose(model.f(x)</span><span class="s2">, </span><span class="s1">f_jax(x))</span>
+    <span class="s1">restored_model = tf_test_util.SaveAndLoadModel(model)</span>
+    <span class="s1">xv = tf.Variable(x)</span>
+    <span class="s1">self.assertAllClose(restored_model.f(x)</span><span class="s2">, </span><span class="s1">f_jax(x))</span>
+    <span class="s2">with </span><span class="s1">tf.GradientTape() </span><span class="s2">as </span><span class="s1">tape:</span>
+      <span class="s1">y = restored_model.f(xv)</span>
+    <span class="s1">self.assertAllClose(tape.gradient(y</span><span class="s2">, </span><span class="s1">xv).numpy()</span><span class="s2">,</span>
+                        <span class="s1">jax.grad(f_jax)(x))</span>
+
+  <span class="s2">def </span><span class="s1">test_gradient_nested(self):</span>
+    <span class="s4">&quot;&quot;&quot;Save and restore the custom gradient, when combined with other TF code.&quot;&quot;&quot;</span>
+    <span class="s1">@jax.custom_jvp</span>
+    <span class="s2">def </span><span class="s1">f_jax(x):</span>
+      <span class="s2">return </span><span class="s1">x * x</span>
+
+    <span class="s1">@f_jax.defjvp</span>
+    <span class="s2">def </span><span class="s1">f_jax_jvp(primals</span><span class="s2">, </span><span class="s1">tangents):</span>
+      <span class="s0"># 3 * x * x_t</span>
+      <span class="s1">x</span><span class="s2">, </span><span class="s1">= primals</span>
+      <span class="s1">x_dot</span><span class="s2">, </span><span class="s1">= tangents</span>
+      <span class="s1">primal_out = f_jax(x)</span>
+      <span class="s1">tangent_out = x * x_dot * </span><span class="s3">3.</span>
+      <span class="s2">return </span><span class="s1">primal_out</span><span class="s2">, </span><span class="s1">tangent_out</span>
+
+    <span class="s1">model = tf.Module()</span>
+    <span class="s0"># After conversion, we wrap with some pure TF code</span>
+    <span class="s1">model.f = tf.function(</span><span class="s2">lambda </span><span class="s1">x: tf.math.sin(jax2tf.convert(f_jax</span><span class="s2">, </span><span class="s1">with_gradient=</span><span class="s2">True</span><span class="s1">)(x))</span><span class="s2">,</span>
+                          <span class="s1">autograph=</span><span class="s2">False,</span>
+                          <span class="s1">input_signature=[tf.TensorSpec([]</span><span class="s2">, </span><span class="s1">tf.float32)])</span>
+    <span class="s1">f_jax_equiv = </span><span class="s2">lambda </span><span class="s1">x: jnp.sin(f_jax(x))</span>
+    <span class="s1">x = np.array(</span><span class="s3">0.7</span><span class="s2">, </span><span class="s1">dtype=jnp.float32)</span>
+    <span class="s1">self.assertAllClose(model.f(x)</span><span class="s2">, </span><span class="s1">f_jax_equiv(x))</span>
+    <span class="s1">restored_model = tf_test_util.SaveAndLoadModel(model)</span>
+    <span class="s1">xv = tf.Variable(x)</span>
+    <span class="s1">self.assertAllClose(restored_model.f(x)</span><span class="s2">, </span><span class="s1">f_jax_equiv(x))</span>
+    <span class="s2">with </span><span class="s1">tf.GradientTape() </span><span class="s2">as </span><span class="s1">tape:</span>
+      <span class="s1">y = restored_model.f(xv)</span>
+    <span class="s1">self.assertAllClose(tape.gradient(y</span><span class="s2">, </span><span class="s1">xv).numpy()</span><span class="s2">,</span>
+                        <span class="s1">jax.grad(f_jax_equiv)(x))</span>
+
+  <span class="s2">def </span><span class="s1">test_gradient_disabled(self):</span>
+    <span class="s1">f_jax = </span><span class="s2">lambda </span><span class="s1">x: x * x</span>
+
+    <span class="s1">model = tf.Module()</span>
+    <span class="s1">model.f = tf.function(jax2tf.convert(f_jax</span><span class="s2">, </span><span class="s1">with_gradient=</span><span class="s2">False</span><span class="s1">)</span><span class="s2">,</span>
+                          <span class="s1">autograph=</span><span class="s2">False,</span>
+                          <span class="s1">input_signature=[tf.TensorSpec([]</span><span class="s2">, </span><span class="s1">tf.float32)])</span>
+    <span class="s1">x = np.array(</span><span class="s3">0.7</span><span class="s2">, </span><span class="s1">dtype=jnp.float32)</span>
+    <span class="s1">self.assertAllClose(model.f(x)</span><span class="s2">, </span><span class="s1">f_jax(x))</span>
+    <span class="s1">restored_model = tf_test_util.SaveAndLoadModel(model)</span>
+    <span class="s1">xv = tf.Variable(</span><span class="s3">0.7</span><span class="s2">, </span><span class="s1">dtype=jnp.float32)</span>
+    <span class="s1">self.assertAllClose(restored_model.f(x)</span><span class="s2">, </span><span class="s1">f_jax(x))</span>
+
+    <span class="s2">with </span><span class="s1">self.assertRaisesRegex(LookupError</span><span class="s2">,</span>
+                                <span class="s5">&quot;Gradient explicitly disabled.*The jax2tf-converted function does not support gradients&quot;</span><span class="s1">):</span>
+      <span class="s2">with </span><span class="s1">tf.GradientTape():</span>
+        <span class="s1">_ = restored_model.f(xv)</span>
+
+  <span class="s2">def </span><span class="s1">test_save_without_gradients(self):</span>
+    <span class="s1">f_jax = </span><span class="s2">lambda </span><span class="s1">x: x * x</span>
+
+    <span class="s1">x = np.array(</span><span class="s3">0.7</span><span class="s2">, </span><span class="s1">dtype=jnp.float32)</span>
+    <span class="s1">model = tf.Module()</span>
+    <span class="s1">model.f = tf.function(jax2tf.convert(f_jax</span><span class="s2">, </span><span class="s1">with_gradient=</span><span class="s2">True</span><span class="s1">)</span><span class="s2">,</span>
+                          <span class="s1">autograph=</span><span class="s2">False,</span>
+                          <span class="s1">input_signature=[tf.TensorSpec(x.shape</span><span class="s2">, </span><span class="s1">x.dtype)])</span>
+
+    <span class="s1">self.assertAllClose(model.f(x)</span><span class="s2">, </span><span class="s1">f_jax(x))</span>
+    <span class="s1">restored_model = tf_test_util.SaveAndLoadModel(model</span><span class="s2">,</span>
+                                                   <span class="s1">save_gradients=</span><span class="s2">False</span><span class="s1">)</span>
+    <span class="s1">self.assertAllClose(restored_model.f(x)</span><span class="s2">, </span><span class="s1">f_jax(x))</span>
+
+    <span class="s1">xv = tf.Variable(x)</span>
+    <span class="s2">with </span><span class="s1">tf.GradientTape():</span>
+      <span class="s1">_ = restored_model.f(xv)</span>
+      <span class="s0"># TODO: clean this up b/191117111: it should fail with a clear error</span>
+      <span class="s0"># The following results in a confusing error:</span>
+      <span class="s0"># TypeError: An op outside of the function building code is being passed</span>
+      <span class="s0"># a &quot;Graph&quot; tensor. It is possible to have Graph tensors</span>
+      <span class="s0"># leak out of the function building context by including a</span>
+      <span class="s0"># tf.init_scope in your function building code.</span>
+      <span class="s0"># For example, the following function will fail:</span>
+      <span class="s0">#   @tf.function</span>
+      <span class="s0">#   def has_init_scope():</span>
+      <span class="s0">#     my_constant = tf.constant(1.)</span>
+      <span class="s0">#     with tf.init_scope():</span>
+      <span class="s0">#       added = my_constant * 2</span>
+      <span class="s0"># The graph tensor has name: args_0:0</span>
+      <span class="s0"># g = tape.gradient(res, xv)</span>
+    <span class="s0">#self.assertAllClose(g.numpy(), jax.grad(f_jax)(x))</span>
+
+  <span class="s2">def </span><span class="s1">test_save_without_embedding_params(self):</span>
+    <span class="s2">def </span><span class="s1">model_jax(params</span><span class="s2">, </span><span class="s1">inputs):</span>
+      <span class="s2">return </span><span class="s1">params[</span><span class="s3">0</span><span class="s1">] + params[</span><span class="s3">1</span><span class="s1">] * inputs</span>
+
+    <span class="s1">params = (np.array(</span><span class="s3">1.0</span><span class="s2">, </span><span class="s1">dtype=jnp.float32)</span><span class="s2">,</span>
+              <span class="s1">np.array(</span><span class="s3">2.0</span><span class="s2">, </span><span class="s1">dtype=jnp.float32))</span>
+    <span class="s1">params_vars = tf.nest.map_structure(tf.Variable</span><span class="s2">, </span><span class="s1">params)</span>
+
+    <span class="s1">prediction_tf = </span><span class="s2">lambda </span><span class="s1">x: jax2tf.convert(model_jax)(params_vars</span><span class="s2">, </span><span class="s1">x)</span>
+
+    <span class="s1">model = tf.Module()</span>
+    <span class="s1">model._variables = tf.nest.flatten(params_vars)</span>
+    <span class="s1">model.f = tf.function(prediction_tf</span><span class="s2">, </span><span class="s1">jit_compile=</span><span class="s2">True, </span><span class="s1">autograph=</span><span class="s2">False</span><span class="s1">)</span>
+
+    <span class="s1">x = np.array(</span><span class="s3">0.7</span><span class="s2">, </span><span class="s1">dtype=jnp.float32)</span>
+    <span class="s1">self.assertAllClose(model.f(x)</span><span class="s2">, </span><span class="s1">model_jax(params</span><span class="s2">, </span><span class="s1">x))</span>
+    <span class="s1">restored_model = tf_test_util.SaveAndLoadModel(model</span><span class="s2">,</span>
+                                                   <span class="s1">save_gradients=</span><span class="s2">False</span><span class="s1">)</span>
+    <span class="s1">self.assertAllClose(restored_model.f(x)</span><span class="s2">, </span><span class="s1">model_jax(params</span><span class="s2">, </span><span class="s1">x))</span>
+
+
+  <span class="s2">def </span><span class="s1">test_save_grad_integers(self):</span>
+    <span class="s0"># https://github.com/google/jax/issues/7123</span>
+    <span class="s0"># In the end this is a test that does not involve JAX at all</span>
+    <span class="s1">batch_size = </span><span class="s3">5</span>
+    <span class="s1">state = np.array([</span><span class="s3">1</span><span class="s1">]</span><span class="s2">, </span><span class="s1">dtype=np.int32)  </span><span class="s0"># Works if float32</span>
+    <span class="s1">params = np.ones((</span><span class="s3">3</span><span class="s2">, </span><span class="s3">3</span><span class="s1">)</span><span class="s2">, </span><span class="s1">dtype=np.float32)</span>
+
+    <span class="s0"># params: f32[3, 3], state: i32[1]</span>
+    <span class="s0"># returns f32[5, 2] constant, and the state</span>
+    <span class="s2">def </span><span class="s1">tf_predict(params</span><span class="s2">, </span><span class="s1">state):</span>
+      <span class="s0"># state = tf.cast(state, tf.float32)</span>
+      <span class="s0"># Setup a custom-gradient, like jax2tf would</span>
+      <span class="s1">@tf.custom_gradient</span>
+      <span class="s2">def </span><span class="s1">converted_fun_with_custom_gradient(params</span><span class="s2">, </span><span class="s1">state):</span>
+        <span class="s1">res_out = tf.zeros((batch_size</span><span class="s2">, </span><span class="s3">2</span><span class="s1">)</span><span class="s2">, </span><span class="s1">dtype=tf.float32)</span>
+        <span class="s1">state_out = state  </span><span class="s0"># tf.zeros((4, 4), np.int32),</span>
+
+        <span class="s2">return </span><span class="s1">((res_out</span><span class="s2">, </span><span class="s1">state_out)</span><span class="s2">, </span><span class="s1">converted_grad_fn)</span>
+
+      <span class="s2">def </span><span class="s1">converted_grad_fn(res_out_ct</span><span class="s2">, </span><span class="s1">state_out_ct</span><span class="s2">, </span><span class="s1">variables=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s0"># The gradients for params and the state</span>
+        <span class="s2">return </span><span class="s1">tf.zeros(params.shape</span><span class="s2">, </span><span class="s1">dtype=params.dtype)</span><span class="s2">, </span><span class="s1">state_out_ct</span>
+
+      <span class="s1">res</span><span class="s2">, </span><span class="s1">state_out = converted_fun_with_custom_gradient(params</span><span class="s2">, </span><span class="s1">state)</span>
+      <span class="s0"># state_out = tf.cast(state_out, tf.int32)</span>
+      <span class="s2">return </span><span class="s1">res</span><span class="s2">, </span><span class="s1">state_out</span>
+
+    <span class="s0"># Compute the gradient before saving. This works!</span>
+    <span class="s1">params_v = tf.Variable(params)</span>
+    <span class="s2">with </span><span class="s1">tf.GradientTape() </span><span class="s2">as </span><span class="s1">tape:</span>
+      <span class="s1">preds = tf_predict(params_v</span><span class="s2">, </span><span class="s1">state)[</span><span class="s3">0</span><span class="s1">]</span>
+      <span class="s1">loss = tf.reduce_mean(preds)</span>
+      <span class="s1">g = tape.gradient(loss</span><span class="s2">, </span><span class="s1">params_v)</span>
+    <span class="s1">self.assertAllClose(g.numpy()</span><span class="s2">, </span><span class="s1">np.zeros(params.shape</span><span class="s2">, </span><span class="s1">dtype=params.dtype))</span>
+
+    <span class="s0"># TF -&gt; SavedModel</span>
+    <span class="s1">model = tf.Module()</span>
+    <span class="s1">model.fn = tf.function(tf_predict</span><span class="s2">, </span><span class="s1">autograph=</span><span class="s2">False</span><span class="s1">)</span>
+    <span class="s1">model.fn.get_concrete_function(</span>
+        <span class="s1">tf.TensorSpec(params.shape</span><span class="s2">, </span><span class="s1">params.dtype)</span><span class="s2">,</span>
+        <span class="s1">tf.TensorSpec(state.shape</span><span class="s2">, </span><span class="s1">state.dtype))</span>
+    <span class="s1">save_dir = os.path.join(absltest.get_default_test_tmpdir()</span><span class="s2">, </span><span class="s1">str(id(model)))</span>
+    <span class="s1">options = tf.saved_model.SaveOptions(experimental_custom_gradients=</span><span class="s2">True</span><span class="s1">)</span>
+    <span class="s1">_ = tf.saved_model.save(model</span><span class="s2">, </span><span class="s1">save_dir</span><span class="s2">, </span><span class="s1">options=options)</span>
+    <span class="s1">restored_module = tf.saved_model.load(save_dir)</span>
+
+    <span class="s0"># It seems that saving and reloading is important</span>
+    <span class="s1">restored_fn = restored_module.fn</span>
+
+    <span class="s0"># Compute the gradients after saving and restoring. Fails!</span>
+    <span class="s2">with </span><span class="s1">tf.GradientTape() </span><span class="s2">as </span><span class="s1">tape:</span>
+      <span class="s1">preds = restored_fn(params_v</span><span class="s2">, </span><span class="s1">state)[</span><span class="s3">0</span><span class="s1">]</span>
+      <span class="s1">loss = tf.reduce_mean(preds)</span>
+      <span class="s1">g = tape.gradient(loss</span><span class="s2">, </span><span class="s1">params_v)</span>
+    <span class="s1">self.assertAllClose(g.numpy()</span><span class="s2">, </span><span class="s1">np.zeros(params.shape</span><span class="s2">, </span><span class="s1">dtype=params.dtype))</span>
+
+  <span class="s2">def </span><span class="s1">_compare_with_saved_model(self</span><span class="s2">, </span><span class="s1">f_jax</span><span class="s2">, </span><span class="s1">*args):</span>
+    <span class="s0"># Certain ops are converted to ensure an XLA context, e.g.,</span>
+    <span class="s0"># tf.gather, so that the index-out-of-bounds behavior matches that of</span>
+    <span class="s0"># JAX. We check that this information is preserved through a savedmodel</span>
+    <span class="s1">f_tf = jax2tf.convert(f_jax)</span>
+    <span class="s1">res = f_tf(*args)</span>
+    <span class="s1">restored_f</span><span class="s2">, </span><span class="s1">_ = tf_test_util.SaveAndLoadFunction(f_tf</span><span class="s2">, </span><span class="s1">input_args=args)</span>
+    <span class="s1">res_restored = restored_f(*args)</span>
+    <span class="s1">self.assertAllClose(res</span><span class="s2">, </span><span class="s1">res_restored)</span>
+
+  <span class="s2">def </span><span class="s1">test_pytree(self):</span>
+    <span class="s2">def </span><span class="s1">f_jax(params</span><span class="s2">, </span><span class="s1">x):</span>
+      <span class="s0"># params is a dict</span>
+      <span class="s2">return </span><span class="s1">x @ params[</span><span class="s5">&quot;w&quot;</span><span class="s1">] + params[</span><span class="s5">&quot;b&quot;</span><span class="s1">]</span>
+
+    <span class="s1">x = np.ones((</span><span class="s3">2</span><span class="s2">, </span><span class="s3">3</span><span class="s1">)</span><span class="s2">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s1">params = dict(w=np.ones((</span><span class="s3">3</span><span class="s2">, </span><span class="s3">4</span><span class="s1">)</span><span class="s2">, </span><span class="s1">dtype=np.float32)</span><span class="s2">,</span>
+                  <span class="s1">b=np.ones((</span><span class="s3">2</span><span class="s2">, </span><span class="s3">4</span><span class="s1">)</span><span class="s2">, </span><span class="s1">dtype=np.float32))</span>
+    <span class="s1">res_jax = f_jax(params</span><span class="s2">, </span><span class="s1">x)</span>
+    <span class="s1">f_tf = jax2tf.convert(f_jax)</span>
+
+    <span class="s1">res_tf = f_tf(params</span><span class="s2">, </span><span class="s1">x)</span>
+    <span class="s1">self.assertAllClose(res_jax</span><span class="s2">, </span><span class="s1">res_tf.numpy())</span>
+
+    <span class="s1">restored_f</span><span class="s2">, </span><span class="s1">restored_model = tf_test_util.SaveAndLoadFunction(f_tf</span><span class="s2">, </span><span class="s1">input_args=(params</span><span class="s2">, </span><span class="s1">x)</span><span class="s2">,</span>
+                                                                  <span class="s1">save_gradients=</span><span class="s2">True</span><span class="s1">)</span>
+    <span class="s1">self.assertAllClose(restored_f(params</span><span class="s2">, </span><span class="s1">x).numpy()</span><span class="s2">, </span><span class="s1">res_tf.numpy())</span>
+
+    <span class="s0"># Gradients for the converted function</span>
+    <span class="s1">params_v = tf.nest.map_structure(tf.Variable</span><span class="s2">, </span><span class="s1">params)</span>
+    <span class="s2">with </span><span class="s1">tf.GradientTape() </span><span class="s2">as </span><span class="s1">tape:</span>
+      <span class="s1">res = f_tf(params_v</span><span class="s2">, </span><span class="s1">x)</span>
+      <span class="s1">loss = tf.reduce_sum(res)</span>
+      <span class="s1">g_tf = tape.gradient(loss</span><span class="s2">, </span><span class="s1">params_v)</span>
+
+    <span class="s1">params_v = tf.nest.map_structure(tf.Variable</span><span class="s2">, </span><span class="s1">params)</span>
+    <span class="s2">with </span><span class="s1">tf.GradientTape() </span><span class="s2">as </span><span class="s1">tape:</span>
+      <span class="s1">res = restored_f(params_v</span><span class="s2">, </span><span class="s1">x)</span>
+      <span class="s1">loss = tf.reduce_sum(res)</span>
+      <span class="s1">g_restored_f = tape.gradient(loss</span><span class="s2">, </span><span class="s1">params_v)</span>
+
+    <span class="s1">self.assertAllClose(g_tf[</span><span class="s5">&quot;w&quot;</span><span class="s1">].numpy()</span><span class="s2">, </span><span class="s1">g_restored_f[</span><span class="s5">&quot;w&quot;</span><span class="s1">].numpy())</span>
+    <span class="s1">self.assertAllClose(g_tf[</span><span class="s5">&quot;b&quot;</span><span class="s1">].numpy()</span><span class="s2">, </span><span class="s1">g_restored_f[</span><span class="s5">&quot;b&quot;</span><span class="s1">].numpy())</span>
+
+
+  <span class="s2">def </span><span class="s1">test_xla_context_preserved_slice(self):</span>
+    <span class="s1">arr = np.arange(</span><span class="s3">10</span><span class="s2">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s2">def </span><span class="s1">f_jax(arr):</span>
+      <span class="s2">return </span><span class="s1">lax.dynamic_slice(arr</span><span class="s2">, </span><span class="s1">[</span><span class="s3">100</span><span class="s1">]</span><span class="s2">, </span><span class="s1">[</span><span class="s3">1</span><span class="s1">])  </span><span class="s0"># out of bounds, should return the last element</span>
+    <span class="s1">self._compare_with_saved_model(f_jax</span><span class="s2">, </span><span class="s1">arr)</span>
+
+  <span class="s2">def </span><span class="s1">test_xla_context_preserved_gather(self):</span>
+    <span class="s2">def </span><span class="s1">f_jax(arr):</span>
+      <span class="s2">return </span><span class="s1">arr[</span><span class="s3">100</span><span class="s1">]  </span><span class="s0"># out of bounds, should return the last element</span>
+    <span class="s1">arr = np.arange(</span><span class="s3">10</span><span class="s2">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s1">self._compare_with_saved_model(f_jax</span><span class="s2">, </span><span class="s1">arr)</span>
+
+  <span class="s0"># Test does not work on GPU/TPU; would need something like TPU inference</span>
+  <span class="s0"># converter to separate the model on what needs to run on CPU or accelerator.</span>
+  <span class="s1">@jtu.skip_on_devices(</span><span class="s5">&quot;gpu&quot;</span><span class="s2">, </span><span class="s5">&quot;tpu&quot;</span><span class="s1">)</span>
+  <span class="s2">def </span><span class="s1">test_tf_mix_jax_with_uncompilableble(self):</span>
+    <span class="s4">&quot;&quot;&quot;Show how to combine TF-uncompilableble code with compiled JAX-converted code.&quot;&quot;&quot;</span>
+    <span class="s2">def </span><span class="s1">tf_fn(x_str</span><span class="s2">, </span><span class="s1">compute_tf_fn=</span><span class="s2">lambda </span><span class="s1">x: x):</span>
+      <span class="s0"># Some TF preprocessing code that cannot be compiled with XLA because it</span>
+      <span class="s0"># uses strings.</span>
+      <span class="s1">numbers_f32 = tf.strings.to_number(x_str</span><span class="s2">, </span><span class="s1">out_type=tf.float32)</span>
+      <span class="s1">numbers_f16 = tf.cast(numbers_f32</span><span class="s2">, </span><span class="s1">tf.float16)</span>
+      <span class="s2">return </span><span class="s1">compute_tf_fn(numbers_f16)</span>
+
+    <span class="s1">x_str = np.array([</span><span class="s5">&quot;3.14&quot;</span><span class="s2">, </span><span class="s5">&quot;2.78&quot;</span><span class="s1">])</span>
+
+    <span class="s0"># Test that we get an error if we try to TF-compile `tf_fn`</span>
+    <span class="s2">with </span><span class="s1">self.assertRaisesRegex(</span>
+        <span class="s1">Exception</span><span class="s2">,</span>
+        <span class="s5">&quot;Detected unsupported operations when trying to compile graph&quot;</span><span class="s1">):</span>
+      <span class="s1">tf.function(tf_fn</span><span class="s2">, </span><span class="s1">jit_compile=</span><span class="s2">True, </span><span class="s1">autograph=</span><span class="s2">False</span><span class="s1">)(x_str)</span>
+
+    <span class="s0"># Plug in the TF-compiled JAX-converted `compute_jax_fn`.</span>
+    <span class="s1">composed_fn = </span><span class="s2">lambda </span><span class="s1">x_str: tf_fn(</span>
+        <span class="s1">x_str</span><span class="s2">,</span>
+        <span class="s1">compute_tf_fn=tf.function(jax2tf.convert(jnp.sin)</span><span class="s2">,</span>
+                                  <span class="s1">autograph=</span><span class="s2">False,</span>
+                                  <span class="s1">jit_compile=</span><span class="s2">True</span><span class="s1">))</span>
+    <span class="s1">res_tf = composed_fn(x_str)</span>
+    <span class="s1">self.assertAllClose(res_tf.numpy()</span><span class="s2">,</span>
+                        <span class="s1">jnp.sin(np.array([</span><span class="s3">3.14</span><span class="s2">, </span><span class="s3">2.78</span><span class="s1">]</span><span class="s2">, </span><span class="s1">dtype=np.float16)))</span>
+
+    <span class="s0"># Save and restore SavedModel</span>
+    <span class="s1">restored_f</span><span class="s2">, </span><span class="s1">_ = tf_test_util.SaveAndLoadFunction(composed_fn</span><span class="s2">,</span>
+                                                     <span class="s1">input_args=[x_str])</span>
+    <span class="s1">res_tf_restored = restored_f(x_str)</span>
+    <span class="s1">self.assertAllClose(res_tf_restored.numpy()</span><span class="s2">, </span><span class="s1">res_tf.numpy())</span>
+
+
+<span class="s2">if </span><span class="s1">__name__ == </span><span class="s5">&quot;__main__&quot;</span><span class="s1">:</span>
+  <span class="s1">absltest.main(testLoader=jtu.JaxTestLoader())</span>
+</pre>
+</body>
+</html>

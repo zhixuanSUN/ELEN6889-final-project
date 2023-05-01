@@ -1,0 +1,101 @@
+<html>
+<head>
+<title>signal_helper.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+signal_helper.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;Utility functions adopted from scipy.signal.&quot;&quot;&quot;</span>
+
+<span class="s2">import </span><span class="s1">scipy.signal </span><span class="s2">as </span><span class="s1">osp_signal</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Any</span><span class="s2">, </span><span class="s1">Optional</span><span class="s2">, </span><span class="s1">Tuple</span><span class="s2">, </span><span class="s1">Union</span>
+<span class="s2">import </span><span class="s1">warnings</span>
+
+<span class="s2">import </span><span class="s1">jax.numpy </span><span class="s2">as </span><span class="s1">jnp</span>
+<span class="s2">from </span><span class="s1">jax._src.typing </span><span class="s2">import </span><span class="s1">Array</span><span class="s2">, </span><span class="s1">ArrayLike</span><span class="s2">, </span><span class="s1">DTypeLike</span>
+
+
+<span class="s2">def </span><span class="s1">_triage_segments(window: Union[ArrayLike</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">Tuple[Any</span><span class="s2">, </span><span class="s1">...]]</span><span class="s2">, </span><span class="s1">nperseg: Optional[int]</span><span class="s2">,</span>
+                     <span class="s1">input_length: int</span><span class="s2">, </span><span class="s1">dtype: DTypeLike) -&gt; Tuple[Array</span><span class="s2">, </span><span class="s1">int]:</span>
+  <span class="s0">&quot;&quot;&quot; 
+  Parses window and nperseg arguments for spectrogram and _spectral_helper. 
+  This is a helper function, not meant to be called externally. 
+ 
+  Args: 
+    window : string, tuple, or ndarray 
+      If window is specified by a string or tuple and nperseg is not 
+      specified, nperseg is set to the default of 256 and returns a window of 
+      that length. 
+      If instead the window is array_like and nperseg is not specified, then 
+      nperseg is set to the length of the window. A ValueError is raised if 
+      the user supplies both an array_like window and a value for nperseg but 
+      nperseg does not equal the length of the window. 
+    nperseg : int 
+      Length of each segment 
+    input_length: int 
+      Length of input signal, i.e. x.shape[-1]. Used to test for errors. 
+    dtype: dtype for window if specified as a string or tuple. Not referenced 
+      if window is an array. 
+ 
+  Returns: 
+    win : ndarray 
+      window. If function was called with string or tuple than this will hold 
+      the actual array used as a window. 
+    nperseg : int 
+      Length of each segment. If window is str or tuple, nperseg is set to 
+      256. If window is array_like, nperseg is set to the length of the window. 
+  &quot;&quot;&quot;</span>
+  <span class="s2">if </span><span class="s1">isinstance(window</span><span class="s2">, </span><span class="s1">(str</span><span class="s2">, </span><span class="s1">tuple)):</span>
+    <span class="s1">nperseg_int = input_length </span><span class="s2">if </span><span class="s1">nperseg </span><span class="s2">is None else </span><span class="s1">int(nperseg)</span>
+    <span class="s2">if </span><span class="s1">nperseg_int &gt; input_length:</span>
+      <span class="s1">warnings.warn(</span><span class="s3">f'nperseg = </span><span class="s2">{</span><span class="s1">nperseg_int</span><span class="s2">} </span><span class="s3">is greater than input length '</span>
+                    <span class="s3">f' = </span><span class="s2">{</span><span class="s1">input_length</span><span class="s2">}</span><span class="s3">, using nperseg = </span><span class="s2">{</span><span class="s1">input_length</span><span class="s2">}</span><span class="s3">'</span><span class="s1">)</span>
+      <span class="s1">nperseg_int = input_length</span>
+    <span class="s1">win = jnp.array(osp_signal.get_window(window</span><span class="s2">, </span><span class="s1">nperseg_int)</span><span class="s2">, </span><span class="s1">dtype=dtype)</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s1">win = jnp.asarray(window)</span>
+    <span class="s1">nperseg_int = win.size </span><span class="s2">if </span><span class="s1">nperseg </span><span class="s2">is None else </span><span class="s1">int(nperseg)</span>
+    <span class="s2">if </span><span class="s1">win.ndim != </span><span class="s4">1</span><span class="s1">:</span>
+      <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">'window must be 1-D'</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">input_length &lt; win.size:</span>
+      <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">'window is longer than input signal'</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">nperseg_int != win.size:</span>
+      <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;value specified for nperseg is different from length of window&quot;</span><span class="s1">)</span>
+  <span class="s2">return </span><span class="s1">win</span><span class="s2">, </span><span class="s1">nperseg_int</span>
+
+
+<span class="s2">def </span><span class="s1">_median_bias(n: int) -&gt; Array:</span>
+  <span class="s0">&quot;&quot;&quot; 
+  Returns the bias of the median of a set of periodograms relative to 
+  the mean. See Appendix B from [1]_ for details. 
+ 
+  Args: 
+   n : int 
+      Numbers of periodograms being averaged. 
+ 
+  Returns: 
+    bias : float 
+      Calculated bias. 
+ 
+  References: 
+  .. [1] B. Allen, W.G. Anderson, P.R. Brady, D.A. Brown, J.D.E. Creighton. 
+          &quot;FINDCHIRP: an algorithm for detection of gravitational waves from 
+          inspiraling compact binaries&quot;, Physical Review D 85, 2012, 
+          :arxiv:`gr-qc/0509116` 
+  &quot;&quot;&quot;</span>
+  <span class="s1">ii_2 = jnp.arange(</span><span class="s4">2.</span><span class="s2">, </span><span class="s1">n</span><span class="s2">, </span><span class="s4">2</span><span class="s1">)</span>
+  <span class="s2">return </span><span class="s4">1 </span><span class="s1">+ jnp.sum(</span><span class="s4">1. </span><span class="s1">/ (ii_2 + </span><span class="s4">1</span><span class="s1">) - </span><span class="s4">1. </span><span class="s1">/ ii_2)</span>
+</pre>
+</body>
+</html>

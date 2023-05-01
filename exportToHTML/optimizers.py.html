@@ -1,0 +1,643 @@
+<html>
+<head>
+<title>optimizers.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+optimizers.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2018 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s2">&quot;&quot;&quot;Examples of how to write optimizers with JAX. 
+ 
+You likely do not mean to import this module! The optimizers in this library 
+are intended as examples only. If you are looking for a fully featured optimizer 
+library, two good options are JAXopt_ and Optax_. 
+ 
+This module contains some convenient optimizer definitions, specifically 
+initialization and update functions, which can be used with ndarrays or 
+arbitrarily-nested tuple/list/dicts of ndarrays. 
+ 
+An optimizer is modeled as an ``(init_fun, update_fun, get_params)`` triple of 
+functions, where the component functions have these signatures: 
+ 
+:: 
+ 
+  init_fun(params) 
+ 
+  Args: 
+    params: pytree representing the initial parameters. 
+ 
+  Returns: 
+    A pytree representing the initial optimizer state, which includes the 
+    initial parameters and may also include auxiliary values like initial 
+    momentum. The optimizer state pytree structure generally differs from that 
+    of `params`. 
+ 
+:: 
+ 
+  update_fun(step, grads, opt_state) 
+ 
+  Args: 
+    step: integer representing the step index. 
+    grads: a pytree with the same structure as `get_params(opt_state)` 
+      representing the gradients to be used in updating the optimizer state. 
+    opt_state: a pytree representing the optimizer state to be updated. 
+ 
+  Returns: 
+    A pytree with the same structure as the `opt_state` argument representing 
+    the updated optimizer state. 
+ 
+:: 
+ 
+  get_params(opt_state) 
+ 
+  Args: 
+    opt_state: pytree representing an optimizer state. 
+ 
+  Returns: 
+    A pytree representing the parameters extracted from `opt_state`, such that 
+    the invariant `params == get_params(init_fun(params))` holds true. 
+ 
+ 
+Notice that an optimizer implementation has a lot of flexibility in the form of 
+opt_state: it just has to be a pytree of JaxTypes (so that it can be passed to 
+the JAX transforms defined in api.py) and it has to be consumable by update_fun 
+and get_params. 
+ 
+Example Usage: 
+ 
+.. code-block:: python 
+ 
+  opt_init, opt_update, get_params = optimizers.sgd(learning_rate) 
+  opt_state = opt_init(params) 
+ 
+  def step(step, opt_state): 
+    value, grads = jax.value_and_grad(loss_fn)(get_params(opt_state)) 
+    opt_state = opt_update(step, grads, opt_state) 
+    return value, opt_state 
+ 
+  for i in range(num_steps): 
+    value, opt_state = step(i, opt_state) 
+ 
+ 
+.. _JAXopt: https://github.com/google/jaxopt 
+.. _Optax: https://github.com/deepmind/optax 
+&quot;&quot;&quot;</span>
+
+<span class="s3">from </span><span class="s1">typing </span><span class="s3">import </span><span class="s1">Any</span><span class="s3">, </span><span class="s1">Callable</span><span class="s3">, </span><span class="s1">NamedTuple</span><span class="s3">, </span><span class="s1">Tuple</span><span class="s3">, </span><span class="s1">Union</span>
+
+<span class="s3">from </span><span class="s1">collections </span><span class="s3">import </span><span class="s1">namedtuple</span>
+<span class="s3">import </span><span class="s1">functools</span>
+<span class="s3">from </span><span class="s1">functools </span><span class="s3">import </span><span class="s1">partial</span>
+
+<span class="s3">import </span><span class="s1">jax.numpy </span><span class="s3">as </span><span class="s1">jnp</span>
+<span class="s3">from </span><span class="s1">jax._src.util </span><span class="s3">import </span><span class="s1">safe_zip</span><span class="s3">, </span><span class="s1">safe_map</span><span class="s3">, </span><span class="s1">unzip2</span>
+<span class="s3">from </span><span class="s1">jax </span><span class="s3">import </span><span class="s1">tree_util</span>
+<span class="s3">from </span><span class="s1">jax.tree_util </span><span class="s3">import </span><span class="s1">(tree_map</span><span class="s3">, </span><span class="s1">tree_flatten</span><span class="s3">, </span><span class="s1">tree_unflatten</span><span class="s3">,</span>
+                           <span class="s1">register_pytree_node)</span>
+
+<span class="s1">map = safe_map</span>
+<span class="s1">zip = safe_zip</span>
+
+
+<span class="s0"># The implementation here basically works by flattening pytrees. There are two</span>
+<span class="s0"># levels of pytrees to think about: the pytree of params, which we can think of</span>
+<span class="s0"># as defining an &quot;outer pytree&quot;, and a pytree produced by applying init_fun to</span>
+<span class="s0"># each leaf of the params pytree, which we can think of as the &quot;inner pytrees&quot;.</span>
+<span class="s0"># Since pytrees can be flattened, that structure is isomorphic to a list of</span>
+<span class="s0"># lists (with no further nesting).</span>
+
+<span class="s1">OptimizerState = namedtuple(</span><span class="s4">&quot;OptimizerState&quot;</span><span class="s3">,</span>
+                            <span class="s1">[</span><span class="s4">&quot;packed_state&quot;</span><span class="s3">, </span><span class="s4">&quot;tree_def&quot;</span><span class="s3">, </span><span class="s4">&quot;subtree_defs&quot;</span><span class="s1">])</span>
+<span class="s1">register_pytree_node(</span>
+    <span class="s1">OptimizerState</span><span class="s3">,</span>
+    <span class="s3">lambda </span><span class="s1">xs: ((xs.packed_state</span><span class="s3">,</span><span class="s1">)</span><span class="s3">, </span><span class="s1">(xs.tree_def</span><span class="s3">, </span><span class="s1">xs.subtree_defs))</span><span class="s3">,</span>
+    <span class="s3">lambda </span><span class="s1">data</span><span class="s3">, </span><span class="s1">xs: OptimizerState(xs[</span><span class="s5">0</span><span class="s1">]</span><span class="s3">, </span><span class="s1">data[</span><span class="s5">0</span><span class="s1">]</span><span class="s3">, </span><span class="s1">data[</span><span class="s5">1</span><span class="s1">]))  </span><span class="s0"># type: ignore[index]</span>
+
+
+<span class="s1">Array = Any</span>
+<span class="s1">Params = Any  </span><span class="s0"># Parameters are arbitrary nests of `jnp.ndarrays`.</span>
+<span class="s1">State = Any   </span><span class="s0"># internal State</span>
+<span class="s1">Updates = Params  </span><span class="s0"># Gradient updates are of the same type as parameters.</span>
+
+<span class="s1">InitFn = Callable[[Params]</span><span class="s3">, </span><span class="s1">OptimizerState]</span>
+<span class="s1">Step = int</span>
+<span class="s1">UpdateFn = Callable[[Step</span><span class="s3">, </span><span class="s1">Updates</span><span class="s3">, </span><span class="s1">OptimizerState]</span><span class="s3">, </span><span class="s1">OptimizerState]</span>
+<span class="s1">ParamsFn = Callable[[OptimizerState]</span><span class="s3">, </span><span class="s1">Params]</span>
+
+<span class="s3">class </span><span class="s1">Optimizer(NamedTuple):</span>
+  <span class="s1">init_fn: InitFn</span>
+  <span class="s1">update_fn: UpdateFn</span>
+  <span class="s1">params_fn: ParamsFn</span>
+
+<span class="s1">Schedule = Callable[[Step]</span><span class="s3">, </span><span class="s1">float]</span>
+
+<span class="s3">def </span><span class="s1">optimizer(opt_maker: Callable[...</span><span class="s3">,</span>
+  <span class="s1">Tuple[Callable[[Params]</span><span class="s3">, </span><span class="s1">State]</span><span class="s3">,</span>
+        <span class="s1">Callable[[Step</span><span class="s3">, </span><span class="s1">Updates</span><span class="s3">, </span><span class="s1">Params]</span><span class="s3">, </span><span class="s1">Params]</span><span class="s3">,</span>
+        <span class="s1">Callable[[State]</span><span class="s3">, </span><span class="s1">Params]]]) -&gt; Callable[...</span><span class="s3">, </span><span class="s1">Optimizer]:</span>
+  <span class="s2">&quot;&quot;&quot;Decorator to make an optimizer defined for arrays generalize to containers. 
+ 
+  With this decorator, you can write init, update, and get_params functions that 
+  each operate only on single arrays, and convert them to corresponding 
+  functions that operate on pytrees of parameters. See the optimizers defined in 
+  optimizers.py for examples. 
+ 
+  Args: 
+    opt_maker: a function that returns an ``(init_fun, update_fun, get_params)`` 
+      triple of functions that might only work with ndarrays, as per 
+ 
+      .. code-block:: haskell 
+ 
+          init_fun :: ndarray -&gt; OptStatePytree ndarray 
+          update_fun :: OptStatePytree ndarray -&gt; OptStatePytree ndarray 
+          get_params :: OptStatePytree ndarray -&gt; ndarray 
+ 
+  Returns: 
+    An ``(init_fun, update_fun, get_params)`` triple of functions that work on 
+    arbitrary pytrees, as per 
+ 
+    .. code-block:: haskell 
+ 
+          init_fun :: ParameterPytree ndarray -&gt; OptimizerState 
+          update_fun :: OptimizerState -&gt; OptimizerState 
+          get_params :: OptimizerState -&gt; ParameterPytree ndarray 
+ 
+    The OptimizerState pytree type used by the returned functions is isomorphic 
+    to ``ParameterPytree (OptStatePytree ndarray)``, but may store the state 
+    instead as e.g. a partially-flattened data structure for performance. 
+  &quot;&quot;&quot;</span>
+
+  <span class="s1">@functools.wraps(opt_maker)</span>
+  <span class="s3">def </span><span class="s1">tree_opt_maker(*args</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+    <span class="s1">init</span><span class="s3">, </span><span class="s1">update</span><span class="s3">, </span><span class="s1">get_params = opt_maker(*args</span><span class="s3">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s1">@functools.wraps(init)</span>
+    <span class="s3">def </span><span class="s1">tree_init(x0_tree):</span>
+      <span class="s1">x0_flat</span><span class="s3">, </span><span class="s1">tree = tree_flatten(x0_tree)</span>
+      <span class="s1">initial_states = [init(x0) </span><span class="s3">for </span><span class="s1">x0 </span><span class="s3">in </span><span class="s1">x0_flat]</span>
+      <span class="s1">states_flat</span><span class="s3">, </span><span class="s1">subtrees = unzip2(map(tree_flatten</span><span class="s3">, </span><span class="s1">initial_states))</span>
+      <span class="s3">return </span><span class="s1">OptimizerState(states_flat</span><span class="s3">, </span><span class="s1">tree</span><span class="s3">, </span><span class="s1">subtrees)</span>
+
+    <span class="s1">@functools.wraps(update)</span>
+    <span class="s3">def </span><span class="s1">tree_update(i</span><span class="s3">, </span><span class="s1">grad_tree</span><span class="s3">, </span><span class="s1">opt_state):</span>
+      <span class="s1">states_flat</span><span class="s3">, </span><span class="s1">tree</span><span class="s3">, </span><span class="s1">subtrees = opt_state</span>
+      <span class="s1">grad_flat</span><span class="s3">, </span><span class="s1">tree2 = tree_flatten(grad_tree)</span>
+      <span class="s3">if </span><span class="s1">tree2 != tree:</span>
+        <span class="s1">msg = (</span><span class="s4">&quot;optimizer update function was passed a gradient tree that did &quot;</span>
+               <span class="s4">&quot;not match the parameter tree structure with which it was &quot;</span>
+               <span class="s4">&quot;initialized: parameter tree {} and grad tree {}.&quot;</span><span class="s1">)</span>
+        <span class="s3">raise </span><span class="s1">TypeError(msg.format(tree</span><span class="s3">, </span><span class="s1">tree2))</span>
+      <span class="s1">states = map(tree_unflatten</span><span class="s3">, </span><span class="s1">subtrees</span><span class="s3">, </span><span class="s1">states_flat)</span>
+      <span class="s1">new_states = map(partial(update</span><span class="s3">, </span><span class="s1">i)</span><span class="s3">, </span><span class="s1">grad_flat</span><span class="s3">, </span><span class="s1">states)</span>
+      <span class="s1">new_states_flat</span><span class="s3">, </span><span class="s1">subtrees2 = unzip2(map(tree_flatten</span><span class="s3">, </span><span class="s1">new_states))</span>
+      <span class="s3">for </span><span class="s1">subtree</span><span class="s3">, </span><span class="s1">subtree2 </span><span class="s3">in </span><span class="s1">zip(subtrees</span><span class="s3">, </span><span class="s1">subtrees2):</span>
+        <span class="s3">if </span><span class="s1">subtree2 != subtree:</span>
+          <span class="s1">msg = (</span><span class="s4">&quot;optimizer update function produced an output structure that &quot;</span>
+                 <span class="s4">&quot;did not match its input structure: input {} and output {}.&quot;</span><span class="s1">)</span>
+          <span class="s3">raise </span><span class="s1">TypeError(msg.format(subtree</span><span class="s3">, </span><span class="s1">subtree2))</span>
+      <span class="s3">return </span><span class="s1">OptimizerState(new_states_flat</span><span class="s3">, </span><span class="s1">tree</span><span class="s3">, </span><span class="s1">subtrees)</span>
+
+    <span class="s1">@functools.wraps(get_params)</span>
+    <span class="s3">def </span><span class="s1">tree_get_params(opt_state):</span>
+      <span class="s1">states_flat</span><span class="s3">, </span><span class="s1">tree</span><span class="s3">, </span><span class="s1">subtrees = opt_state</span>
+      <span class="s1">states = map(tree_unflatten</span><span class="s3">, </span><span class="s1">subtrees</span><span class="s3">, </span><span class="s1">states_flat)</span>
+      <span class="s1">params = map(get_params</span><span class="s3">, </span><span class="s1">states)</span>
+      <span class="s3">return </span><span class="s1">tree_unflatten(tree</span><span class="s3">, </span><span class="s1">params)</span>
+
+    <span class="s3">return </span><span class="s1">Optimizer(tree_init</span><span class="s3">, </span><span class="s1">tree_update</span><span class="s3">, </span><span class="s1">tree_get_params)</span>
+  <span class="s3">return </span><span class="s1">tree_opt_maker</span>
+
+
+<span class="s0">### optimizers</span>
+
+<span class="s1">@optimizer</span>
+<span class="s3">def </span><span class="s1">sgd(step_size):</span>
+  <span class="s2">&quot;&quot;&quot;Construct optimizer triple for stochastic gradient descent. 
+ 
+  Args: 
+    step_size: positive scalar, or a callable representing a step size schedule 
+      that maps the iteration index to a positive scalar. 
+ 
+  Returns: 
+    An (init_fun, update_fun, get_params) triple. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">step_size = make_schedule(step_size)</span>
+  <span class="s3">def </span><span class="s1">init(x0):</span>
+    <span class="s3">return </span><span class="s1">x0</span>
+  <span class="s3">def </span><span class="s1">update(i</span><span class="s3">, </span><span class="s1">g</span><span class="s3">, </span><span class="s1">x):</span>
+    <span class="s3">return </span><span class="s1">x - step_size(i) * g</span>
+  <span class="s3">def </span><span class="s1">get_params(x):</span>
+    <span class="s3">return </span><span class="s1">x</span>
+  <span class="s3">return </span><span class="s1">Optimizer(init</span><span class="s3">, </span><span class="s1">update</span><span class="s3">, </span><span class="s1">get_params)</span>
+
+<span class="s1">@optimizer</span>
+<span class="s3">def </span><span class="s1">momentum(step_size: Schedule</span><span class="s3">, </span><span class="s1">mass: float):</span>
+  <span class="s2">&quot;&quot;&quot;Construct optimizer triple for SGD with momentum. 
+ 
+  Args: 
+    step_size: positive scalar, or a callable representing a step size schedule 
+      that maps the iteration index to a positive scalar. 
+    mass: positive scalar representing the momentum coefficient. 
+ 
+  Returns: 
+    An (init_fun, update_fun, get_params) triple. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">step_size = make_schedule(step_size)</span>
+  <span class="s3">def </span><span class="s1">init(x0):</span>
+    <span class="s1">v0 = jnp.zeros_like(x0)</span>
+    <span class="s3">return </span><span class="s1">x0</span><span class="s3">, </span><span class="s1">v0</span>
+  <span class="s3">def </span><span class="s1">update(i</span><span class="s3">, </span><span class="s1">g</span><span class="s3">, </span><span class="s1">state):</span>
+    <span class="s1">x</span><span class="s3">, </span><span class="s1">velocity = state</span>
+    <span class="s1">velocity = mass * velocity + g</span>
+    <span class="s1">x = x - step_size(i) * velocity</span>
+    <span class="s3">return </span><span class="s1">x</span><span class="s3">, </span><span class="s1">velocity</span>
+  <span class="s3">def </span><span class="s1">get_params(state):</span>
+    <span class="s1">x</span><span class="s3">, </span><span class="s1">_ = state</span>
+    <span class="s3">return </span><span class="s1">x</span>
+  <span class="s3">return </span><span class="s1">init</span><span class="s3">, </span><span class="s1">update</span><span class="s3">, </span><span class="s1">get_params</span>
+
+
+<span class="s1">@optimizer</span>
+<span class="s3">def </span><span class="s1">nesterov(step_size: Schedule</span><span class="s3">, </span><span class="s1">mass: float):</span>
+  <span class="s2">&quot;&quot;&quot;Construct optimizer triple for SGD with Nesterov momentum. 
+ 
+  Args: 
+    step_size: positive scalar, or a callable representing a step size schedule 
+      that maps the iteration index to a positive scalar. 
+    mass: positive scalar representing the momentum coefficient. 
+ 
+  Returns: 
+    An (init_fun, update_fun, get_params) triple. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">step_size = make_schedule(step_size)</span>
+  <span class="s3">def </span><span class="s1">init(x0):</span>
+    <span class="s1">v0 = jnp.zeros_like(x0)</span>
+    <span class="s3">return </span><span class="s1">x0</span><span class="s3">, </span><span class="s1">v0</span>
+  <span class="s3">def </span><span class="s1">update(i</span><span class="s3">, </span><span class="s1">g</span><span class="s3">, </span><span class="s1">state):</span>
+    <span class="s1">x</span><span class="s3">, </span><span class="s1">velocity = state</span>
+    <span class="s1">velocity = mass * velocity + g</span>
+    <span class="s1">x = x - step_size(i) * (mass * velocity + g)</span>
+    <span class="s3">return </span><span class="s1">x</span><span class="s3">, </span><span class="s1">velocity</span>
+  <span class="s3">def </span><span class="s1">get_params(state):</span>
+    <span class="s1">x</span><span class="s3">, </span><span class="s1">_ = state</span>
+    <span class="s3">return </span><span class="s1">x</span>
+  <span class="s3">return </span><span class="s1">init</span><span class="s3">, </span><span class="s1">update</span><span class="s3">, </span><span class="s1">get_params</span>
+
+
+<span class="s1">@optimizer</span>
+<span class="s3">def </span><span class="s1">adagrad(step_size</span><span class="s3">, </span><span class="s1">momentum=</span><span class="s5">0.9</span><span class="s1">):</span>
+  <span class="s2">&quot;&quot;&quot;Construct optimizer triple for Adagrad. 
+ 
+  Adaptive Subgradient Methods for Online Learning and Stochastic Optimization: 
+  http://www.jmlr.org/papers/volume12/duchi11a/duchi11a.pdf 
+ 
+  Args: 
+    step_size: positive scalar, or a callable representing a step size schedule 
+      that maps the iteration index to a positive scalar. 
+    momentum: optional, a positive scalar value for momentum 
+ 
+  Returns: 
+    An (init_fun, update_fun, get_params) triple. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">step_size = make_schedule(step_size)</span>
+
+  <span class="s3">def </span><span class="s1">init(x0):</span>
+    <span class="s1">g_sq = jnp.zeros_like(x0)</span>
+    <span class="s1">m = jnp.zeros_like(x0)</span>
+    <span class="s3">return </span><span class="s1">x0</span><span class="s3">, </span><span class="s1">g_sq</span><span class="s3">, </span><span class="s1">m</span>
+
+  <span class="s3">def </span><span class="s1">update(i</span><span class="s3">, </span><span class="s1">g</span><span class="s3">, </span><span class="s1">state):</span>
+    <span class="s1">x</span><span class="s3">, </span><span class="s1">g_sq</span><span class="s3">, </span><span class="s1">m = state</span>
+    <span class="s1">g_sq += jnp.square(g)</span>
+    <span class="s1">g_sq_inv_sqrt = jnp.where(g_sq &gt; </span><span class="s5">0</span><span class="s3">, </span><span class="s5">1. </span><span class="s1">/ jnp.sqrt(g_sq)</span><span class="s3">, </span><span class="s5">0.0</span><span class="s1">)</span>
+    <span class="s1">m = (</span><span class="s5">1. </span><span class="s1">- momentum) * (g * g_sq_inv_sqrt) + momentum * m</span>
+    <span class="s1">x = x - step_size(i) * m</span>
+    <span class="s3">return </span><span class="s1">x</span><span class="s3">, </span><span class="s1">g_sq</span><span class="s3">, </span><span class="s1">m</span>
+
+  <span class="s3">def </span><span class="s1">get_params(state):</span>
+    <span class="s1">x</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">_ = state</span>
+    <span class="s3">return </span><span class="s1">x</span>
+
+  <span class="s3">return </span><span class="s1">init</span><span class="s3">, </span><span class="s1">update</span><span class="s3">, </span><span class="s1">get_params</span>
+
+
+<span class="s1">@optimizer</span>
+<span class="s3">def </span><span class="s1">rmsprop(step_size</span><span class="s3">, </span><span class="s1">gamma=</span><span class="s5">0.9</span><span class="s3">, </span><span class="s1">eps=</span><span class="s5">1e-8</span><span class="s1">):</span>
+  <span class="s2">&quot;&quot;&quot;Construct optimizer triple for RMSProp. 
+ 
+  Args: 
+    step_size: positive scalar, or a callable representing a step size schedule 
+      that maps the iteration index to a positive scalar. 
+      gamma: Decay parameter. 
+      eps: Epsilon parameter. 
+ 
+  Returns: 
+    An (init_fun, update_fun, get_params) triple. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">step_size = make_schedule(step_size)</span>
+  <span class="s3">def </span><span class="s1">init(x0):</span>
+    <span class="s1">avg_sq_grad = jnp.zeros_like(x0)</span>
+    <span class="s3">return </span><span class="s1">x0</span><span class="s3">, </span><span class="s1">avg_sq_grad</span>
+  <span class="s3">def </span><span class="s1">update(i</span><span class="s3">, </span><span class="s1">g</span><span class="s3">, </span><span class="s1">state):</span>
+    <span class="s1">x</span><span class="s3">, </span><span class="s1">avg_sq_grad = state</span>
+    <span class="s1">avg_sq_grad = avg_sq_grad * gamma + jnp.square(g) * (</span><span class="s5">1. </span><span class="s1">- gamma)</span>
+    <span class="s1">x = x - step_size(i) * g / jnp.sqrt(avg_sq_grad + eps)</span>
+    <span class="s3">return </span><span class="s1">x</span><span class="s3">, </span><span class="s1">avg_sq_grad</span>
+  <span class="s3">def </span><span class="s1">get_params(state):</span>
+    <span class="s1">x</span><span class="s3">, </span><span class="s1">_ = state</span>
+    <span class="s3">return </span><span class="s1">x</span>
+  <span class="s3">return </span><span class="s1">init</span><span class="s3">, </span><span class="s1">update</span><span class="s3">, </span><span class="s1">get_params</span>
+
+
+<span class="s1">@optimizer</span>
+<span class="s3">def </span><span class="s1">rmsprop_momentum(step_size</span><span class="s3">, </span><span class="s1">gamma=</span><span class="s5">0.9</span><span class="s3">, </span><span class="s1">eps=</span><span class="s5">1e-8</span><span class="s3">, </span><span class="s1">momentum=</span><span class="s5">0.9</span><span class="s1">):</span>
+  <span class="s2">&quot;&quot;&quot;Construct optimizer triple for RMSProp with momentum. 
+ 
+  This optimizer is separate from the rmsprop optimizer because it needs to 
+  keep track of additional parameters. 
+ 
+  Args: 
+    step_size: positive scalar, or a callable representing a step size schedule 
+      that maps the iteration index to a positive scalar. 
+    gamma: Decay parameter. 
+    eps: Epsilon parameter. 
+    momentum: Momentum parameter. 
+ 
+  Returns: 
+    An (init_fun, update_fun, get_params) triple. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">step_size = make_schedule(step_size)</span>
+  <span class="s3">def </span><span class="s1">init(x0):</span>
+    <span class="s1">avg_sq_grad = jnp.zeros_like(x0)</span>
+    <span class="s1">mom = jnp.zeros_like(x0)</span>
+    <span class="s3">return </span><span class="s1">x0</span><span class="s3">, </span><span class="s1">avg_sq_grad</span><span class="s3">, </span><span class="s1">mom</span>
+  <span class="s3">def </span><span class="s1">update(i</span><span class="s3">, </span><span class="s1">g</span><span class="s3">, </span><span class="s1">state):</span>
+    <span class="s1">x</span><span class="s3">, </span><span class="s1">avg_sq_grad</span><span class="s3">, </span><span class="s1">mom = state</span>
+    <span class="s1">avg_sq_grad = avg_sq_grad * gamma + jnp.square(g) * (</span><span class="s5">1. </span><span class="s1">- gamma)</span>
+    <span class="s1">mom = momentum * mom + step_size(i) * g / jnp.sqrt(avg_sq_grad + eps)</span>
+    <span class="s1">x = x - mom</span>
+    <span class="s3">return </span><span class="s1">x</span><span class="s3">, </span><span class="s1">avg_sq_grad</span><span class="s3">, </span><span class="s1">mom</span>
+  <span class="s3">def </span><span class="s1">get_params(state):</span>
+    <span class="s1">x</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">_ = state</span>
+    <span class="s3">return </span><span class="s1">x</span>
+  <span class="s3">return </span><span class="s1">init</span><span class="s3">, </span><span class="s1">update</span><span class="s3">, </span><span class="s1">get_params</span>
+
+
+<span class="s1">@optimizer</span>
+<span class="s3">def </span><span class="s1">adam(step_size</span><span class="s3">, </span><span class="s1">b1=</span><span class="s5">0.9</span><span class="s3">, </span><span class="s1">b2=</span><span class="s5">0.999</span><span class="s3">, </span><span class="s1">eps=</span><span class="s5">1e-8</span><span class="s1">):</span>
+  <span class="s2">&quot;&quot;&quot;Construct optimizer triple for Adam. 
+ 
+  Args: 
+    step_size: positive scalar, or a callable representing a step size schedule 
+      that maps the iteration index to a positive scalar. 
+    b1: optional, a positive scalar value for beta_1, the exponential decay rate 
+      for the first moment estimates (default 0.9). 
+    b2: optional, a positive scalar value for beta_2, the exponential decay rate 
+      for the second moment estimates (default 0.999). 
+    eps: optional, a positive scalar value for epsilon, a small constant for 
+      numerical stability (default 1e-8). 
+ 
+  Returns: 
+    An (init_fun, update_fun, get_params) triple. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">step_size = make_schedule(step_size)</span>
+  <span class="s3">def </span><span class="s1">init(x0):</span>
+    <span class="s1">m0 = jnp.zeros_like(x0)</span>
+    <span class="s1">v0 = jnp.zeros_like(x0)</span>
+    <span class="s3">return </span><span class="s1">x0</span><span class="s3">, </span><span class="s1">m0</span><span class="s3">, </span><span class="s1">v0</span>
+  <span class="s3">def </span><span class="s1">update(i</span><span class="s3">, </span><span class="s1">g</span><span class="s3">, </span><span class="s1">state):</span>
+    <span class="s1">x</span><span class="s3">, </span><span class="s1">m</span><span class="s3">, </span><span class="s1">v = state</span>
+    <span class="s1">m = (</span><span class="s5">1 </span><span class="s1">- b1) * g + b1 * m  </span><span class="s0"># First  moment estimate.</span>
+    <span class="s1">v = (</span><span class="s5">1 </span><span class="s1">- b2) * jnp.square(g) + b2 * v  </span><span class="s0"># Second moment estimate.</span>
+    <span class="s1">mhat = m / (</span><span class="s5">1 </span><span class="s1">- jnp.asarray(b1</span><span class="s3">, </span><span class="s1">m.dtype) ** (i + </span><span class="s5">1</span><span class="s1">))  </span><span class="s0"># Bias correction.</span>
+    <span class="s1">vhat = v / (</span><span class="s5">1 </span><span class="s1">- jnp.asarray(b2</span><span class="s3">, </span><span class="s1">m.dtype) ** (i + </span><span class="s5">1</span><span class="s1">))</span>
+    <span class="s1">x = x - step_size(i) * mhat / (jnp.sqrt(vhat) + eps)</span>
+    <span class="s3">return </span><span class="s1">x</span><span class="s3">, </span><span class="s1">m</span><span class="s3">, </span><span class="s1">v</span>
+  <span class="s3">def </span><span class="s1">get_params(state):</span>
+    <span class="s1">x</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">_ = state</span>
+    <span class="s3">return </span><span class="s1">x</span>
+  <span class="s3">return </span><span class="s1">init</span><span class="s3">, </span><span class="s1">update</span><span class="s3">, </span><span class="s1">get_params</span>
+
+
+<span class="s1">@optimizer</span>
+<span class="s3">def </span><span class="s1">adamax(step_size</span><span class="s3">, </span><span class="s1">b1=</span><span class="s5">0.9</span><span class="s3">, </span><span class="s1">b2=</span><span class="s5">0.999</span><span class="s3">, </span><span class="s1">eps=</span><span class="s5">1e-8</span><span class="s1">):</span>
+  <span class="s2">&quot;&quot;&quot;Construct optimizer triple for AdaMax (a variant of Adam based on infinity norm). 
+ 
+  Args: 
+    step_size: positive scalar, or a callable representing a step size schedule 
+      that maps the iteration index to a positive scalar. 
+    b1: optional, a positive scalar value for beta_1, the exponential decay rate 
+      for the first moment estimates (default 0.9). 
+    b2: optional, a positive scalar value for beta_2, the exponential decay rate 
+      for the second moment estimates (default 0.999). 
+    eps: optional, a positive scalar value for epsilon, a small constant for 
+      numerical stability (default 1e-8). 
+ 
+  Returns: 
+    An (init_fun, update_fun, get_params) triple. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">step_size = make_schedule(step_size)</span>
+  <span class="s3">def </span><span class="s1">init(x0):</span>
+    <span class="s1">m0 = jnp.zeros_like(x0)</span>
+    <span class="s1">u0 = jnp.zeros_like(x0)</span>
+    <span class="s3">return </span><span class="s1">x0</span><span class="s3">, </span><span class="s1">m0</span><span class="s3">, </span><span class="s1">u0</span>
+  <span class="s3">def </span><span class="s1">update(i</span><span class="s3">, </span><span class="s1">g</span><span class="s3">, </span><span class="s1">state):</span>
+    <span class="s1">x</span><span class="s3">, </span><span class="s1">m</span><span class="s3">, </span><span class="s1">u = state</span>
+    <span class="s1">m = (</span><span class="s5">1 </span><span class="s1">- b1) * g + b1 * m  </span><span class="s0"># First  moment estimate.</span>
+    <span class="s1">u = jnp.maximum(b2 * u</span><span class="s3">, </span><span class="s1">jnp.abs(g))  </span><span class="s0"># Update exponentially weighted infinity norm.</span>
+    <span class="s1">x = (x - (step_size(i) / (</span><span class="s5">1 </span><span class="s1">- jnp.asarray(b1</span><span class="s3">, </span><span class="s1">m.dtype) ** (i + </span><span class="s5">1</span><span class="s1">))) * m</span>
+         <span class="s1">/ (u + eps))</span>
+    <span class="s3">return </span><span class="s1">x</span><span class="s3">, </span><span class="s1">m</span><span class="s3">, </span><span class="s1">u</span>
+  <span class="s3">def </span><span class="s1">get_params(state):</span>
+    <span class="s1">x</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">_ = state</span>
+    <span class="s3">return </span><span class="s1">x</span>
+  <span class="s3">return </span><span class="s1">init</span><span class="s3">, </span><span class="s1">update</span><span class="s3">, </span><span class="s1">get_params</span>
+
+
+<span class="s1">@optimizer</span>
+<span class="s3">def </span><span class="s1">sm3(step_size</span><span class="s3">, </span><span class="s1">momentum=</span><span class="s5">0.9</span><span class="s1">):</span>
+  <span class="s2">&quot;&quot;&quot;Construct optimizer triple for SM3. 
+ 
+  Memory-Efficient Adaptive Optimization for Large-Scale Learning. 
+  https://arxiv.org/abs/1901.11150 
+ 
+  Args: 
+    step_size: positive scalar, or a callable representing a step size schedule 
+      that maps the iteration index to a positive scalar. 
+    momentum: optional, a positive scalar value for momentum 
+ 
+  Returns: 
+    An (init_fun, update_fun, get_params) triple. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">step_size = make_schedule(step_size)</span>
+
+  <span class="s3">def </span><span class="s1">splice(seq</span><span class="s3">, </span><span class="s1">i</span><span class="s3">, </span><span class="s1">x):</span>
+    <span class="s1">lst = list(seq)</span>
+    <span class="s1">lst[i:i+</span><span class="s5">1</span><span class="s1">] = x</span>
+    <span class="s3">return </span><span class="s1">lst</span>
+
+  <span class="s3">def </span><span class="s1">broadcast_into(ndim</span><span class="s3">, </span><span class="s1">x</span><span class="s3">, </span><span class="s1">axis):</span>
+    <span class="s1">idx = splice([</span><span class="s3">None</span><span class="s1">] * ndim</span><span class="s3">, </span><span class="s1">axis</span><span class="s3">, </span><span class="s1">[slice(</span><span class="s3">None</span><span class="s1">)])</span>
+    <span class="s3">return </span><span class="s1">x[tuple(idx)]</span>
+
+  <span class="s3">def </span><span class="s1">init(x0):</span>
+    <span class="s1">x_shape = x0.shape</span>
+    <span class="s1">x0 = jnp.atleast_1d(x0)</span>
+    <span class="s1">vs = [jnp.zeros(sz</span><span class="s3">, </span><span class="s1">dtype=x0.dtype) </span><span class="s3">for </span><span class="s1">sz </span><span class="s3">in </span><span class="s1">x0.shape]</span>
+    <span class="s3">return </span><span class="s1">x0</span><span class="s3">, </span><span class="s1">jnp.zeros_like(x0)</span><span class="s3">, </span><span class="s1">vs</span><span class="s3">, </span><span class="s1">x_shape</span>
+
+  <span class="s3">def </span><span class="s1">update(i</span><span class="s3">, </span><span class="s1">g</span><span class="s3">, </span><span class="s1">state):</span>
+    <span class="s1">x</span><span class="s3">, </span><span class="s1">m</span><span class="s3">, </span><span class="s1">vs</span><span class="s3">, </span><span class="s1">x_shape = state</span>
+    <span class="s1">vs = [broadcast_into(g.ndim</span><span class="s3">, </span><span class="s1">v</span><span class="s3">, </span><span class="s1">i) </span><span class="s3">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">v </span><span class="s3">in </span><span class="s1">enumerate(vs)]</span>
+    <span class="s1">accum = functools.reduce(jnp.minimum</span><span class="s3">, </span><span class="s1">vs) + jnp.square(g)</span>
+    <span class="s1">accum_inv_sqrt = jnp.where(accum &gt; </span><span class="s5">0</span><span class="s3">, </span><span class="s5">1. </span><span class="s1">/ jnp.sqrt(accum)</span><span class="s3">, </span><span class="s5">0</span><span class="s1">)</span>
+    <span class="s1">m = (</span><span class="s5">1. </span><span class="s1">- momentum) * (g * accum_inv_sqrt) + momentum * m</span>
+    <span class="s1">x = x - step_size(i) * m</span>
+    <span class="s1">vs = [accum.max(splice(range(x.ndim)</span><span class="s3">, </span><span class="s1">j</span><span class="s3">, </span><span class="s1">[])) </span><span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">range(x.ndim)]</span>
+    <span class="s3">return </span><span class="s1">x</span><span class="s3">, </span><span class="s1">m</span><span class="s3">, </span><span class="s1">vs</span><span class="s3">, </span><span class="s1">x_shape</span>
+
+  <span class="s3">def </span><span class="s1">get_params(state):</span>
+    <span class="s1">x</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">x_shape = state</span>
+    <span class="s3">return </span><span class="s1">x.reshape(x_shape)</span>
+
+  <span class="s3">return </span><span class="s1">init</span><span class="s3">, </span><span class="s1">update</span><span class="s3">, </span><span class="s1">get_params</span>
+
+
+<span class="s0">### learning rate schedules</span>
+
+<span class="s3">def </span><span class="s1">constant(step_size) -&gt; Schedule:</span>
+  <span class="s3">def </span><span class="s1">schedule(i):</span>
+    <span class="s3">return </span><span class="s1">step_size</span>
+  <span class="s3">return </span><span class="s1">schedule</span>
+
+<span class="s3">def </span><span class="s1">exponential_decay(step_size</span><span class="s3">, </span><span class="s1">decay_steps</span><span class="s3">, </span><span class="s1">decay_rate):</span>
+  <span class="s3">def </span><span class="s1">schedule(i):</span>
+    <span class="s3">return </span><span class="s1">step_size * decay_rate ** (i / decay_steps)</span>
+  <span class="s3">return </span><span class="s1">schedule</span>
+
+<span class="s3">def </span><span class="s1">inverse_time_decay(step_size</span><span class="s3">, </span><span class="s1">decay_steps</span><span class="s3">, </span><span class="s1">decay_rate</span><span class="s3">, </span><span class="s1">staircase=</span><span class="s3">False</span><span class="s1">):</span>
+  <span class="s3">if </span><span class="s1">staircase:</span>
+    <span class="s3">def </span><span class="s1">schedule(i):</span>
+      <span class="s3">return </span><span class="s1">step_size / (</span><span class="s5">1 </span><span class="s1">+ decay_rate * jnp.floor(i / decay_steps))</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s3">def </span><span class="s1">schedule(i):</span>
+      <span class="s3">return </span><span class="s1">step_size / (</span><span class="s5">1 </span><span class="s1">+ decay_rate * i / decay_steps)</span>
+  <span class="s3">return </span><span class="s1">schedule</span>
+
+<span class="s3">def </span><span class="s1">polynomial_decay(step_size</span><span class="s3">, </span><span class="s1">decay_steps</span><span class="s3">, </span><span class="s1">final_step_size</span><span class="s3">, </span><span class="s1">power=</span><span class="s5">1.0</span><span class="s1">):</span>
+  <span class="s3">def </span><span class="s1">schedule(step_num):</span>
+    <span class="s1">step_num = jnp.minimum(step_num</span><span class="s3">, </span><span class="s1">decay_steps)</span>
+    <span class="s1">step_mult = (</span><span class="s5">1 </span><span class="s1">- step_num / decay_steps) ** power</span>
+    <span class="s3">return </span><span class="s1">step_mult * (step_size - final_step_size) + final_step_size</span>
+
+  <span class="s3">return </span><span class="s1">schedule</span>
+
+<span class="s3">def </span><span class="s1">piecewise_constant(boundaries: Any</span><span class="s3">, </span><span class="s1">values: Any):</span>
+  <span class="s1">boundaries = jnp.array(boundaries)</span>
+  <span class="s1">values = jnp.array(values)</span>
+  <span class="s3">if not </span><span class="s1">boundaries.ndim == values.ndim == </span><span class="s5">1</span><span class="s1">:</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;boundaries and values must be sequences&quot;</span><span class="s1">)</span>
+  <span class="s3">if not </span><span class="s1">boundaries.shape[</span><span class="s5">0</span><span class="s1">] == values.shape[</span><span class="s5">0</span><span class="s1">] - </span><span class="s5">1</span><span class="s1">:</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;boundaries length must be one shorter than values length&quot;</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">schedule(i):</span>
+    <span class="s3">return </span><span class="s1">values[jnp.sum(i &gt; boundaries)]</span>
+  <span class="s3">return </span><span class="s1">schedule</span>
+
+<span class="s3">def </span><span class="s1">make_schedule(scalar_or_schedule: Union[float</span><span class="s3">, </span><span class="s1">Schedule]) -&gt; Schedule:</span>
+  <span class="s3">if </span><span class="s1">callable(scalar_or_schedule):</span>
+    <span class="s3">return </span><span class="s1">scalar_or_schedule</span>
+  <span class="s3">elif </span><span class="s1">jnp.ndim(scalar_or_schedule) == </span><span class="s5">0</span><span class="s1">:</span>
+    <span class="s3">return </span><span class="s1">constant(scalar_or_schedule)</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s3">raise </span><span class="s1">TypeError(type(scalar_or_schedule))</span>
+
+
+<span class="s0">### utilities</span>
+
+<span class="s3">def </span><span class="s1">l2_norm(tree):</span>
+  <span class="s2">&quot;&quot;&quot;Compute the l2 norm of a pytree of arrays. Useful for weight decay.&quot;&quot;&quot;</span>
+  <span class="s1">leaves</span><span class="s3">, </span><span class="s1">_ = tree_flatten(tree)</span>
+  <span class="s3">return </span><span class="s1">jnp.sqrt(sum(jnp.vdot(x</span><span class="s3">, </span><span class="s1">x) </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">leaves))</span>
+
+<span class="s3">def </span><span class="s1">clip_grads(grad_tree</span><span class="s3">, </span><span class="s1">max_norm):</span>
+  <span class="s2">&quot;&quot;&quot;Clip gradients stored as a pytree of arrays to maximum norm `max_norm`.&quot;&quot;&quot;</span>
+  <span class="s1">norm = l2_norm(grad_tree)</span>
+  <span class="s1">normalize = </span><span class="s3">lambda </span><span class="s1">g: jnp.where(norm &lt; max_norm</span><span class="s3">, </span><span class="s1">g</span><span class="s3">, </span><span class="s1">g * (max_norm / norm))</span>
+  <span class="s3">return </span><span class="s1">tree_map(normalize</span><span class="s3">, </span><span class="s1">grad_tree)</span>
+
+
+<span class="s0">### serialization utilities</span>
+
+<span class="s3">class </span><span class="s1">JoinPoint:</span>
+  <span class="s2">&quot;&quot;&quot;Marks the boundary between two joined (nested) pytrees.&quot;&quot;&quot;</span>
+  <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">subtree):</span>
+    <span class="s1">self.subtree = subtree</span>
+
+  <span class="s0"># Since pytrees are containers of numpy arrays, look iterable.</span>
+  <span class="s3">def </span><span class="s1">__iter__(self):</span>
+    <span class="s3">yield </span><span class="s1">self.subtree</span>
+
+<span class="s3">def </span><span class="s1">unpack_optimizer_state(opt_state):</span>
+  <span class="s2">&quot;&quot;&quot;Converts an OptimizerState to a marked pytree. 
+ 
+  Converts an OptimizerState to a marked pytree with the leaves of the outer 
+  pytree represented as JoinPoints to avoid losing information. This function is 
+  intended to be useful when serializing optimizer states. 
+ 
+  Args: 
+    opt_state: An OptimizerState 
+  Returns: 
+    A pytree with JoinPoint leaves that contain a second level of pytrees. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">states_flat</span><span class="s3">, </span><span class="s1">tree_def</span><span class="s3">, </span><span class="s1">subtree_defs = opt_state</span>
+  <span class="s1">subtrees = map(tree_unflatten</span><span class="s3">, </span><span class="s1">subtree_defs</span><span class="s3">, </span><span class="s1">states_flat)</span>
+  <span class="s1">sentinels = [JoinPoint(subtree) </span><span class="s3">for </span><span class="s1">subtree </span><span class="s3">in </span><span class="s1">subtrees]</span>
+  <span class="s3">return </span><span class="s1">tree_util.tree_unflatten(tree_def</span><span class="s3">, </span><span class="s1">sentinels)</span>
+
+<span class="s3">def </span><span class="s1">pack_optimizer_state(marked_pytree):</span>
+  <span class="s2">&quot;&quot;&quot;Converts a marked pytree to an OptimizerState. 
+ 
+  The inverse of unpack_optimizer_state. Converts a marked pytree with the 
+  leaves of the outer pytree represented as JoinPoints back into an 
+  OptimizerState. This function is intended to be useful when deserializing 
+  optimizer states. 
+ 
+  Args: 
+    marked_pytree: A pytree containing JoinPoint leaves that hold more pytrees. 
+  Returns: 
+    An equivalent OptimizerState to the input argument. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">sentinels</span><span class="s3">, </span><span class="s1">tree_def = tree_flatten(marked_pytree)</span>
+  <span class="s3">assert </span><span class="s1">all(isinstance(s</span><span class="s3">, </span><span class="s1">JoinPoint) </span><span class="s3">for </span><span class="s1">s </span><span class="s3">in </span><span class="s1">sentinels)</span>
+  <span class="s1">subtrees = [s.subtree </span><span class="s3">for </span><span class="s1">s </span><span class="s3">in </span><span class="s1">sentinels]</span>
+  <span class="s1">states_flat</span><span class="s3">, </span><span class="s1">subtree_defs = unzip2(map(tree_flatten</span><span class="s3">, </span><span class="s1">subtrees))</span>
+  <span class="s3">return </span><span class="s1">OptimizerState(states_flat</span><span class="s3">, </span><span class="s1">tree_def</span><span class="s3">, </span><span class="s1">subtree_defs)</span>
+</pre>
+</body>
+</html>

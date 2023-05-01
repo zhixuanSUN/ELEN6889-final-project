@@ -1,0 +1,901 @@
+<html>
+<head>
+<title>windowed_reductions.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #629755; font-style: italic;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+windowed_reductions.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2018 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s2">from </span><span class="s1">functools </span><span class="s2">import </span><span class="s1">partial</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">(Any</span><span class="s2">, </span><span class="s1">Callable</span><span class="s2">, </span><span class="s1">Optional</span><span class="s2">, </span><span class="s1">Sequence</span><span class="s2">, </span><span class="s1">Union</span><span class="s2">, </span><span class="s1">Tuple)</span>
+<span class="s2">import </span><span class="s1">warnings</span>
+
+<span class="s2">import </span><span class="s1">numpy </span><span class="s2">as </span><span class="s1">np</span>
+
+<span class="s2">from </span><span class="s1">jax </span><span class="s2">import </span><span class="s1">tree_util</span>
+<span class="s2">from </span><span class="s1">jax.interpreters </span><span class="s2">import </span><span class="s1">xla</span>
+
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">ad_util</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">core</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">dtypes</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">util</span>
+<span class="s2">from </span><span class="s1">jax._src.core </span><span class="s2">import </span><span class="s1">ShapedArray</span><span class="s2">, </span><span class="s1">ConcreteArray</span>
+<span class="s2">from </span><span class="s1">jax._src.interpreters </span><span class="s2">import </span><span class="s1">ad</span>
+<span class="s2">from </span><span class="s1">jax._src.interpreters </span><span class="s2">import </span><span class="s1">batching</span>
+<span class="s2">from </span><span class="s1">jax._src.interpreters </span><span class="s2">import </span><span class="s1">mlir</span>
+<span class="s2">from </span><span class="s1">jax._src.lax </span><span class="s2">import </span><span class="s1">lax</span>
+<span class="s2">from </span><span class="s1">jax._src.lax </span><span class="s2">import </span><span class="s1">convolution</span>
+<span class="s2">from </span><span class="s1">jax._src.lax </span><span class="s2">import </span><span class="s1">slicing</span>
+<span class="s2">from </span><span class="s1">jax._src.lib.mlir </span><span class="s2">import </span><span class="s1">ir</span>
+<span class="s2">from </span><span class="s1">jax._src.lib.mlir.dialects </span><span class="s2">import </span><span class="s1">hlo</span>
+<span class="s2">from </span><span class="s1">jax._src.numpy.ufuncs </span><span class="s2">import </span><span class="s1">logaddexp</span>
+
+<span class="s1">map = util.safe_map</span>
+<span class="s1">zip = util.safe_zip</span>
+
+<span class="s1">Array = Any</span>
+
+
+<span class="s2">def </span><span class="s1">reduce_window(operand</span><span class="s2">, </span><span class="s1">init_value</span><span class="s2">, </span><span class="s1">computation: Callable</span><span class="s2">,</span>
+                  <span class="s1">window_dimensions: core.Shape</span><span class="s2">, </span><span class="s1">window_strides: Sequence[int]</span><span class="s2">,</span>
+                  <span class="s1">padding: Union[str</span><span class="s2">, </span><span class="s1">Sequence[Tuple[int</span><span class="s2">, </span><span class="s1">int]]]</span><span class="s2">,</span>
+                  <span class="s1">base_dilation: Optional[Sequence[int]] = </span><span class="s2">None,</span>
+                  <span class="s1">window_dilation: Optional[Sequence[int]] = </span><span class="s2">None</span><span class="s1">) -&gt; Array:</span>
+  <span class="s3">&quot;&quot;&quot;Wraps XLA's `ReduceWindowWithGeneralPadding 
+  &lt;https://www.tensorflow.org/xla/operation_semantics#reducewindow&gt;`_ 
+  operator. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">flat_operands</span><span class="s2">, </span><span class="s1">operand_tree = tree_util.tree_flatten(operand)</span>
+  <span class="s1">flat_init_values</span><span class="s2">, </span><span class="s1">init_value_tree = tree_util.tree_flatten(init_value)</span>
+  <span class="s2">if </span><span class="s1">operand_tree != init_value_tree:</span>
+    <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">'Operands must have the same tree structure as '</span>
+                     <span class="s4">f'init_values: </span><span class="s2">{</span><span class="s1">operand_tree</span><span class="s2">} </span><span class="s4">vs. </span><span class="s2">{</span><span class="s1">init_value_tree</span><span class="s2">}</span><span class="s4">'</span><span class="s1">)</span>
+  <span class="s2">if </span><span class="s1">len(flat_operands) == </span><span class="s5">0</span><span class="s1">:</span>
+    <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">'reduce_window must have at least one operand.'</span><span class="s1">)</span>
+  <span class="s2">if </span><span class="s1">len(flat_operands) != len(flat_init_values):</span>
+    <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">'Must have same total number of operands as init_values: '</span>
+                     <span class="s4">f' </span><span class="s2">{</span><span class="s1">len(flat_operands)</span><span class="s2">} </span><span class="s4">vs. </span><span class="s2">{</span><span class="s1">len(flat_init_values)</span><span class="s2">}</span><span class="s4">'</span><span class="s1">)</span>
+  <span class="s2">if </span><span class="s1">isinstance(padding</span><span class="s2">, </span><span class="s1">str):</span>
+    <span class="s1">dilated_window_dims = (</span>
+        <span class="s1">window_dimensions </span><span class="s2">if </span><span class="s1">window_dilation </span><span class="s2">is None else</span>
+        <span class="s1">lax._dilate_shape(window_dimensions</span><span class="s2">, </span><span class="s1">window_dilation))</span>
+    <span class="s1">padding = tuple(lax.padtype_to_pads(</span>
+        <span class="s1">flat_operands[</span><span class="s5">0</span><span class="s1">].shape</span><span class="s2">, </span><span class="s1">dilated_window_dims</span><span class="s2">, </span><span class="s1">window_strides</span><span class="s2">, </span><span class="s1">padding))</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s1">padding = tuple(padding)</span>
+  <span class="s2">if </span><span class="s1">base_dilation </span><span class="s2">is None</span><span class="s1">:</span>
+    <span class="s1">base_dilation = (</span><span class="s5">1</span><span class="s2">,</span><span class="s1">) * len(window_dimensions)</span>
+  <span class="s2">if </span><span class="s1">window_dilation </span><span class="s2">is None</span><span class="s1">:</span>
+    <span class="s1">window_dilation = (</span><span class="s5">1</span><span class="s2">,</span><span class="s1">) * len(window_dimensions)</span>
+  <span class="s1">monoid_reducer = _get_monoid_window_reducer(computation</span><span class="s2">, </span><span class="s1">flat_init_values)</span>
+  <span class="s2">if </span><span class="s1">monoid_reducer:</span>
+    <span class="s2">return </span><span class="s1">monoid_reducer(operand</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">, </span><span class="s1">window_strides</span><span class="s2">, </span><span class="s1">padding</span><span class="s2">,</span>
+                          <span class="s1">base_dilation</span><span class="s2">, </span><span class="s1">window_dilation)</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s1">flat_init_avals = map(lax._abstractify</span><span class="s2">, </span><span class="s1">flat_init_values)</span>
+    <span class="s1">jaxpr</span><span class="s2">, </span><span class="s1">consts</span><span class="s2">, </span><span class="s1">out_tree = lax._variadic_reduction_jaxpr(</span>
+        <span class="s1">computation</span><span class="s2">, </span><span class="s1">tuple(flat_init_avals)</span><span class="s2">, </span><span class="s1">init_value_tree)</span>
+    <span class="s2">if </span><span class="s1">operand_tree != out_tree:</span>
+      <span class="s2">raise </span><span class="s1">ValueError(</span>
+        <span class="s4">'reduce_window output must have the same tree structure as the operands'</span>
+        <span class="s4">f' </span><span class="s2">{</span><span class="s1">operand_tree</span><span class="s2">} </span><span class="s4">vs. </span><span class="s2">{</span><span class="s1">out_tree</span><span class="s2">}</span><span class="s4">'</span><span class="s1">)</span>
+    <span class="s1">out_flat = reduce_window_p.bind(</span>
+        <span class="s1">*flat_operands</span><span class="s2">, </span><span class="s1">*flat_init_values</span><span class="s2">, </span><span class="s1">jaxpr=jaxpr</span><span class="s2">, </span><span class="s1">consts=consts</span><span class="s2">,</span>
+        <span class="s1">window_dimensions=tuple(window_dimensions)</span><span class="s2">,</span>
+        <span class="s1">window_strides=tuple(window_strides)</span><span class="s2">, </span><span class="s1">padding=padding</span><span class="s2">,</span>
+        <span class="s1">base_dilation=tuple(base_dilation)</span><span class="s2">,</span>
+        <span class="s1">window_dilation=tuple(window_dilation))</span>
+    <span class="s2">return </span><span class="s1">tree_util.tree_unflatten(out_tree</span><span class="s2">, </span><span class="s1">out_flat)</span>
+
+<span class="s2">def </span><span class="s1">_get_monoid_window_reducer(monoid_op: Callable</span><span class="s2">,</span>
+                               <span class="s1">xs: Sequence[Array]) -&gt; Optional[Callable]:</span>
+  <span class="s2">if </span><span class="s1">len(xs) != </span><span class="s5">1</span><span class="s1">:</span>
+    <span class="s2">return None</span>
+  <span class="s1">x</span><span class="s2">, </span><span class="s1">= xs</span>
+  <span class="s1">aval = core.get_aval(x)</span>
+  <span class="s2">if </span><span class="s1">(type(aval) </span><span class="s2">is </span><span class="s1">ConcreteArray) </span><span class="s2">and </span><span class="s1">aval.shape == ():</span>
+    <span class="s2">if </span><span class="s1">monoid_op </span><span class="s2">is </span><span class="s1">lax.add:</span>
+      <span class="s2">return </span><span class="s1">aval.val == </span><span class="s5">0 </span><span class="s2">and </span><span class="s1">_reduce_window_sum</span>
+    <span class="s2">elif </span><span class="s1">monoid_op </span><span class="s2">is </span><span class="s1">lax.max:</span>
+      <span class="s2">return </span><span class="s1">(aval.val == lax._get_max_identity(aval.dtype)</span>
+              <span class="s2">and </span><span class="s1">_reduce_window_max)</span>
+    <span class="s2">elif </span><span class="s1">monoid_op </span><span class="s2">is </span><span class="s1">lax.min:</span>
+      <span class="s2">return </span><span class="s1">(aval.val == lax._get_min_identity(aval.dtype)</span>
+              <span class="s2">and </span><span class="s1">_reduce_window_min)</span>
+  <span class="s2">return None</span>
+
+<span class="s2">def </span><span class="s1">_reduce_window_sum(operand: Array</span><span class="s2">, </span><span class="s1">window_dimensions: core.Shape</span><span class="s2">,</span>
+                       <span class="s1">window_strides: Sequence[int]</span><span class="s2">,</span>
+                       <span class="s1">padding: Sequence[Tuple[int</span><span class="s2">, </span><span class="s1">int]]</span><span class="s2">,</span>
+                       <span class="s1">base_dilation: Optional[Sequence[int]] = </span><span class="s2">None,</span>
+                       <span class="s1">window_dilation: Optional[Sequence[int]] = </span><span class="s2">None</span><span class="s1">) -&gt; Array:</span>
+  <span class="s2">if </span><span class="s1">base_dilation </span><span class="s2">is None</span><span class="s1">:</span>
+    <span class="s1">base_dilation = (</span><span class="s5">1</span><span class="s2">,</span><span class="s1">) * len(window_dimensions)</span>
+  <span class="s2">if </span><span class="s1">window_dilation </span><span class="s2">is None</span><span class="s1">:</span>
+    <span class="s1">window_dilation = (</span><span class="s5">1</span><span class="s2">,</span><span class="s1">) * len(window_dimensions)</span>
+  <span class="s2">return </span><span class="s1">reduce_window_sum_p.bind(</span>
+      <span class="s1">operand</span><span class="s2">, </span><span class="s1">window_dimensions=tuple(window_dimensions)</span><span class="s2">,</span>
+      <span class="s1">window_strides=tuple(window_strides)</span><span class="s2">, </span><span class="s1">padding=tuple(padding)</span><span class="s2">,</span>
+      <span class="s1">base_dilation=tuple(base_dilation)</span><span class="s2">,</span>
+      <span class="s1">window_dilation=tuple(window_dilation))</span>
+
+<span class="s2">def </span><span class="s1">_reduce_window_prod(operand: Array</span><span class="s2">, </span><span class="s1">window_dimensions: core.Shape</span><span class="s2">,</span>
+                        <span class="s1">window_strides: Sequence[int]</span><span class="s2">,</span>
+                        <span class="s1">padding: Sequence[Tuple[int</span><span class="s2">, </span><span class="s1">int]]</span><span class="s2">,</span>
+                        <span class="s1">base_dilation: Optional[Sequence[int]] = </span><span class="s2">None,</span>
+                        <span class="s1">window_dilation: Optional[Sequence[int]] = </span><span class="s2">None</span><span class="s1">) -&gt; Array:</span>
+  <span class="s1">init_value = lax._const(operand</span><span class="s2">, </span><span class="s5">1</span><span class="s1">)</span>
+  <span class="s1">jaxpr</span><span class="s2">, </span><span class="s1">consts = lax._reduction_jaxpr(lax.mul</span><span class="s2">, </span><span class="s1">lax._abstractify(init_value))</span>
+  <span class="s2">if </span><span class="s1">base_dilation </span><span class="s2">is None</span><span class="s1">:</span>
+    <span class="s1">base_dilation = (</span><span class="s5">1</span><span class="s2">,</span><span class="s1">) * len(window_dimensions)</span>
+  <span class="s2">if </span><span class="s1">window_dilation </span><span class="s2">is None</span><span class="s1">:</span>
+    <span class="s1">window_dilation = (</span><span class="s5">1</span><span class="s2">,</span><span class="s1">) * len(window_dimensions)</span>
+  <span class="s1">out</span><span class="s2">, </span><span class="s1">= reduce_window_p.bind(</span>
+      <span class="s1">operand</span><span class="s2">, </span><span class="s1">init_value</span><span class="s2">, </span><span class="s1">jaxpr=jaxpr</span><span class="s2">, </span><span class="s1">consts=consts</span><span class="s2">,</span>
+      <span class="s1">window_dimensions=tuple(window_dimensions)</span><span class="s2">,</span>
+      <span class="s1">window_strides=tuple(window_strides)</span><span class="s2">, </span><span class="s1">padding=tuple(padding)</span><span class="s2">,</span>
+      <span class="s1">base_dilation=tuple(base_dilation)</span><span class="s2">,</span>
+      <span class="s1">window_dilation=tuple(window_dilation))</span>
+  <span class="s2">return </span><span class="s1">out</span>
+
+<span class="s2">def </span><span class="s1">_reduce_window_max(operand: Array</span><span class="s2">, </span><span class="s1">window_dimensions: core.Shape</span><span class="s2">,</span>
+                       <span class="s1">window_strides: Sequence[int]</span><span class="s2">,</span>
+                       <span class="s1">padding: Sequence[Tuple[int</span><span class="s2">, </span><span class="s1">int]]</span><span class="s2">,</span>
+                       <span class="s1">base_dilation: Optional[Sequence[int]] = </span><span class="s2">None,</span>
+                       <span class="s1">window_dilation: Optional[Sequence[int]] = </span><span class="s2">None</span><span class="s1">) -&gt; Array:</span>
+  <span class="s2">if </span><span class="s1">base_dilation </span><span class="s2">is None</span><span class="s1">:</span>
+    <span class="s1">base_dilation = (</span><span class="s5">1</span><span class="s2">,</span><span class="s1">) * len(window_dimensions)</span>
+  <span class="s2">if </span><span class="s1">window_dilation </span><span class="s2">is None</span><span class="s1">:</span>
+    <span class="s1">window_dilation = (</span><span class="s5">1</span><span class="s2">,</span><span class="s1">) * len(window_dimensions)</span>
+  <span class="s2">return </span><span class="s1">reduce_window_max_p.bind(</span>
+      <span class="s1">operand</span><span class="s2">, </span><span class="s1">window_dimensions=tuple(window_dimensions)</span><span class="s2">,</span>
+      <span class="s1">window_strides=tuple(window_strides)</span><span class="s2">, </span><span class="s1">padding=tuple(padding)</span><span class="s2">,</span>
+      <span class="s1">base_dilation=tuple(base_dilation)</span><span class="s2">,</span>
+      <span class="s1">window_dilation=tuple(window_dilation))</span>
+
+<span class="s2">def </span><span class="s1">_reduce_window_min(operand: Array</span><span class="s2">, </span><span class="s1">window_dimensions: core.Shape</span><span class="s2">,</span>
+                       <span class="s1">window_strides: Sequence[int]</span><span class="s2">,</span>
+                       <span class="s1">padding: Sequence[Tuple[int</span><span class="s2">, </span><span class="s1">int]]</span><span class="s2">,</span>
+                       <span class="s1">base_dilation: Optional[Sequence[int]] = </span><span class="s2">None,</span>
+                       <span class="s1">window_dilation: Optional[Sequence[int]] = </span><span class="s2">None</span><span class="s1">) -&gt; Array:</span>
+  <span class="s2">if </span><span class="s1">base_dilation </span><span class="s2">is None</span><span class="s1">:</span>
+    <span class="s1">base_dilation = (</span><span class="s5">1</span><span class="s2">,</span><span class="s1">) * len(window_dimensions)</span>
+  <span class="s2">if </span><span class="s1">window_dilation </span><span class="s2">is None</span><span class="s1">:</span>
+    <span class="s1">window_dilation = (</span><span class="s5">1</span><span class="s2">,</span><span class="s1">) * len(window_dimensions)</span>
+  <span class="s2">return </span><span class="s1">reduce_window_min_p.bind(</span>
+      <span class="s1">operand</span><span class="s2">, </span><span class="s1">window_dimensions=tuple(window_dimensions)</span><span class="s2">,</span>
+      <span class="s1">window_strides=tuple(window_strides)</span><span class="s2">, </span><span class="s1">padding=tuple(padding)</span><span class="s2">,</span>
+      <span class="s1">base_dilation=tuple(base_dilation)</span><span class="s2">,</span>
+      <span class="s1">window_dilation=tuple(window_dilation))</span>
+
+<span class="s2">def </span><span class="s1">_reduce_window_logaddexp(</span>
+    <span class="s1">operand: Array</span><span class="s2">, </span><span class="s1">window_dimensions: core.Shape</span><span class="s2">,</span>
+    <span class="s1">window_strides: Sequence[int]</span><span class="s2">,</span>
+    <span class="s1">padding: Sequence[Tuple[int</span><span class="s2">, </span><span class="s1">int]]</span><span class="s2">,</span>
+    <span class="s1">base_dilation: Optional[Sequence[int]] = </span><span class="s2">None,</span>
+    <span class="s1">window_dilation: Optional[Sequence[int]] = </span><span class="s2">None</span><span class="s1">) -&gt; Array:</span>
+  <span class="s1">init_value = lax._const(operand</span><span class="s2">, </span><span class="s1">-np.inf)</span>
+  <span class="s1">jaxpr</span><span class="s2">, </span><span class="s1">consts = lax._reduction_jaxpr(logaddexp</span><span class="s2">, </span><span class="s1">lax._abstractify(init_value))</span>
+  <span class="s2">if </span><span class="s1">base_dilation </span><span class="s2">is None</span><span class="s1">:</span>
+    <span class="s1">base_dilation = (</span><span class="s5">1</span><span class="s2">,</span><span class="s1">) * len(window_dimensions)</span>
+  <span class="s2">if </span><span class="s1">window_dilation </span><span class="s2">is None</span><span class="s1">:</span>
+    <span class="s1">window_dilation = (</span><span class="s5">1</span><span class="s2">,</span><span class="s1">) * len(window_dimensions)</span>
+  <span class="s1">out</span><span class="s2">, </span><span class="s1">= reduce_window_p.bind(</span>
+      <span class="s1">operand</span><span class="s2">, </span><span class="s1">init_value</span><span class="s2">, </span><span class="s1">jaxpr=jaxpr</span><span class="s2">, </span><span class="s1">consts=consts</span><span class="s2">,</span>
+      <span class="s1">window_dimensions=tuple(window_dimensions)</span><span class="s2">,</span>
+      <span class="s1">window_strides=tuple(window_strides)</span><span class="s2">, </span><span class="s1">padding=tuple(padding)</span><span class="s2">,</span>
+      <span class="s1">base_dilation=tuple(base_dilation)</span><span class="s2">,</span>
+      <span class="s1">window_dilation=tuple(window_dilation))</span>
+  <span class="s2">return </span><span class="s1">out</span>
+
+<span class="s2">def </span><span class="s1">_select_and_scatter(operand: Array</span><span class="s2">, </span><span class="s1">select: Callable</span><span class="s2">,</span>
+                        <span class="s1">window_dimensions: core.Shape</span><span class="s2">,</span>
+                        <span class="s1">window_strides: Sequence[int]</span><span class="s2">,</span>
+                        <span class="s1">padding: Sequence[Tuple[int</span><span class="s2">, </span><span class="s1">int]]</span><span class="s2">, </span><span class="s1">source: Array</span><span class="s2">,</span>
+                        <span class="s1">init_value: Array</span><span class="s2">, </span><span class="s1">scatter: Callable) -&gt; Array:</span>
+  <span class="s1">select_jaxpr</span><span class="s2">, </span><span class="s1">select_consts = lax._reduction_jaxpr(</span>
+    <span class="s1">select</span><span class="s2">, </span><span class="s1">lax._abstractify(init_value))</span>
+  <span class="s1">scatter_jaxpr</span><span class="s2">, </span><span class="s1">scatter_consts = lax._reduction_jaxpr(</span>
+    <span class="s1">scatter</span><span class="s2">, </span><span class="s1">lax._abstractify(init_value))</span>
+  <span class="s2">return </span><span class="s1">select_and_scatter_p.bind(</span>
+      <span class="s1">operand</span><span class="s2">, </span><span class="s1">source</span><span class="s2">, </span><span class="s1">init_value</span><span class="s2">, </span><span class="s1">select_jaxpr=select_jaxpr</span><span class="s2">,</span>
+      <span class="s1">select_consts=select_consts</span><span class="s2">, </span><span class="s1">scatter_jaxpr=scatter_jaxpr</span><span class="s2">,</span>
+      <span class="s1">scatter_consts=scatter_consts</span><span class="s2">, </span><span class="s1">window_dimensions=tuple(window_dimensions)</span><span class="s2">,</span>
+      <span class="s1">window_strides=tuple(window_strides)</span><span class="s2">, </span><span class="s1">padding=tuple(padding))</span>
+
+<span class="s2">def </span><span class="s1">_select_and_scatter_add(source: Array</span><span class="s2">, </span><span class="s1">operand: Array</span><span class="s2">,</span>
+                            <span class="s1">select_prim: core.Primitive</span><span class="s2">,</span>
+                            <span class="s1">window_dimensions: core.Shape</span><span class="s2">,</span>
+                            <span class="s1">window_strides: Sequence[int]</span><span class="s2">,</span>
+                            <span class="s1">padding: Sequence[Tuple[int</span><span class="s2">, </span><span class="s1">int]]) -&gt; Array:</span>
+  <span class="s2">return </span><span class="s1">select_and_scatter_add_p.bind(</span>
+      <span class="s1">source</span><span class="s2">, </span><span class="s1">operand</span><span class="s2">, </span><span class="s1">select_prim=select_prim</span><span class="s2">,</span>
+      <span class="s1">window_dimensions=tuple(window_dimensions)</span><span class="s2">,</span>
+      <span class="s1">window_strides=tuple(window_strides)</span><span class="s2">, </span><span class="s1">padding=tuple(padding))</span>
+
+<span class="s2">def </span><span class="s1">_select_and_gather_add(tangents: Array</span><span class="s2">, </span><span class="s1">operand: Array</span><span class="s2">,</span>
+                           <span class="s1">select_prim: core.Primitive</span><span class="s2">,</span>
+                           <span class="s1">window_dimensions: core.Shape</span><span class="s2">,</span>
+                           <span class="s1">window_strides: Sequence[int]</span><span class="s2">,</span>
+                           <span class="s1">padding: Sequence[Tuple[int</span><span class="s2">, </span><span class="s1">int]]</span><span class="s2">,</span>
+                           <span class="s1">base_dilation: Sequence[int]</span><span class="s2">,</span>
+                           <span class="s1">window_dilation: Sequence[int]) -&gt; Array:</span>
+  <span class="s3">&quot;&quot;&quot;Extracts the tangent corresponding to the minimum or maximum element in 
+  each window of the `operand` array. 
+ 
+  Wraps XLA's `ReduceWindow 
+  &lt;https://www.tensorflow.org/xla/operation_semantics#reducewindow&gt;`_ 
+  operator, which applies a reduction function to all elements in each window of 
+  the input multi-dimensional array. In this case, the input multi-dimensional 
+  array is built by packing each element in the `operand` array with its 
+  corresponding element in the `tangents` array. 
+ 
+  Args: 
+    tangents: an array 
+    operand: an array with the same shape as `tangents` 
+    select_prim: a reduction function (restricted to `ge_p` and `le_p`) 
+    window_dimensions: an array of integers for window dimension values 
+    window_strides: an array of integers for window stride values 
+    base_dilation: an array of integers for base dilation values 
+    window_dilation: an array of integers for window dilation values 
+ 
+  Returns: 
+    An array containing the elements in `tangents` corresponding to the output 
+    of the reduction of `operand` fin each window. 
+  &quot;&quot;&quot;</span>
+  <span class="s2">return </span><span class="s1">select_and_gather_add_p.bind(</span>
+      <span class="s1">tangents</span><span class="s2">, </span><span class="s1">operand</span><span class="s2">, </span><span class="s1">select_prim=select_prim</span><span class="s2">,</span>
+      <span class="s1">window_dimensions=tuple(window_dimensions)</span><span class="s2">,</span>
+      <span class="s1">window_strides=tuple(window_strides)</span><span class="s2">, </span><span class="s1">padding=tuple(padding)</span><span class="s2">,</span>
+      <span class="s1">base_dilation=tuple(base_dilation)</span><span class="s2">,</span>
+      <span class="s1">window_dilation=tuple(window_dilation))</span>
+
+
+<span class="s2">def </span><span class="s1">_reduce_window_abstract_eval_rule(</span>
+    <span class="s1">*avals</span><span class="s2">, </span><span class="s1">jaxpr</span><span class="s2">, </span><span class="s1">consts</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">, </span><span class="s1">window_strides</span><span class="s2">, </span><span class="s1">padding</span><span class="s2">,</span>
+    <span class="s1">base_dilation</span><span class="s2">, </span><span class="s1">window_dilation):</span>
+  <span class="s1">operand_avals</span><span class="s2">, </span><span class="s1">init_val_avals = util.split_list(avals</span><span class="s2">, </span><span class="s1">[len(avals) // </span><span class="s5">2</span><span class="s1">])</span>
+  <span class="s2">if </span><span class="s1">any(o.dtype != iv.dtype </span><span class="s2">for </span><span class="s1">o</span><span class="s2">, </span><span class="s1">iv </span><span class="s2">in </span><span class="s1">zip(operand_avals</span><span class="s2">, </span><span class="s1">init_val_avals)):</span>
+    <span class="s1">msg = (</span><span class="s4">&quot;reduce_window got inconsistent dtypes for operands and init_values:&quot;</span>
+           <span class="s4">&quot; got operand dtypes {} and init_value dtypes {}.&quot;</span><span class="s1">)</span>
+    <span class="s2">raise </span><span class="s1">TypeError(msg.format([o.dtype </span><span class="s2">for </span><span class="s1">o </span><span class="s2">in </span><span class="s1">operand_avals]</span><span class="s2">,</span>
+                               <span class="s1">[iv.dtype </span><span class="s2">for </span><span class="s1">iv </span><span class="s2">in </span><span class="s1">init_val_avals]))</span>
+  <span class="s2">if </span><span class="s1">any(len(v.shape) != </span><span class="s5">0 </span><span class="s2">for </span><span class="s1">v </span><span class="s2">in </span><span class="s1">init_val_avals):</span>
+    <span class="s1">msg = (</span><span class="s4">&quot;reduce_window expected init_values to be scalars but init_values &quot;</span>
+           <span class="s4">&quot;have shapes {}.&quot;</span><span class="s1">)</span>
+    <span class="s2">raise </span><span class="s1">TypeError(msg.format([v.shape </span><span class="s2">for </span><span class="s1">v </span><span class="s2">in </span><span class="s1">init_val_avals]))</span>
+  <span class="s1">out_shape = _common_reduce_window_shape_rule(</span>
+    <span class="s1">operand_avals[</span><span class="s5">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">, </span><span class="s1">window_strides</span><span class="s2">, </span><span class="s1">padding</span><span class="s2">,</span>
+    <span class="s1">base_dilation</span><span class="s2">, </span><span class="s1">window_dilation)</span>
+  <span class="s2">return </span><span class="s1">tuple(ShapedArray(out_shape</span><span class="s2">, </span><span class="s1">op.dtype) </span><span class="s2">for </span><span class="s1">op </span><span class="s2">in </span><span class="s1">operand_avals)</span>
+
+<span class="s2">def </span><span class="s1">_generic_reduce_window_batch_rule(</span>
+    <span class="s1">batched_args</span><span class="s2">, </span><span class="s1">batch_dims</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">jaxpr</span><span class="s2">, </span><span class="s1">consts</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">,</span>
+    <span class="s1">window_strides</span><span class="s2">, </span><span class="s1">padding</span><span class="s2">, </span><span class="s1">base_dilation</span><span class="s2">, </span><span class="s1">window_dilation):</span>
+  <span class="s1">num_operands = len(batched_args) // </span><span class="s5">2</span>
+  <span class="s1">operands</span><span class="s2">, </span><span class="s1">init_values = util.split_list(batched_args</span><span class="s2">, </span><span class="s1">[num_operands])</span>
+  <span class="s1">operand_bdims</span><span class="s2">, </span><span class="s1">init_value_bdims = util.split_list(batch_dims</span><span class="s2">, </span><span class="s1">[num_operands])</span>
+
+  <span class="s2">if </span><span class="s1">any(init_bdim </span><span class="s2">is not None for </span><span class="s1">init_bdim </span><span class="s2">in </span><span class="s1">init_value_bdims):</span>
+    <span class="s2">raise </span><span class="s1">NotImplementedError(</span><span class="s4">&quot;reduce_window batching is not implemented for &quot;</span>
+                              <span class="s4">&quot;initial values&quot;</span><span class="s1">)</span>
+
+  <span class="s1">size = next(x.shape[ax] </span><span class="s2">for </span><span class="s1">x</span><span class="s2">, </span><span class="s1">ax </span><span class="s2">in </span><span class="s1">zip(operands</span><span class="s2">, </span><span class="s1">operand_bdims)</span>
+              <span class="s2">if </span><span class="s1">ax </span><span class="s2">is not None</span><span class="s1">)</span>
+  <span class="s1">operands = [batching.bdim_at_front(arg</span><span class="s2">, </span><span class="s1">bdim</span><span class="s2">, </span><span class="s1">size)</span>
+              <span class="s2">for </span><span class="s1">arg</span><span class="s2">, </span><span class="s1">bdim </span><span class="s2">in </span><span class="s1">zip(operands</span><span class="s2">, </span><span class="s1">operand_bdims)]</span>
+  <span class="s1">window_dimensions = (</span><span class="s5">1</span><span class="s2">,</span><span class="s1">) + window_dimensions</span>
+  <span class="s1">window_strides = (</span><span class="s5">1</span><span class="s2">,</span><span class="s1">) + window_strides</span>
+  <span class="s1">padding = ((</span><span class="s5">0</span><span class="s2">, </span><span class="s5">0</span><span class="s1">)</span><span class="s2">,</span><span class="s1">) + padding</span>
+  <span class="s1">base_dilation = (</span><span class="s5">1</span><span class="s2">,</span><span class="s1">) + base_dilation</span>
+  <span class="s1">window_dilation = (</span><span class="s5">1</span><span class="s2">,</span><span class="s1">) + window_dilation</span>
+  <span class="s1">outs = reduce_window_p.bind(</span>
+      <span class="s1">*(operands + init_values)</span><span class="s2">, </span><span class="s1">jaxpr=jaxpr</span><span class="s2">, </span><span class="s1">consts=consts</span><span class="s2">,</span>
+      <span class="s1">window_dimensions=window_dimensions</span><span class="s2">, </span><span class="s1">window_strides=window_strides</span><span class="s2">,</span>
+      <span class="s1">padding=padding</span><span class="s2">, </span><span class="s1">base_dilation=base_dilation</span><span class="s2">,</span>
+      <span class="s1">window_dilation=window_dilation)</span>
+  <span class="s2">return </span><span class="s1">outs</span><span class="s2">, </span><span class="s1">(</span><span class="s5">0</span><span class="s2">,</span><span class="s1">) * num_operands</span>
+
+
+<span class="s1">reduce_window_p = core.Primitive(</span><span class="s4">'reduce_window'</span><span class="s1">)</span>
+<span class="s1">reduce_window_p.multiple_results = </span><span class="s2">True</span>
+<span class="s1">reduce_window_p.def_impl(partial(xla.apply_primitive</span><span class="s2">, </span><span class="s1">reduce_window_p))</span>
+<span class="s1">reduce_window_p.def_abstract_eval(_reduce_window_abstract_eval_rule)</span>
+<span class="s1">batching.primitive_batchers[reduce_window_p] = _generic_reduce_window_batch_rule</span>
+
+<span class="s2">def </span><span class="s1">_generic_reduce_window_lower(ctx</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">jaxpr</span><span class="s2">, </span><span class="s1">consts</span><span class="s2">,</span>
+                                 <span class="s1">window_dimensions</span><span class="s2">, </span><span class="s1">window_strides</span><span class="s2">, </span><span class="s1">padding</span><span class="s2">,</span>
+                                 <span class="s1">base_dilation</span><span class="s2">, </span><span class="s1">window_dilation):</span>
+  <span class="s1">operands</span><span class="s2">, </span><span class="s1">init_values = util.split_list(args</span><span class="s2">, </span><span class="s1">[len(args) // </span><span class="s5">2</span><span class="s1">])</span>
+  <span class="s1">_</span><span class="s2">, </span><span class="s1">init_value_avals = util.split_list(ctx.avals_in</span><span class="s2">, </span><span class="s1">[len(operands)])</span>
+  <span class="s1">scalar_types = [mlir.aval_to_ir_type(aval) </span><span class="s2">for </span><span class="s1">aval </span><span class="s2">in </span><span class="s1">init_value_avals]</span>
+  <span class="s1">rw = hlo.ReduceWindowOp(</span>
+      <span class="s1">map(mlir.aval_to_ir_type</span><span class="s2">, </span><span class="s1">ctx.avals_out)</span><span class="s2">,</span>
+      <span class="s1">operands</span><span class="s2">,</span>
+      <span class="s1">init_values</span><span class="s2">,</span>
+      <span class="s1">mlir.dense_int_elements(window_dimensions)</span><span class="s2">,</span>
+      <span class="s1">window_strides=mlir.dense_int_elements(window_strides)</span><span class="s2">,</span>
+      <span class="s1">base_dilations=mlir.dense_int_elements(base_dilation)</span><span class="s2">,</span>
+      <span class="s1">window_dilations=mlir.dense_int_elements(window_dilation)</span><span class="s2">,</span>
+      <span class="s1">padding=ir.DenseIntElementsAttr.get(np.asarray(padding</span><span class="s2">, </span><span class="s1">np.int64)</span><span class="s2">,</span>
+                                          <span class="s1">shape=(len(padding)</span><span class="s2">, </span><span class="s5">2</span><span class="s1">)))</span>
+  <span class="s1">reducer = rw.regions[</span><span class="s5">0</span><span class="s1">].blocks.append(*(scalar_types + scalar_types))</span>
+  <span class="s2">with </span><span class="s1">ir.InsertionPoint(reducer):</span>
+    <span class="s2">if </span><span class="s1">jaxpr.effects:</span>
+      <span class="s2">raise </span><span class="s1">NotImplementedError(</span><span class="s4">'Cannot lower effectful `reduce_window`.'</span><span class="s1">)</span>
+    <span class="s1">out_nodes</span><span class="s2">, </span><span class="s1">_ = mlir.jaxpr_subcomp(ctx.module_context</span><span class="s2">, </span><span class="s1">jaxpr</span><span class="s2">,</span>
+        <span class="s1">mlir.TokenSet()</span><span class="s2">, </span><span class="s1">consts</span><span class="s2">, </span><span class="s1">*([a] </span><span class="s2">for </span><span class="s1">a </span><span class="s2">in </span><span class="s1">reducer.arguments)</span><span class="s2">,</span>
+        <span class="s1">dim_var_values=ctx.dim_var_values)</span>
+    <span class="s1">hlo.ReturnOp(util.flatten(out_nodes))</span>
+  <span class="s2">return </span><span class="s1">rw.results</span>
+
+<span class="s1">mlir.register_lowering(reduce_window_p</span><span class="s2">, </span><span class="s1">_generic_reduce_window_lower)</span>
+
+
+<span class="s2">def </span><span class="s1">_reduce_window_sum_shape_rule(operand</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">, </span><span class="s1">window_strides</span><span class="s2">,</span>
+                                  <span class="s1">padding</span><span class="s2">, </span><span class="s1">base_dilation</span><span class="s2">, </span><span class="s1">window_dilation):</span>
+  <span class="s2">if not </span><span class="s1">dtypes.issubdtype(operand.dtype</span><span class="s2">, </span><span class="s1">np.number):</span>
+    <span class="s1">msg = </span><span class="s4">&quot;operand to reduce_window_sum must have a number dtype, got {}&quot;</span>
+    <span class="s2">raise </span><span class="s1">TypeError(msg.format(np.dtype(operand.dtype).name))</span>
+  <span class="s2">return </span><span class="s1">_common_reduce_window_shape_rule(operand</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">,</span>
+                                          <span class="s1">window_strides</span><span class="s2">, </span><span class="s1">padding</span><span class="s2">,</span>
+                                          <span class="s1">base_dilation</span><span class="s2">, </span><span class="s1">window_dilation)</span>
+
+<span class="s2">def </span><span class="s1">_reduce_window_sum_transpose_rule(cotangent</span><span class="s2">, </span><span class="s1">operand</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">,</span>
+                                      <span class="s1">window_strides</span><span class="s2">, </span><span class="s1">padding</span><span class="s2">, </span><span class="s1">base_dilation</span><span class="s2">,</span>
+                                      <span class="s1">window_dilation):</span>
+  <span class="s2">assert </span><span class="s1">ad.is_undefined_primal(operand)</span>
+  <span class="s1">input_shape = operand.aval.shape</span>
+  <span class="s1">pads = convolution._conv_general_vjp_lhs_padding(</span>
+      <span class="s1">input_shape</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">, </span><span class="s1">window_strides</span><span class="s2">, </span><span class="s1">cotangent.shape</span><span class="s2">, </span><span class="s1">padding</span><span class="s2">,</span>
+      <span class="s1">base_dilation</span><span class="s2">, </span><span class="s1">window_dilation)</span>
+  <span class="s1">ones = [</span><span class="s5">1</span><span class="s1">] * len(input_shape)</span>
+  <span class="s1">padding_config = [(lo</span><span class="s2">, </span><span class="s1">hi</span><span class="s2">, </span><span class="s1">stride - </span><span class="s5">1</span><span class="s1">)</span>
+                    <span class="s2">for </span><span class="s1">(lo</span><span class="s2">, </span><span class="s1">hi)</span><span class="s2">, </span><span class="s1">stride </span><span class="s2">in </span><span class="s1">zip(pads</span><span class="s2">, </span><span class="s1">window_strides)]</span>
+  <span class="s1">pad_cotangent = lax.pad(cotangent</span><span class="s2">, </span><span class="s1">lax._zero(cotangent)</span><span class="s2">, </span><span class="s1">padding_config)</span>
+  <span class="s1">result = _reduce_window_sum(pad_cotangent</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">, </span><span class="s1">base_dilation</span><span class="s2">,</span>
+                              <span class="s1">[(</span><span class="s5">0</span><span class="s2">, </span><span class="s5">0</span><span class="s1">)] * len(input_shape)</span><span class="s2">,</span>
+                              <span class="s1">base_dilation=ones</span><span class="s2">,</span>
+                              <span class="s1">window_dilation=window_dilation)</span>
+  <span class="s2">assert </span><span class="s1">result.shape == input_shape</span><span class="s2">, </span><span class="s1">(result.shape</span><span class="s2">, </span><span class="s1">input_shape)</span>
+  <span class="s2">return </span><span class="s1">[result]</span>
+
+<span class="s2">def </span><span class="s1">_reduce_window_batch_rule(reduce_window</span><span class="s2">, </span><span class="s1">batched_args</span><span class="s2">, </span><span class="s1">bdims</span><span class="s2">, </span><span class="s1">*</span><span class="s2">,</span>
+                              <span class="s1">window_dimensions</span><span class="s2">, </span><span class="s1">window_strides</span><span class="s2">, </span><span class="s1">padding</span><span class="s2">,</span>
+                              <span class="s1">base_dilation</span><span class="s2">, </span><span class="s1">window_dilation):</span>
+  <span class="s1">operand</span><span class="s2">, </span><span class="s1">= batched_args</span>
+  <span class="s1">bdim</span><span class="s2">, </span><span class="s1">= bdims</span>
+
+  <span class="s2">if </span><span class="s1">bdim </span><span class="s2">is not None</span><span class="s1">:</span>
+    <span class="s1">window_dimensions = \</span>
+        <span class="s1">window_dimensions[:bdim] + (</span><span class="s5">1</span><span class="s2">,</span><span class="s1">) + window_dimensions[bdim:]</span>
+    <span class="s1">window_strides = window_strides[:bdim] + (</span><span class="s5">1</span><span class="s2">,</span><span class="s1">) + window_strides[bdim:]</span>
+    <span class="s1">padding = padding[:bdim] + ((</span><span class="s5">0</span><span class="s2">, </span><span class="s5">0</span><span class="s1">)</span><span class="s2">,</span><span class="s1">) + padding[bdim:]</span>
+    <span class="s1">base_dilation = base_dilation[:bdim] + (</span><span class="s5">1</span><span class="s2">,</span><span class="s1">) + base_dilation[bdim:]</span>
+    <span class="s1">window_dilation = window_dilation[:bdim] + (</span><span class="s5">1</span><span class="s2">,</span><span class="s1">) + window_dilation[bdim:]</span>
+
+  <span class="s1">operand = reduce_window(operand</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">, </span><span class="s1">window_strides</span><span class="s2">, </span><span class="s1">padding</span><span class="s2">,</span>
+                          <span class="s1">base_dilation</span><span class="s2">, </span><span class="s1">window_dilation)</span>
+  <span class="s2">return </span><span class="s1">operand</span><span class="s2">, </span><span class="s1">bdim</span>
+
+<span class="s1">reduce_window_sum_p = lax.standard_primitive(</span>
+    <span class="s1">_reduce_window_sum_shape_rule</span><span class="s2">, </span><span class="s1">lax._input_dtype</span><span class="s2">, </span><span class="s4">'reduce_window_sum'</span><span class="s1">)</span>
+<span class="s1">ad.deflinear2(reduce_window_sum_p</span><span class="s2">, </span><span class="s1">_reduce_window_sum_transpose_rule)</span>
+<span class="s1">batching.primitive_batchers[reduce_window_sum_p] = partial(</span>
+  <span class="s1">_reduce_window_batch_rule</span><span class="s2">, </span><span class="s1">_reduce_window_sum)</span>
+
+<span class="s2">def </span><span class="s1">_reduce_window_chooser_jvp_rule(prim</span><span class="s2">, </span><span class="s1">g</span><span class="s2">, </span><span class="s1">operand</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">,</span>
+                                    <span class="s1">window_strides</span><span class="s2">, </span><span class="s1">padding</span><span class="s2">, </span><span class="s1">base_dilation</span><span class="s2">,</span>
+                                    <span class="s1">window_dilation):</span>
+  <span class="s2">assert </span><span class="s1">prim </span><span class="s2">is </span><span class="s1">lax.max_p </span><span class="s2">or </span><span class="s1">prim </span><span class="s2">is </span><span class="s1">lax.min_p</span>
+  <span class="s1">select_prim = lax.ge_p </span><span class="s2">if </span><span class="s1">prim </span><span class="s2">is </span><span class="s1">lax.max_p </span><span class="s2">else </span><span class="s1">lax.le_p</span>
+  <span class="s2">return </span><span class="s1">_select_and_gather_add(g</span><span class="s2">, </span><span class="s1">operand</span><span class="s2">, </span><span class="s1">select_prim</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">,</span>
+                                <span class="s1">window_strides</span><span class="s2">, </span><span class="s1">padding</span><span class="s2">, </span><span class="s1">base_dilation</span><span class="s2">,</span>
+                                <span class="s1">window_dilation)</span>
+
+
+<span class="s2">def </span><span class="s1">_common_reduce_window_shape_rule(operand</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">,</span>
+                                     <span class="s1">window_strides</span><span class="s2">, </span><span class="s1">padding</span><span class="s2">, </span><span class="s1">base_dilation</span><span class="s2">,</span>
+                                     <span class="s1">window_dilation):</span>
+  <span class="s1">lax._check_shapelike(</span><span class="s4">&quot;reduce_window&quot;</span><span class="s2">, </span><span class="s4">&quot;window_dimensions&quot;</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">,</span>
+                       <span class="s1">non_zero_shape=</span><span class="s2">True</span><span class="s1">)</span>
+  <span class="s1">lax._check_shapelike(</span><span class="s4">&quot;reduce_window&quot;</span><span class="s2">, </span><span class="s4">&quot;window_strides&quot;</span><span class="s2">, </span><span class="s1">window_strides</span><span class="s2">,</span>
+                       <span class="s1">non_zero_shape=</span><span class="s2">True</span><span class="s1">)</span>
+  <span class="s1">lax._check_shapelike(</span><span class="s4">&quot;reduce_window&quot;</span><span class="s2">, </span><span class="s4">&quot;base_dilation&quot;</span><span class="s2">, </span><span class="s1">base_dilation)</span>
+  <span class="s1">lax._check_shapelike(</span><span class="s4">&quot;reduce_window&quot;</span><span class="s2">, </span><span class="s4">&quot;window_dilation&quot;</span><span class="s2">, </span><span class="s1">window_dilation)</span>
+  <span class="s2">if </span><span class="s1">operand.ndim != len(window_dimensions):</span>
+    <span class="s1">msg = (</span><span class="s4">&quot;reduce_window got the wrong number of window_dimensions for &quot;</span>
+           <span class="s4">&quot;operand: got operand shape {} with window_dimensions {}.&quot;</span><span class="s1">)</span>
+    <span class="s2">raise </span><span class="s1">TypeError(msg.format(operand.shape</span><span class="s2">, </span><span class="s1">window_dimensions))</span>
+  <span class="s2">if </span><span class="s1">len(window_strides) != len(window_dimensions):</span>
+    <span class="s1">msg = (</span><span class="s4">&quot;reduce_window got inconsistent window_strides and &quot;</span>
+           <span class="s4">&quot;window_dimensions: got window_strides {} and window_dimensions {}.&quot;</span><span class="s1">)</span>
+    <span class="s2">raise </span><span class="s1">TypeError(msg.format(window_strides</span><span class="s2">, </span><span class="s1">window_dimensions))</span>
+  <span class="s2">if </span><span class="s1">len(base_dilation) != len(window_dimensions):</span>
+    <span class="s1">msg = (</span><span class="s4">&quot;reduce_window got inconsistent base_dilation and &quot;</span>
+           <span class="s4">&quot;window_dimensions: got base_dilation {} and window_dimensions {}.&quot;</span><span class="s1">)</span>
+    <span class="s2">raise </span><span class="s1">TypeError(msg.format(base_dilation</span><span class="s2">, </span><span class="s1">window_dimensions))</span>
+  <span class="s2">if </span><span class="s1">len(window_dilation) != len(window_dimensions):</span>
+    <span class="s1">msg = (</span><span class="s4">&quot;reduce_window got inconsistent window_dilation and &quot;</span>
+           <span class="s4">&quot;window_dimensions: got window_dilation {} and window_dimensions &quot;</span>
+           <span class="s4">&quot;{}.&quot;</span><span class="s1">)</span>
+    <span class="s2">raise </span><span class="s1">TypeError(msg.format(window_dilation</span><span class="s2">, </span><span class="s1">window_dimensions))</span>
+
+  <span class="s2">return </span><span class="s1">reduce_window_shape_tuple(operand.shape</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">,</span>
+                                   <span class="s1">window_strides</span><span class="s2">, </span><span class="s1">padding</span><span class="s2">, </span><span class="s1">base_dilation</span><span class="s2">,</span>
+                                   <span class="s1">window_dilation)</span>
+
+<span class="s2">def </span><span class="s1">reduce_window_shape_tuple(operand_shape</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">, </span><span class="s1">window_strides</span><span class="s2">,</span>
+                              <span class="s1">padding</span><span class="s2">, </span><span class="s1">base_dilation=</span><span class="s2">None,</span>
+                              <span class="s1">window_dilation=</span><span class="s2">None</span><span class="s1">):</span>
+  <span class="s2">if </span><span class="s1">base_dilation </span><span class="s2">is not None</span><span class="s1">:</span>
+    <span class="s1">operand_shape = lax._dilate_shape(operand_shape</span><span class="s2">, </span><span class="s1">base_dilation)</span>
+  <span class="s2">if </span><span class="s1">window_dilation </span><span class="s2">is not None</span><span class="s1">:</span>
+    <span class="s1">window_dimensions = lax._dilate_shape(window_dimensions</span><span class="s2">, </span><span class="s1">window_dilation)</span>
+  <span class="s1">pads_lo</span><span class="s2">, </span><span class="s1">pads_hi = util.unzip2(padding)</span>
+  <span class="s1">operand_padded = core.sum_shapes(operand_shape</span><span class="s2">, </span><span class="s1">pads_lo</span><span class="s2">, </span><span class="s1">pads_hi)</span>
+  <span class="s2">return </span><span class="s1">core.stride_shape(operand_padded</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">, </span><span class="s1">window_strides)</span>
+
+<span class="s1">reduce_window_max_p = lax.standard_primitive(</span>
+    <span class="s1">_common_reduce_window_shape_rule</span><span class="s2">, </span><span class="s1">lax._input_dtype</span><span class="s2">, </span><span class="s4">'reduce_window_max'</span><span class="s1">)</span>
+<span class="s1">ad.defjvp(reduce_window_max_p</span><span class="s2">, </span><span class="s1">partial(_reduce_window_chooser_jvp_rule</span><span class="s2">,</span>
+                                       <span class="s1">lax.max_p))</span>
+<span class="s1">batching.primitive_batchers[reduce_window_max_p] = partial(</span>
+  <span class="s1">_reduce_window_batch_rule</span><span class="s2">, </span><span class="s1">_reduce_window_max)</span>
+
+<span class="s1">reduce_window_min_p = lax.standard_primitive(</span>
+    <span class="s1">_common_reduce_window_shape_rule</span><span class="s2">, </span><span class="s1">lax._input_dtype</span><span class="s2">, </span><span class="s4">'reduce_window_min'</span><span class="s1">)</span>
+<span class="s1">ad.defjvp(reduce_window_min_p</span><span class="s2">, </span><span class="s1">partial(_reduce_window_chooser_jvp_rule</span><span class="s2">,</span>
+                                       <span class="s1">lax.min_p))</span>
+
+<span class="s1">_reduce_window_min_batch_rule = partial(_reduce_window_batch_rule</span><span class="s2">,</span>
+                                        <span class="s1">_reduce_window_min)</span>
+<span class="s1">batching.primitive_batchers[reduce_window_min_p] = partial(</span>
+  <span class="s1">_reduce_window_batch_rule</span><span class="s2">, </span><span class="s1">_reduce_window_min)</span>
+
+
+<span class="s2">def </span><span class="s1">_reduce_window_lower(</span>
+    <span class="s1">reduce_op</span><span class="s2">, </span><span class="s1">init_value</span><span class="s2">, </span><span class="s1">ctx</span><span class="s2">, </span><span class="s1">operand</span><span class="s2">, </span><span class="s1">*</span><span class="s2">,</span>
+    <span class="s1">window_dimensions</span><span class="s2">, </span><span class="s1">window_strides</span><span class="s2">, </span><span class="s1">padding</span><span class="s2">, </span><span class="s1">base_dilation</span><span class="s2">, </span><span class="s1">window_dilation):</span>
+  <span class="s1">aval_out</span><span class="s2">, </span><span class="s1">= ctx.avals_out</span>
+  <span class="s1">operand_aval</span><span class="s2">, </span><span class="s1">= ctx.avals_in</span>
+  <span class="s1">scalar_aval = operand_aval.update(shape=())</span>
+  <span class="s1">scalar_type = mlir.aval_to_ir_type(scalar_aval)</span>
+  <span class="s2">if </span><span class="s1">any(</span><span class="s2">not </span><span class="s1">core.is_constant_shape(s)</span>
+         <span class="s2">for </span><span class="s1">s </span><span class="s2">in </span><span class="s1">[window_dimensions</span><span class="s2">, </span><span class="s1">window_dilation</span><span class="s2">, </span><span class="s1">window_strides</span><span class="s2">, </span><span class="s1">base_dilation</span><span class="s2">, </span><span class="s1">*padding]):</span>
+    <span class="s2">raise </span><span class="s1">NotImplementedError(</span><span class="s4">&quot;ReduceWindowOp for dynamic shapes&quot;</span><span class="s1">)</span>
+  <span class="s1">rw = hlo.ReduceWindowOp(</span>
+      <span class="s1">mlir.aval_to_ir_types(aval_out)</span><span class="s2">, </span><span class="s1">[operand]</span><span class="s2">,</span>
+      <span class="s1">[mlir.full_like_aval(ctx</span><span class="s2">, </span><span class="s1">init_value(scalar_aval.dtype)</span><span class="s2">, </span><span class="s1">scalar_aval)]</span><span class="s2">,</span>
+      <span class="s1">mlir.dense_int_elements(window_dimensions)</span><span class="s2">,</span>
+      <span class="s1">window_strides=mlir.dense_int_elements(window_strides)</span><span class="s2">,</span>
+      <span class="s1">base_dilations=mlir.dense_int_elements(base_dilation)</span><span class="s2">,</span>
+      <span class="s1">window_dilations=mlir.dense_int_elements(window_dilation)</span><span class="s2">,</span>
+      <span class="s1">padding=ir.DenseIntElementsAttr.get(np.asarray(padding</span><span class="s2">, </span><span class="s1">np.int64)</span><span class="s2">,</span>
+                                          <span class="s1">shape=(len(padding)</span><span class="s2">, </span><span class="s5">2</span><span class="s1">)))</span>
+  <span class="s1">reducer = rw.regions[</span><span class="s5">0</span><span class="s1">].blocks.append(scalar_type</span><span class="s2">, </span><span class="s1">scalar_type)</span>
+  <span class="s2">with </span><span class="s1">ir.InsertionPoint(reducer):</span>
+    <span class="s1">hlo.ReturnOp(reduce_op(*reducer.arguments))</span>
+  <span class="s2">return </span><span class="s1">rw.results</span>
+
+<span class="s1">mlir.register_lowering(reduce_window_sum_p</span><span class="s2">, </span><span class="s1">partial(</span>
+    <span class="s1">_reduce_window_lower</span><span class="s2">, </span><span class="s1">hlo.AddOp</span><span class="s2">, lambda </span><span class="s1">_: </span><span class="s5">0</span><span class="s1">))</span>
+<span class="s1">mlir.register_lowering(reduce_window_min_p</span><span class="s2">, </span><span class="s1">partial(</span>
+    <span class="s1">_reduce_window_lower</span><span class="s2">, </span><span class="s1">mlir.min_hlo</span><span class="s2">, </span><span class="s1">lax._get_min_identity))</span>
+<span class="s1">mlir.register_lowering(reduce_window_max_p</span><span class="s2">, </span><span class="s1">partial(</span>
+    <span class="s1">_reduce_window_lower</span><span class="s2">, </span><span class="s1">mlir.max_hlo</span><span class="s2">, </span><span class="s1">lax._get_max_identity))</span>
+
+
+
+<span class="s2">def </span><span class="s1">_select_and_scatter_shape_rule(</span>
+    <span class="s1">operand</span><span class="s2">, </span><span class="s1">source</span><span class="s2">, </span><span class="s1">init_value</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">select_jaxpr</span><span class="s2">, </span><span class="s1">select_consts</span><span class="s2">, </span><span class="s1">scatter_jaxpr</span><span class="s2">,</span>
+    <span class="s1">scatter_consts</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">, </span><span class="s1">window_strides</span><span class="s2">, </span><span class="s1">padding):</span>
+  <span class="s1">lax._check_shapelike(</span><span class="s4">&quot;select_and_scatter&quot;</span><span class="s2">, </span><span class="s4">&quot;window_dimensions&quot;</span><span class="s2">,</span>
+                       <span class="s1">window_dimensions)</span>
+  <span class="s1">lax._check_shapelike(</span><span class="s4">&quot;select_and_scatter&quot;</span><span class="s2">, </span><span class="s4">&quot;window_strides&quot;</span><span class="s2">, </span><span class="s1">window_strides)</span>
+  <span class="s2">if </span><span class="s1">len(window_dimensions) != len(window_strides):</span>
+    <span class="s1">msg = (</span><span class="s4">&quot;select_and_scatter got inconsistent window_strides and &quot;</span>
+           <span class="s4">&quot;window_dimensions: got window_strides {} and window_dimensions {}.&quot;</span><span class="s1">)</span>
+    <span class="s2">raise </span><span class="s1">TypeError(msg.format(window_strides</span><span class="s2">, </span><span class="s1">window_dimensions))</span>
+  <span class="s2">return </span><span class="s1">operand.shape</span>
+
+<span class="s1">select_and_scatter_p = lax.standard_primitive(</span>
+    <span class="s1">_select_and_scatter_shape_rule</span><span class="s2">, </span><span class="s1">lax._input_dtype</span><span class="s2">, </span><span class="s4">'select_and_scatter'</span><span class="s1">)</span>
+
+<span class="s2">def </span><span class="s1">_select_and_scatter_lower(</span>
+    <span class="s1">ctx</span><span class="s2">, </span><span class="s1">operand</span><span class="s2">, </span><span class="s1">source</span><span class="s2">, </span><span class="s1">init_value</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">select_jaxpr</span><span class="s2">,</span>
+    <span class="s1">select_consts</span><span class="s2">, </span><span class="s1">scatter_jaxpr</span><span class="s2">, </span><span class="s1">scatter_consts</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">,</span>
+    <span class="s1">window_strides</span><span class="s2">, </span><span class="s1">padding):</span>
+  <span class="s1">operand_aval</span><span class="s2">, </span><span class="s1">source_aval</span><span class="s2">, </span><span class="s1">init_value_aval = ctx.avals_in</span>
+  <span class="s1">aval_out</span><span class="s2">, </span><span class="s1">= ctx.avals_out</span>
+  <span class="s1">scalar_aval = operand_aval.update(shape=())</span>
+  <span class="s1">scalar_type = mlir.aval_to_ir_type(scalar_aval)</span>
+  <span class="s1">op = hlo.SelectAndScatterOp(</span>
+      <span class="s1">mlir.aval_to_ir_type(aval_out)</span><span class="s2">,</span>
+      <span class="s1">operand</span><span class="s2">,</span>
+      <span class="s1">source</span><span class="s2">,</span>
+      <span class="s1">init_value</span><span class="s2">,</span>
+      <span class="s1">window_dimensions=mlir.dense_int_elements(window_dimensions)</span><span class="s2">,</span>
+      <span class="s1">window_strides=mlir.dense_int_elements(window_strides)</span><span class="s2">,</span>
+      <span class="s1">padding=ir.DenseIntElementsAttr.get(np.asarray(padding</span><span class="s2">, </span><span class="s1">np.int64)</span><span class="s2">,</span>
+                                          <span class="s1">shape=(len(padding)</span><span class="s2">, </span><span class="s5">2</span><span class="s1">)))</span>
+  <span class="s1">select = op.select.blocks.append(scalar_type</span><span class="s2">, </span><span class="s1">scalar_type)</span>
+  <span class="s2">with </span><span class="s1">ir.InsertionPoint(select):</span>
+    <span class="s2">if </span><span class="s1">select_jaxpr.effects:</span>
+      <span class="s2">raise </span><span class="s1">NotImplementedError(</span><span class="s4">'Cannot lower effectful `select`.'</span><span class="s1">)</span>
+    <span class="s1">out_nodes</span><span class="s2">, </span><span class="s1">_ = mlir.jaxpr_subcomp(ctx.module_context</span><span class="s2">, </span><span class="s1">select_jaxpr</span><span class="s2">,</span>
+                                      <span class="s1">mlir.TokenSet()</span><span class="s2">, </span><span class="s1">select_consts</span><span class="s2">,</span>
+                                      <span class="s1">*([a] </span><span class="s2">for </span><span class="s1">a </span><span class="s2">in </span><span class="s1">select.arguments)</span><span class="s2">,</span>
+                                      <span class="s1">dim_var_values=ctx.dim_var_values)</span>
+    <span class="s1">hlo.ReturnOp(util.flatten(out_nodes))</span>
+  <span class="s1">scatter = op.scatter.blocks.append(scalar_type</span><span class="s2">, </span><span class="s1">scalar_type)</span>
+  <span class="s2">with </span><span class="s1">ir.InsertionPoint(scatter):</span>
+    <span class="s2">if </span><span class="s1">scatter_jaxpr.effects:</span>
+      <span class="s2">raise </span><span class="s1">NotImplementedError(</span><span class="s4">'Cannot lower effectful `scatter`.'</span><span class="s1">)</span>
+    <span class="s1">out_nodes</span><span class="s2">, </span><span class="s1">_ = mlir.jaxpr_subcomp(ctx.module_context</span><span class="s2">, </span><span class="s1">scatter_jaxpr</span><span class="s2">,</span>
+                                      <span class="s1">mlir.TokenSet()</span><span class="s2">, </span><span class="s1">scatter_consts</span><span class="s2">,</span>
+                                      <span class="s1">*([a] </span><span class="s2">for </span><span class="s1">a </span><span class="s2">in </span><span class="s1">scatter.arguments)</span><span class="s2">,</span>
+                                      <span class="s1">dim_var_values=ctx.dim_var_values)</span>
+    <span class="s1">hlo.ReturnOp(util.flatten(out_nodes))</span>
+  <span class="s2">return </span><span class="s1">op.results</span>
+
+<span class="s1">mlir.register_lowering(select_and_scatter_p</span><span class="s2">, </span><span class="s1">_select_and_scatter_lower)</span>
+
+<span class="s2">def </span><span class="s1">_select_and_scatter_add_shape_rule(</span>
+    <span class="s1">source</span><span class="s2">, </span><span class="s1">operand</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">select_prim</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">, </span><span class="s1">window_strides</span><span class="s2">,</span>
+    <span class="s1">padding):</span>
+  <span class="s2">return </span><span class="s1">operand.shape</span>
+
+<span class="s2">def </span><span class="s1">_select_and_scatter_add_jvp(</span>
+    <span class="s1">primals</span><span class="s2">, </span><span class="s1">tangents</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">select_prim</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">, </span><span class="s1">window_strides</span><span class="s2">,</span>
+    <span class="s1">padding):</span>
+  <span class="s1">source</span><span class="s2">, </span><span class="s1">operand = primals</span>
+  <span class="s1">g_source</span><span class="s2">, </span><span class="s1">g_operand = tangents</span>
+  <span class="s1">val_out = _select_and_scatter_add(</span>
+      <span class="s1">source</span><span class="s2">, </span><span class="s1">operand</span><span class="s2">, </span><span class="s1">select_prim</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">, </span><span class="s1">window_strides</span><span class="s2">,</span>
+      <span class="s1">padding)</span>
+  <span class="s2">del </span><span class="s1">g_operand</span>
+  <span class="s2">if </span><span class="s1">type(g_source) </span><span class="s2">is </span><span class="s1">ad_util.Zero:</span>
+    <span class="s1">tangent_out = ad_util.Zero.from_value(val_out)</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s1">tangent_out = _select_and_scatter_add(</span>
+        <span class="s1">g_source</span><span class="s2">, </span><span class="s1">operand</span><span class="s2">, </span><span class="s1">select_prim</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">,</span>
+        <span class="s1">window_strides</span><span class="s2">, </span><span class="s1">padding)</span>
+  <span class="s2">return </span><span class="s1">val_out</span><span class="s2">, </span><span class="s1">tangent_out</span>
+
+<span class="s2">def </span><span class="s1">_select_and_scatter_add_transpose(</span>
+    <span class="s1">t</span><span class="s2">, </span><span class="s1">source</span><span class="s2">, </span><span class="s1">operand</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">select_prim</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">, </span><span class="s1">window_strides</span><span class="s2">,</span>
+    <span class="s1">padding):</span>
+  <span class="s2">assert </span><span class="s1">ad.is_undefined_primal(source) </span><span class="s2">and not </span><span class="s1">ad.is_undefined_primal(operand)</span>
+  <span class="s2">if </span><span class="s1">type(t) </span><span class="s2">is </span><span class="s1">ad_util.Zero:</span>
+    <span class="s2">return </span><span class="s1">[ad_util.Zero(source.aval)</span><span class="s2">, None</span><span class="s1">]</span>
+  <span class="s1">ones = (</span><span class="s5">1</span><span class="s2">,</span><span class="s1">) * len(window_dimensions)</span>
+  <span class="s1">source_t = _select_and_gather_add(t</span><span class="s2">, </span><span class="s1">operand</span><span class="s2">, </span><span class="s1">select_prim</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">,</span>
+                                    <span class="s1">window_strides</span><span class="s2">, </span><span class="s1">padding</span><span class="s2">, </span><span class="s1">ones</span><span class="s2">, </span><span class="s1">ones)</span>
+  <span class="s2">return </span><span class="s1">[source_t</span><span class="s2">, None</span><span class="s1">]</span>
+
+<span class="s2">def </span><span class="s1">_select_and_scatter_add_batch_rule(</span>
+    <span class="s1">batched_args</span><span class="s2">, </span><span class="s1">batch_dims</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">select_prim</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">, </span><span class="s1">window_strides</span><span class="s2">,</span>
+    <span class="s1">padding):</span>
+  <span class="s1">source</span><span class="s2">, </span><span class="s1">operand = batched_args</span>
+  <span class="s1">s_bdim</span><span class="s2">, </span><span class="s1">o_bdim = batch_dims</span>
+  <span class="s1">size = next(a.shape[bdim] </span><span class="s2">for </span><span class="s1">a</span><span class="s2">, </span><span class="s1">bdim </span><span class="s2">in </span><span class="s1">zip(batched_args</span><span class="s2">, </span><span class="s1">batch_dims)</span>
+              <span class="s2">if </span><span class="s1">bdim </span><span class="s2">is not None</span><span class="s1">)</span>
+  <span class="s1">source = batching.bdim_at_front(source</span><span class="s2">, </span><span class="s1">s_bdim</span><span class="s2">, </span><span class="s1">size)</span>
+  <span class="s1">operand = batching.bdim_at_front(operand</span><span class="s2">, </span><span class="s1">o_bdim</span><span class="s2">, </span><span class="s1">size)</span>
+
+  <span class="s1">window_dimensions = (</span><span class="s5">1</span><span class="s2">,</span><span class="s1">) + window_dimensions</span>
+  <span class="s1">window_strides = (</span><span class="s5">1</span><span class="s2">,</span><span class="s1">) + window_strides</span>
+  <span class="s1">padding = ((</span><span class="s5">0</span><span class="s2">, </span><span class="s5">0</span><span class="s1">)</span><span class="s2">,</span><span class="s1">) + padding</span>
+  <span class="s1">out = _select_and_scatter_add(source</span><span class="s2">, </span><span class="s1">operand</span><span class="s2">, </span><span class="s1">select_prim</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">,</span>
+                                <span class="s1">window_strides</span><span class="s2">, </span><span class="s1">padding)</span>
+  <span class="s2">return </span><span class="s1">out</span><span class="s2">, </span><span class="s5">0</span>
+
+<span class="s1">select_and_scatter_add_p = lax.standard_primitive(</span>
+    <span class="s1">_select_and_scatter_add_shape_rule</span><span class="s2">, </span><span class="s1">lax._input_dtype</span><span class="s2">,</span>
+    <span class="s4">'select_and_scatter_add'</span><span class="s1">)</span>
+
+<span class="s1">ad.primitive_transposes[select_and_scatter_add_p] = \</span>
+    <span class="s1">_select_and_scatter_add_transpose</span>
+<span class="s1">ad.primitive_jvps[select_and_scatter_add_p] = _select_and_scatter_add_jvp</span>
+<span class="s1">batching.primitive_batchers[select_and_scatter_add_p] = \</span>
+    <span class="s1">_select_and_scatter_add_batch_rule</span>
+
+<span class="s2">def </span><span class="s1">_select_and_scatter_add_impl(source</span><span class="s2">, </span><span class="s1">operand</span><span class="s2">, </span><span class="s1">*</span><span class="s2">,</span>
+                                 <span class="s1">select_prim</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">, </span><span class="s1">window_strides</span><span class="s2">,</span>
+                                 <span class="s1">padding</span><span class="s2">, </span><span class="s1">expand_padding):</span>
+  <span class="s1">dtype = source.dtype</span>
+  <span class="s1">select = </span><span class="s2">lambda </span><span class="s1">x</span><span class="s2">, </span><span class="s1">y: select_prim.bind(x</span><span class="s2">, </span><span class="s1">y)</span>
+  <span class="s1">scatter = lax.bitwise_or </span><span class="s2">if </span><span class="s1">dtype == np.bool_ </span><span class="s2">else </span><span class="s1">lax.add</span>
+  <span class="s2">if </span><span class="s1">expand_padding:</span>
+    <span class="s1">operand_shape = operand.shape</span>
+    <span class="s1">original_padding = padding</span>
+    <span class="s1">identity = (lax._get_max_identity </span><span class="s2">if </span><span class="s1">select_prim </span><span class="s2">is </span><span class="s1">lax.ge_p</span>
+                <span class="s2">else </span><span class="s1">lax._get_min_identity)</span>
+    <span class="s1">pads = [(lo</span><span class="s2">, </span><span class="s1">hi</span><span class="s2">, </span><span class="s5">0</span><span class="s1">) </span><span class="s2">for </span><span class="s1">(lo</span><span class="s2">, </span><span class="s1">hi) </span><span class="s2">in </span><span class="s1">padding]</span>
+    <span class="s1">operand = lax.pad(operand</span><span class="s2">, </span><span class="s1">identity(dtype)</span><span class="s2">, </span><span class="s1">pads)</span>
+    <span class="s1">padding = [(</span><span class="s5">0</span><span class="s2">, </span><span class="s5">0</span><span class="s1">) </span><span class="s2">for </span><span class="s1">_ </span><span class="s2">in </span><span class="s1">padding]</span>
+  <span class="s1">out = _select_and_scatter(</span>
+      <span class="s1">operand</span><span class="s2">, </span><span class="s1">select</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">, </span><span class="s1">window_strides</span><span class="s2">, </span><span class="s1">padding</span><span class="s2">, </span><span class="s1">source</span><span class="s2">,</span>
+      <span class="s1">lax._zero(operand)</span><span class="s2">, </span><span class="s1">scatter)</span>
+  <span class="s2">if </span><span class="s1">expand_padding:</span>
+    <span class="s1">start_indices = [lo </span><span class="s2">for </span><span class="s1">(lo</span><span class="s2">, </span><span class="s1">hi) </span><span class="s2">in </span><span class="s1">original_padding]</span>
+    <span class="s1">stop_indices = [lo + d </span><span class="s2">for </span><span class="s1">((lo</span><span class="s2">, </span><span class="s1">hi)</span><span class="s2">, </span><span class="s1">d) </span><span class="s2">in </span><span class="s1">zip(original_padding</span><span class="s2">,</span>
+                                                    <span class="s1">operand_shape)]</span>
+    <span class="s1">out = slicing.slice(out</span><span class="s2">, </span><span class="s1">start_indices</span><span class="s2">, </span><span class="s1">stop_indices)</span>
+  <span class="s2">return </span><span class="s1">out</span>
+
+<span class="s1">mlir.register_lowering(select_and_scatter_add_p</span><span class="s2">, </span><span class="s1">mlir.lower_fun(</span>
+    <span class="s1">partial(_select_and_scatter_add_impl</span><span class="s2">, </span><span class="s1">expand_padding=</span><span class="s2">False</span><span class="s1">)</span><span class="s2">,</span>
+    <span class="s1">multiple_results=</span><span class="s2">False</span><span class="s1">))</span>
+<span class="s0"># TODO(b/161704903): workaround for XLA/CPU crash.</span>
+<span class="s1">mlir.register_lowering(select_and_scatter_add_p</span><span class="s2">, </span><span class="s1">mlir.lower_fun(</span>
+    <span class="s1">partial(_select_and_scatter_add_impl</span><span class="s2">, </span><span class="s1">expand_padding=</span><span class="s2">True</span><span class="s1">)</span><span class="s2">,</span>
+    <span class="s1">multiple_results=</span><span class="s2">False</span><span class="s1">)</span><span class="s2">, </span><span class="s1">platform=</span><span class="s4">'cpu'</span><span class="s1">)</span>
+<span class="s0"># TODO(b/182390722): workaround for XLA/GPU crash.</span>
+<span class="s1">mlir.register_lowering(select_and_scatter_add_p</span><span class="s2">, </span><span class="s1">mlir.lower_fun(</span>
+    <span class="s1">partial(_select_and_scatter_add_impl</span><span class="s2">, </span><span class="s1">expand_padding=</span><span class="s2">True</span><span class="s1">)</span><span class="s2">,</span>
+    <span class="s1">multiple_results=</span><span class="s2">False</span><span class="s1">)</span><span class="s2">, </span><span class="s1">platform=</span><span class="s4">'gpu'</span><span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">_select_and_gather_add_shape_rule(</span>
+    <span class="s1">tangents</span><span class="s2">, </span><span class="s1">operand</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">select_prim</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">, </span><span class="s1">window_strides</span><span class="s2">,</span>
+    <span class="s1">padding</span><span class="s2">, </span><span class="s1">base_dilation</span><span class="s2">, </span><span class="s1">window_dilation):</span>
+  <span class="s2">if </span><span class="s1">tangents.shape != operand.shape:</span>
+    <span class="s1">msg = (</span><span class="s4">&quot;select_and_gather_add tangents and operand shapes must match, &quot;</span>
+           <span class="s4">&quot;got {} and {}.&quot;</span><span class="s1">)</span>
+    <span class="s2">raise </span><span class="s1">TypeError(msg.format(tangents.shape</span><span class="s2">, </span><span class="s1">operand.shape))</span>
+  <span class="s2">return </span><span class="s1">_common_reduce_window_shape_rule(</span>
+    <span class="s1">operand</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">, </span><span class="s1">window_strides</span><span class="s2">, </span><span class="s1">padding</span><span class="s2">, </span><span class="s1">base_dilation</span><span class="s2">,</span>
+    <span class="s1">window_dilation)</span>
+
+<span class="s2">def </span><span class="s1">_select_and_gather_add_lowering(</span>
+    <span class="s1">ctx: mlir.LoweringRuleContext</span><span class="s2">,</span>
+    <span class="s1">tangents</span><span class="s2">, </span><span class="s1">operand</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">select_prim</span><span class="s2">,</span>
+    <span class="s1">window_dimensions</span><span class="s2">, </span><span class="s1">window_strides</span><span class="s2">, </span><span class="s1">padding</span><span class="s2">, </span><span class="s1">base_dilation</span><span class="s2">, </span><span class="s1">window_dilation</span><span class="s2">,</span>
+    <span class="s1">max_bits=</span><span class="s5">64</span><span class="s1">):</span>
+  <span class="s1">_</span><span class="s2">, </span><span class="s1">operand_aval</span><span class="s2">, </span><span class="s1">= ctx.avals_in</span>
+  <span class="s1">out_aval</span><span class="s2">, </span><span class="s1">= ctx.avals_out</span>
+  <span class="s1">dtype = operand_aval.dtype</span>
+  <span class="s1">etype = mlir.dtype_to_ir_type(dtype)</span>
+  <span class="s1">nbits = dtypes.finfo(dtype).bits</span>
+
+  <span class="s2">assert </span><span class="s1">nbits &lt;= max_bits</span>
+  <span class="s1">double_word_reduction = nbits * </span><span class="s5">2 </span><span class="s1">&lt;= max_bits</span>
+
+  <span class="s1">const = </span><span class="s2">lambda </span><span class="s1">dtype</span><span class="s2">, </span><span class="s1">x: mlir.ir_constant(np.array(x</span><span class="s2">, </span><span class="s1">dtype=dtype)</span><span class="s2">,</span>
+                                            <span class="s1">canonicalize_types=</span><span class="s2">False</span><span class="s1">)</span>
+
+  <span class="s2">def </span><span class="s1">_broadcast_scalar_const(x</span><span class="s2">, </span><span class="s1">aval_out):</span>
+    <span class="s2">return </span><span class="s1">mlir.broadcast_in_dim(ctx</span><span class="s2">, </span><span class="s1">const(aval_out.dtype</span><span class="s2">, </span><span class="s1">x)</span><span class="s2">,</span>
+                                 <span class="s1">aval_out</span><span class="s2">,</span>
+                                 <span class="s1">broadcast_dimensions=())</span>
+
+  <span class="s2">if </span><span class="s1">double_word_reduction:</span>
+    <span class="s0"># TODO(b/73062247): XLA doesn't yet implement ReduceWindow on tuples, so</span>
+    <span class="s0"># we implement a pair-wise ReduceWindow by packing two k-bit values into</span>
+    <span class="s0"># 2k-bit unsigned integer using bit tricks.</span>
+    <span class="s1">word_dtype = lax._UINT_DTYPES[nbits]</span>
+    <span class="s1">double_word_dtype = lax._UINT_DTYPES[nbits * </span><span class="s5">2</span><span class="s1">]</span>
+    <span class="s1">word_type = mlir.dtype_to_ir_type(word_dtype)  </span><span class="s0"># type: ignore</span>
+    <span class="s1">double_word_type = mlir.dtype_to_ir_type(double_word_dtype)  </span><span class="s0"># type: ignore</span>
+    <span class="s0"># Packs two values into a double_word_type.</span>
+    <span class="s2">def </span><span class="s1">pack(a</span><span class="s2">, </span><span class="s1">b</span><span class="s2">, </span><span class="s1">ab_aval):</span>
+      <span class="s1">word_type_ab_aval = ab_aval.update(dtype=word_dtype)</span>
+      <span class="s1">double_word_type_ab_aval = ab_aval.update(dtype=double_word_dtype)</span>
+      <span class="s1">a = hlo.BitcastConvertOp(mlir.aval_to_ir_type(word_type_ab_aval)</span><span class="s2">, </span><span class="s1">a)</span>
+      <span class="s1">b = hlo.BitcastConvertOp(mlir.aval_to_ir_type(word_type_ab_aval)</span><span class="s2">, </span><span class="s1">b)</span>
+      <span class="s1">a = hlo.ConvertOp(mlir.aval_to_ir_type(double_word_type_ab_aval)</span><span class="s2">, </span><span class="s1">a)</span>
+      <span class="s1">b = hlo.ConvertOp(mlir.aval_to_ir_type(double_word_type_ab_aval)</span><span class="s2">, </span><span class="s1">b)</span>
+      <span class="s1">a = hlo.ShiftLeftOp(a</span><span class="s2">,</span>
+                          <span class="s1">_broadcast_scalar_const(nbits</span><span class="s2">, </span><span class="s1">double_word_type_ab_aval))</span>
+      <span class="s2">return </span><span class="s1">hlo.OrOp(a</span><span class="s2">, </span><span class="s1">b)</span>
+
+    <span class="s0"># Unpacks the first element of a double_word_type.</span>
+    <span class="s2">def </span><span class="s1">fst(t):</span>
+      <span class="s2">assert not </span><span class="s1">ir.RankedTensorType(t.type).shape</span>
+      <span class="s1">st = hlo.ShiftRightLogicalOp(t</span><span class="s2">, </span><span class="s1">const(double_word_dtype</span><span class="s2">, </span><span class="s1">nbits))</span>
+      <span class="s2">return </span><span class="s1">hlo.BitcastConvertOp(</span>
+          <span class="s1">ir.RankedTensorType.get([]</span><span class="s2">, </span><span class="s1">etype)</span><span class="s2">,</span>
+          <span class="s1">hlo.ConvertOp(ir.RankedTensorType.get([]</span><span class="s2">, </span><span class="s1">word_type)</span><span class="s2">, </span><span class="s1">st)).result</span>
+
+    <span class="s0"># Unpacks the second element of a double_word_type.</span>
+    <span class="s2">def </span><span class="s1">snd(t</span><span class="s2">, </span><span class="s1">t_aval):</span>
+      <span class="s2">return </span><span class="s1">hlo.BitcastConvertOp(</span>
+          <span class="s1">mlir.aval_to_ir_type(t_aval.update(dtype=dtype))</span><span class="s2">,</span>
+          <span class="s1">hlo.ConvertOp(mlir.aval_to_ir_type(t_aval.update(dtype=word_dtype))</span><span class="s2">, </span><span class="s1">t)).result</span>
+
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s0"># The double-word trick above only works if we have a sufficiently large</span>
+    <span class="s0"># type. As an alternative, we can pack two half words into a single word,</span>
+    <span class="s0"># at the cost of precision.</span>
+    <span class="s0"># TODO(b/73062247): add support for tuple reductions and remove this case.</span>
+    <span class="s1">warnings.warn(</span><span class="s4">&quot;Using reduced precision for gradient of reduce-window &quot;</span>
+                  <span class="s4">&quot;min/max operator to work around missing XLA support for &quot;</span>
+                  <span class="s4">&quot;pair-reductions. This is likely from a second or &quot;</span>
+                  <span class="s4">&quot;higher derivative of a max-pooling operation.&quot;</span><span class="s1">)</span>
+    <span class="s1">r_nbits = nbits // </span><span class="s5">2</span>
+    <span class="s0"># Drop/round the bottom mantissa bits.</span>
+    <span class="s1">nexp = dtypes.finfo(dtype).nexp</span>
+    <span class="s1">nmant = r_nbits - nexp - </span><span class="s5">1</span>
+
+    <span class="s1">double_word_dtype = word_dtype = lax._UINT_DTYPES[nbits]</span>
+    <span class="s1">double_word_type = word_type = mlir.dtype_to_ir_type(word_dtype)  </span><span class="s0"># type: ignore</span>
+
+    <span class="s0"># Packs two values into a double_word_type.</span>
+    <span class="s2">def </span><span class="s1">pack(a</span><span class="s2">, </span><span class="s1">b</span><span class="s2">, </span><span class="s1">ab_aval):</span>
+      <span class="s1">word_type_ab_aval = ab_aval.update(dtype=word_dtype)</span>
+      <span class="s1">a = hlo.ReducePrecisionOp(a</span><span class="s2">, </span><span class="s1">exponent_bits=mlir.i32_attr(nexp)</span><span class="s2">,</span>
+                                <span class="s1">mantissa_bits=mlir.i32_attr(nmant))</span>
+      <span class="s1">b = hlo.ReducePrecisionOp(b</span><span class="s2">, </span><span class="s1">exponent_bits=mlir.i32_attr(nexp)</span><span class="s2">,</span>
+                                <span class="s1">mantissa_bits=mlir.i32_attr(nmant))</span>
+      <span class="s1">a = hlo.BitcastConvertOp(mlir.aval_to_ir_type(word_type_ab_aval)</span><span class="s2">, </span><span class="s1">a)</span>
+      <span class="s1">b = hlo.BitcastConvertOp(mlir.aval_to_ir_type(word_type_ab_aval)</span><span class="s2">, </span><span class="s1">b)</span>
+      <span class="s1">b = hlo.ShiftRightLogicalOp(</span>
+          <span class="s1">b</span><span class="s2">, </span><span class="s1">_broadcast_scalar_const(r_nbits</span><span class="s2">, </span><span class="s1">word_type_ab_aval))</span>
+      <span class="s2">return </span><span class="s1">hlo.OrOp(a</span><span class="s2">, </span><span class="s1">b)</span>
+
+    <span class="s0"># Unpacks the first element of a double_word_type.</span>
+    <span class="s2">def </span><span class="s1">fst(t):</span>
+      <span class="s2">assert not </span><span class="s1">ir.RankedTensorType(t.type).shape</span>
+      <span class="s1">st = hlo.AndOp(t</span><span class="s2">, </span><span class="s1">const(word_dtype</span><span class="s2">, </span><span class="s1">((</span><span class="s5">1 </span><span class="s1">&lt;&lt; r_nbits) - </span><span class="s5">1</span><span class="s1">) &lt;&lt; r_nbits))</span>
+      <span class="s2">return </span><span class="s1">hlo.BitcastConvertOp(ir.RankedTensorType.get([]</span><span class="s2">, </span><span class="s1">etype)</span><span class="s2">,</span>
+                                  <span class="s1">st).result</span>
+
+    <span class="s0"># Unpacks the second element of a double_word_type.</span>
+    <span class="s2">def </span><span class="s1">snd(t</span><span class="s2">, </span><span class="s1">t_aval):</span>
+      <span class="s2">return </span><span class="s1">hlo.BitcastConvertOp(</span>
+          <span class="s1">mlir.aval_to_ir_type(t_aval.update(dtype=dtype))</span><span class="s2">,</span>
+          <span class="s1">hlo.ShiftLeftOp(t</span><span class="s2">, </span><span class="s1">_broadcast_scalar_const(r_nbits</span><span class="s2">, </span><span class="s1">t_aval.update(dtype=word_dtype)))</span>
+          <span class="s1">).result</span>
+
+  <span class="s2">assert </span><span class="s1">select_prim </span><span class="s2">is </span><span class="s1">lax.ge_p </span><span class="s2">or </span><span class="s1">select_prim </span><span class="s2">is </span><span class="s1">lax.le_p</span><span class="s2">, </span><span class="s1">select_prim</span>
+  <span class="s1">init = -np.inf </span><span class="s2">if </span><span class="s1">select_prim </span><span class="s2">is </span><span class="s1">lax.ge_p </span><span class="s2">else </span><span class="s1">np.inf</span>
+  <span class="s1">double_word_out_aval = out_aval.update(dtype=double_word_dtype)</span>
+  <span class="s1">rw = hlo.ReduceWindowOp(</span>
+      <span class="s1">[mlir.aval_to_ir_type(double_word_out_aval)]</span><span class="s2">,</span>
+      <span class="s1">pack(operand</span><span class="s2">, </span><span class="s1">tangents</span><span class="s2">, </span><span class="s1">operand_aval)</span><span class="s2">,</span>
+      <span class="s1">pack(const(dtype</span><span class="s2">, </span><span class="s1">init)</span><span class="s2">, </span><span class="s1">const(dtype</span><span class="s2">, </span><span class="s5">0</span><span class="s1">)</span><span class="s2">, </span><span class="s1">core.ShapedArray(()</span><span class="s2">, </span><span class="s1">dtype))</span><span class="s2">,</span>
+      <span class="s1">mlir.dense_int_elements(window_dimensions)</span><span class="s2">,</span>
+      <span class="s1">window_strides=mlir.dense_int_elements(window_strides)</span><span class="s2">,</span>
+      <span class="s1">base_dilations=mlir.dense_int_elements(base_dilation)</span><span class="s2">,</span>
+      <span class="s1">window_dilations=mlir.dense_int_elements(window_dilation)</span><span class="s2">,</span>
+      <span class="s1">padding=ir.DenseIntElementsAttr.get(np.asarray(padding</span><span class="s2">, </span><span class="s1">np.int64)</span><span class="s2">,</span>
+                                          <span class="s1">shape=(len(padding)</span><span class="s2">, </span><span class="s5">2</span><span class="s1">)))</span>
+  <span class="s1">scalar_type = ir.RankedTensorType.get([]</span><span class="s2">, </span><span class="s1">double_word_type)</span>
+  <span class="s1">reducer = rw.regions[</span><span class="s5">0</span><span class="s1">].blocks.append(scalar_type</span><span class="s2">, </span><span class="s1">scalar_type)</span>
+  <span class="s2">with </span><span class="s1">ir.InsertionPoint(reducer):</span>
+    <span class="s1">x</span><span class="s2">, </span><span class="s1">y = reducer.arguments</span>
+    <span class="s2">assert </span><span class="s1">select_prim </span><span class="s2">is </span><span class="s1">lax.ge_p </span><span class="s2">or </span><span class="s1">select_prim </span><span class="s2">is </span><span class="s1">lax.le_p</span>
+    <span class="s1">cmp_op = </span><span class="s4">&quot;GE&quot; </span><span class="s2">if </span><span class="s1">select_prim </span><span class="s2">is </span><span class="s1">lax.ge_p </span><span class="s2">else </span><span class="s4">&quot;LE&quot;</span>
+    <span class="s1">out = hlo.SelectOp(mlir.compare_hlo(fst(x)</span><span class="s2">, </span><span class="s1">fst(y)</span><span class="s2">, </span><span class="s1">cmp_op)</span><span class="s2">, </span><span class="s1">x</span><span class="s2">, </span><span class="s1">y)</span>
+    <span class="s1">hlo.ReturnOp(out)</span>
+  <span class="s2">return </span><span class="s1">[snd(rw.result</span><span class="s2">, </span><span class="s1">double_word_out_aval)]</span>
+
+<span class="s0"># TODO(phawkins): use this translation rule on all platforms.</span>
+<span class="s2">def </span><span class="s1">_select_and_gather_add_using_variadic_reducewindow(</span>
+    <span class="s1">tangents</span><span class="s2">, </span><span class="s1">operand</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">select_prim</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">, </span><span class="s1">window_strides</span><span class="s2">,</span>
+    <span class="s1">padding</span><span class="s2">, </span><span class="s1">base_dilation</span><span class="s2">, </span><span class="s1">window_dilation):</span>
+  <span class="s2">def </span><span class="s1">reducer(x</span><span class="s2">, </span><span class="s1">y):</span>
+    <span class="s1">kx</span><span class="s2">, </span><span class="s1">vx = x</span>
+    <span class="s1">ky</span><span class="s2">, </span><span class="s1">vy = y</span>
+    <span class="s1">which = select_prim.bind(kx</span><span class="s2">, </span><span class="s1">ky)</span>
+    <span class="s2">return </span><span class="s1">(lax.select(which</span><span class="s2">, </span><span class="s1">kx</span><span class="s2">, </span><span class="s1">ky)</span><span class="s2">, </span><span class="s1">lax.select(which</span><span class="s2">, </span><span class="s1">vx</span><span class="s2">, </span><span class="s1">vy))</span>
+
+  <span class="s2">assert </span><span class="s1">select_prim </span><span class="s2">is </span><span class="s1">lax.ge_p </span><span class="s2">or </span><span class="s1">select_prim </span><span class="s2">is </span><span class="s1">lax.le_p</span><span class="s2">, </span><span class="s1">select_prim</span>
+  <span class="s1">init = -np.inf </span><span class="s2">if </span><span class="s1">select_prim </span><span class="s2">is </span><span class="s1">lax.ge_p </span><span class="s2">else </span><span class="s1">np.inf</span>
+  <span class="s1">_</span><span class="s2">, </span><span class="s1">out = reduce_window(</span>
+    <span class="s1">(operand</span><span class="s2">, </span><span class="s1">tangents)</span><span class="s2">,</span>
+    <span class="s1">(np.array(init</span><span class="s2">, </span><span class="s1">dtype=operand.dtype)</span><span class="s2">, </span><span class="s1">np.array(</span><span class="s5">0</span><span class="s2">, </span><span class="s1">dtype=operand.dtype))</span><span class="s2">,</span>
+    <span class="s1">reducer</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">, </span><span class="s1">window_strides</span><span class="s2">, </span><span class="s1">padding</span><span class="s2">, </span><span class="s1">base_dilation</span><span class="s2">,</span>
+    <span class="s1">window_dilation)</span>
+  <span class="s2">return </span><span class="s1">out</span>
+
+<span class="s2">def </span><span class="s1">_select_and_gather_add_jvp(</span>
+    <span class="s1">primals</span><span class="s2">, </span><span class="s1">tangents</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">select_prim</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">, </span><span class="s1">window_strides</span><span class="s2">,</span>
+    <span class="s1">padding</span><span class="s2">, </span><span class="s1">base_dilation</span><span class="s2">, </span><span class="s1">window_dilation):</span>
+  <span class="s1">source</span><span class="s2">, </span><span class="s1">operand = primals</span>
+  <span class="s1">g_source</span><span class="s2">, </span><span class="s1">g_operand = tangents</span>
+  <span class="s1">val_out = _select_and_gather_add(</span>
+      <span class="s1">source</span><span class="s2">, </span><span class="s1">operand</span><span class="s2">, </span><span class="s1">select_prim</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">, </span><span class="s1">window_strides</span><span class="s2">,</span>
+      <span class="s1">padding</span><span class="s2">, </span><span class="s1">base_dilation</span><span class="s2">, </span><span class="s1">window_dilation)</span>
+  <span class="s2">del </span><span class="s1">g_operand</span>
+  <span class="s2">if </span><span class="s1">type(g_source) </span><span class="s2">is </span><span class="s1">ad_util.Zero:</span>
+    <span class="s1">tangent_out = ad_util.Zero.from_value(val_out)</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s1">tangent_out = _select_and_gather_add(</span>
+        <span class="s1">g_source</span><span class="s2">, </span><span class="s1">operand</span><span class="s2">, </span><span class="s1">select_prim</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">,</span>
+        <span class="s1">window_strides</span><span class="s2">, </span><span class="s1">padding</span><span class="s2">, </span><span class="s1">base_dilation</span><span class="s2">, </span><span class="s1">window_dilation)</span>
+  <span class="s2">return </span><span class="s1">val_out</span><span class="s2">, </span><span class="s1">tangent_out</span>
+
+<span class="s2">def </span><span class="s1">_select_and_gather_add_transpose(</span>
+    <span class="s1">t</span><span class="s2">, </span><span class="s1">tangents</span><span class="s2">, </span><span class="s1">operand</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">select_prim</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">, </span><span class="s1">window_strides</span><span class="s2">,</span>
+    <span class="s1">padding</span><span class="s2">, </span><span class="s1">base_dilation</span><span class="s2">, </span><span class="s1">window_dilation):</span>
+  <span class="s2">assert </span><span class="s1">select_prim </span><span class="s2">in </span><span class="s1">(lax.le_p</span><span class="s2">, </span><span class="s1">lax.ge_p)</span>
+  <span class="s2">assert </span><span class="s1">(ad.is_undefined_primal(tangents) </span><span class="s2">and</span>
+          <span class="s2">not </span><span class="s1">ad.is_undefined_primal(operand))</span>
+  <span class="s2">if </span><span class="s1">any(d != </span><span class="s5">1 </span><span class="s2">for </span><span class="s1">d </span><span class="s2">in </span><span class="s1">window_dilation):</span>
+    <span class="s1">msg = (</span><span class="s4">&quot;VJP not implemented for select_and_gather (MaxPool) with window &quot;</span>
+           <span class="s4">&quot;dilation, got window_dilation={}.&quot;</span><span class="s1">)</span>
+    <span class="s2">raise </span><span class="s1">NotImplementedError(msg.format(window_dilation))</span>
+  <span class="s2">if </span><span class="s1">type(t) </span><span class="s2">is </span><span class="s1">ad_util.Zero:</span>
+    <span class="s2">return </span><span class="s1">[ad_util.Zero(tangents.aval)</span><span class="s2">, None</span><span class="s1">]</span>
+  <span class="s1">has_base_dilation = any(d != </span><span class="s5">1 </span><span class="s2">for </span><span class="s1">d </span><span class="s2">in </span><span class="s1">base_dilation)</span>
+  <span class="s2">if </span><span class="s1">has_base_dilation:</span>
+    <span class="s1">select_identity = (lax._get_max_identity </span><span class="s2">if </span><span class="s1">select_prim </span><span class="s2">is </span><span class="s1">lax.ge_p</span>
+                       <span class="s2">else </span><span class="s1">lax._get_min_identity)</span>
+    <span class="s1">operand = lax.pad(operand</span><span class="s2">, </span><span class="s1">select_identity(operand.dtype)</span><span class="s2">,</span>
+                      <span class="s1">tuple((</span><span class="s5">0</span><span class="s2">, </span><span class="s5">0</span><span class="s2">, </span><span class="s1">d - </span><span class="s5">1</span><span class="s1">) </span><span class="s2">for </span><span class="s1">d </span><span class="s2">in </span><span class="s1">base_dilation))</span>
+  <span class="s1">result = _select_and_scatter_add(t</span><span class="s2">, </span><span class="s1">operand</span><span class="s2">, </span><span class="s1">select_prim</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">,</span>
+                                   <span class="s1">window_strides</span><span class="s2">, </span><span class="s1">padding)</span>
+  <span class="s2">if </span><span class="s1">has_base_dilation:</span>
+    <span class="s1">result = slicing.slice(result</span><span class="s2">, </span><span class="s1">(</span><span class="s5">0</span><span class="s2">,</span><span class="s1">) * len(result.shape)</span><span class="s2">, </span><span class="s1">result.shape</span><span class="s2">,</span>
+                           <span class="s1">base_dilation)</span>
+  <span class="s2">return </span><span class="s1">[result</span><span class="s2">, None</span><span class="s1">]</span>
+
+<span class="s2">def </span><span class="s1">_select_and_gather_add_batching_rule(</span>
+    <span class="s1">batched_args</span><span class="s2">, </span><span class="s1">batch_dims</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">select_prim</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">, </span><span class="s1">window_strides</span><span class="s2">,</span>
+    <span class="s1">padding</span><span class="s2">, </span><span class="s1">base_dilation</span><span class="s2">, </span><span class="s1">window_dilation):</span>
+  <span class="s1">t</span><span class="s2">, </span><span class="s1">x = batched_args</span>
+  <span class="s1">t_bdim</span><span class="s2">, </span><span class="s1">x_bdim = batch_dims</span>
+  <span class="s1">size = next(a.shape[bdim] </span><span class="s2">for </span><span class="s1">a</span><span class="s2">, </span><span class="s1">bdim </span><span class="s2">in </span><span class="s1">zip(batched_args</span><span class="s2">, </span><span class="s1">batch_dims)</span>
+              <span class="s2">if </span><span class="s1">bdim </span><span class="s2">is not None</span><span class="s1">)</span>
+  <span class="s1">t = batching.bdim_at_front(t</span><span class="s2">, </span><span class="s1">t_bdim</span><span class="s2">, </span><span class="s1">size)</span>
+  <span class="s1">x = batching.bdim_at_front(x</span><span class="s2">, </span><span class="s1">x_bdim</span><span class="s2">, </span><span class="s1">size)</span>
+  <span class="s1">window_dimensions = (</span><span class="s5">1</span><span class="s2">,</span><span class="s1">) + window_dimensions</span>
+  <span class="s1">window_strides = (</span><span class="s5">1</span><span class="s2">,</span><span class="s1">) + window_strides</span>
+  <span class="s1">padding = ((</span><span class="s5">0</span><span class="s2">, </span><span class="s5">0</span><span class="s1">)</span><span class="s2">,</span><span class="s1">) + padding</span>
+  <span class="s1">base_dilation = (</span><span class="s5">1</span><span class="s2">,</span><span class="s1">) + base_dilation</span>
+  <span class="s1">window_dilation = (</span><span class="s5">1</span><span class="s2">,</span><span class="s1">) + window_dilation</span>
+  <span class="s1">out = _select_and_gather_add(t</span><span class="s2">, </span><span class="s1">x</span><span class="s2">, </span><span class="s1">select_prim</span><span class="s2">, </span><span class="s1">window_dimensions</span><span class="s2">,</span>
+                               <span class="s1">window_strides</span><span class="s2">, </span><span class="s1">padding</span><span class="s2">, </span><span class="s1">base_dilation</span><span class="s2">,</span>
+                               <span class="s1">window_dilation)</span>
+  <span class="s2">return </span><span class="s1">(out</span><span class="s2">, </span><span class="s5">0</span><span class="s1">)</span>
+
+
+<span class="s1">select_and_gather_add_p = lax.standard_primitive(</span>
+    <span class="s1">_select_and_gather_add_shape_rule</span><span class="s2">, </span><span class="s1">lax._input_dtype</span><span class="s2">,</span>
+    <span class="s4">'select_and_gather_add'</span><span class="s1">)</span>
+<span class="s1">ad.primitive_jvps[select_and_gather_add_p] = _select_and_gather_add_jvp</span>
+<span class="s1">ad.primitive_transposes[select_and_gather_add_p] = \</span>
+  <span class="s1">_select_and_gather_add_transpose</span>
+<span class="s1">batching.primitive_batchers[select_and_gather_add_p] = \</span>
+  <span class="s1">_select_and_gather_add_batching_rule</span>
+
+<span class="s1">mlir.register_lowering(select_and_gather_add_p</span><span class="s2">, </span><span class="s1">mlir.lower_fun(</span>
+    <span class="s1">_select_and_gather_add_using_variadic_reducewindow</span><span class="s2">,</span>
+    <span class="s1">multiple_results=</span><span class="s2">False</span><span class="s1">))</span>
+
+<span class="s0"># TODO(b/183233858): use variadic reducewindow on GPU, when implemented.</span>
+<span class="s1">mlir.register_lowering(</span>
+    <span class="s1">select_and_gather_add_p</span><span class="s2">,</span>
+    <span class="s1">_select_and_gather_add_lowering</span><span class="s2">,</span>
+    <span class="s1">platform=</span><span class="s4">&quot;gpu&quot;</span><span class="s1">)</span>
+</pre>
+</body>
+</html>

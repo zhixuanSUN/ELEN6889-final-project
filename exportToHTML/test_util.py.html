@@ -1,0 +1,194 @@
+<html>
+<head>
+<title>test_util.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test_util.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2021 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+<span class="s2">&quot;&quot;&quot;Sparse test utilities.&quot;&quot;&quot;</span>
+<span class="s3">import </span><span class="s1">functools</span>
+<span class="s3">from </span><span class="s1">typing </span><span class="s3">import </span><span class="s1">Any</span><span class="s3">, </span><span class="s1">Callable</span><span class="s3">, </span><span class="s1">Sequence</span><span class="s3">, </span><span class="s1">Union</span>
+
+<span class="s3">import </span><span class="s1">numpy </span><span class="s3">as </span><span class="s1">np</span>
+
+<span class="s3">import </span><span class="s1">jax</span>
+<span class="s3">from </span><span class="s1">jax </span><span class="s3">import </span><span class="s1">lax</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">api</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">dispatch</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">test_util </span><span class="s3">as </span><span class="s1">jtu</span>
+<span class="s3">from </span><span class="s1">jax._src.typing </span><span class="s3">import </span><span class="s1">DTypeLike</span>
+<span class="s3">from </span><span class="s1">jax </span><span class="s3">import </span><span class="s1">tree_util</span>
+<span class="s3">from </span><span class="s1">jax.util </span><span class="s3">import </span><span class="s1">safe_zip</span><span class="s3">, </span><span class="s1">split_list</span>
+<span class="s3">from </span><span class="s1">jax.experimental </span><span class="s3">import </span><span class="s1">sparse</span>
+<span class="s3">from </span><span class="s1">jax.experimental.sparse </span><span class="s3">import </span><span class="s1">bcoo </span><span class="s3">as </span><span class="s1">sparse_bcoo</span>
+<span class="s3">from </span><span class="s1">jax.experimental.sparse </span><span class="s3">import </span><span class="s1">bcsr </span><span class="s3">as </span><span class="s1">sparse_bcsr</span>
+<span class="s3">import </span><span class="s1">jax.numpy </span><span class="s3">as </span><span class="s1">jnp</span>
+
+
+<span class="s3">def </span><span class="s1">is_sparse(x):</span>
+  <span class="s3">return </span><span class="s1">isinstance(x</span><span class="s3">, </span><span class="s1">sparse.JAXSparse)</span>
+
+
+<span class="s3">class </span><span class="s1">SparseTestCase(jtu.JaxTestCase):</span>
+  <span class="s3">def </span><span class="s1">assertSparseArraysEquivalent(self</span><span class="s3">, </span><span class="s1">x</span><span class="s3">, </span><span class="s1">y</span><span class="s3">, </span><span class="s1">*</span><span class="s3">, </span><span class="s1">check_dtypes=</span><span class="s3">True, </span><span class="s1">atol=</span><span class="s3">None,</span>
+                                   <span class="s1">rtol=</span><span class="s3">None, </span><span class="s1">canonicalize_dtypes=</span><span class="s3">True, </span><span class="s1">err_msg=</span><span class="s4">''</span><span class="s1">):</span>
+    <span class="s1">x_bufs</span><span class="s3">, </span><span class="s1">x_tree = tree_util.tree_flatten(x)</span>
+    <span class="s1">y_bufs</span><span class="s3">, </span><span class="s1">y_tree = tree_util.tree_flatten(y)</span>
+
+    <span class="s1">self.assertEqual(x_tree</span><span class="s3">, </span><span class="s1">y_tree)</span>
+    <span class="s1">self.assertAllClose(x_bufs</span><span class="s3">, </span><span class="s1">y_bufs</span><span class="s3">, </span><span class="s1">check_dtypes=check_dtypes</span><span class="s3">, </span><span class="s1">atol=atol</span><span class="s3">, </span><span class="s1">rtol=rtol</span><span class="s3">,</span>
+                        <span class="s1">canonicalize_dtypes=canonicalize_dtypes</span><span class="s3">, </span><span class="s1">err_msg=err_msg)</span>
+
+  <span class="s3">def </span><span class="s1">_CheckAgainstDense(self</span><span class="s3">, </span><span class="s1">dense_op</span><span class="s3">, </span><span class="s1">sparse_op</span><span class="s3">, </span><span class="s1">args_maker</span><span class="s3">, </span><span class="s1">check_jit=</span><span class="s3">True,</span>
+                         <span class="s1">check_dtypes=</span><span class="s3">True, </span><span class="s1">tol=</span><span class="s3">None, </span><span class="s1">atol=</span><span class="s3">None, </span><span class="s1">rtol=</span><span class="s3">None,</span>
+                         <span class="s1">canonicalize_dtypes=</span><span class="s3">True</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot;Check an operation against a dense equivalent&quot;&quot;&quot;</span>
+    <span class="s1">sparse_args = args_maker()</span>
+    <span class="s1">dense_args = tree_util.tree_map(sparse.todense</span><span class="s3">, </span><span class="s1">sparse_args</span><span class="s3">, </span><span class="s1">is_leaf=is_sparse)</span>
+    <span class="s1">expected = dense_op(*dense_args)</span>
+
+    <span class="s1">sparse_ans = sparse_op(*sparse_args)</span>
+    <span class="s1">actual = tree_util.tree_map(sparse.todense</span><span class="s3">, </span><span class="s1">sparse_ans</span><span class="s3">, </span><span class="s1">is_leaf=is_sparse)</span>
+
+    <span class="s1">self.assertAllClose(expected</span><span class="s3">, </span><span class="s1">actual</span><span class="s3">, </span><span class="s1">check_dtypes=check_dtypes</span><span class="s3">,</span>
+                        <span class="s1">atol=atol </span><span class="s3">or </span><span class="s1">tol</span><span class="s3">, </span><span class="s1">rtol=rtol </span><span class="s3">or </span><span class="s1">tol</span><span class="s3">,</span>
+                        <span class="s1">canonicalize_dtypes=canonicalize_dtypes)</span>
+    <span class="s3">if </span><span class="s1">check_jit:</span>
+      <span class="s1">sparse_ans_jit = jax.jit(sparse_op)(*sparse_args)</span>
+      <span class="s1">self.assertSparseArraysEquivalent(sparse_ans</span><span class="s3">, </span><span class="s1">sparse_ans_jit</span><span class="s3">,</span>
+                                        <span class="s1">atol=atol </span><span class="s3">or </span><span class="s1">tol</span><span class="s3">, </span><span class="s1">rtol=rtol </span><span class="s3">or </span><span class="s1">tol)</span>
+
+  <span class="s3">def </span><span class="s1">_CheckGradsSparse(self</span><span class="s3">, </span><span class="s1">dense_fun</span><span class="s3">, </span><span class="s1">sparse_fun</span><span class="s3">, </span><span class="s1">args_maker</span><span class="s3">, </span><span class="s1">*</span><span class="s3">,</span>
+                        <span class="s1">argnums=</span><span class="s3">None, </span><span class="s1">modes=(</span><span class="s4">'fwd'</span><span class="s3">, </span><span class="s4">'rev'</span><span class="s1">)</span><span class="s3">, </span><span class="s1">atol=</span><span class="s3">None, </span><span class="s1">rtol=</span><span class="s3">None</span><span class="s1">):</span>
+    <span class="s3">assert </span><span class="s1">all(mode </span><span class="s3">in </span><span class="s1">[</span><span class="s4">'fwd'</span><span class="s3">, </span><span class="s4">'rev'</span><span class="s1">] </span><span class="s3">for </span><span class="s1">mode </span><span class="s3">in </span><span class="s1">modes)</span>
+
+    <span class="s1">args = args_maker()</span>
+    <span class="s1">args_flat</span><span class="s3">, </span><span class="s1">tree = tree_util.tree_flatten(args)</span>
+    <span class="s1">num_bufs = [len(tree_util.tree_flatten(arg)[</span><span class="s5">0</span><span class="s1">]) </span><span class="s3">for </span><span class="s1">arg </span><span class="s3">in </span><span class="s1">args]</span>
+    <span class="s1">argnums_flat = np.cumsum([</span><span class="s5">0</span><span class="s3">, </span><span class="s1">*num_bufs[:-</span><span class="s5">1</span><span class="s1">]]).tolist()</span>
+    <span class="s3">if </span><span class="s1">argnums </span><span class="s3">is not None</span><span class="s1">:</span>
+      <span class="s1">argnums_flat = [argnums_flat[n] </span><span class="s3">for </span><span class="s1">n </span><span class="s3">in </span><span class="s1">argnums]</span>
+
+    <span class="s3">def </span><span class="s1">dense_fun_flat(*args_flat):</span>
+      <span class="s1">args = tree_util.tree_unflatten(tree</span><span class="s3">, </span><span class="s1">args_flat)</span>
+      <span class="s1">args_dense = tree_util.tree_map(sparse.todense</span><span class="s3">, </span><span class="s1">args</span><span class="s3">, </span><span class="s1">is_leaf=is_sparse)</span>
+      <span class="s3">return </span><span class="s1">dense_fun(*args_dense)</span>
+
+    <span class="s3">def </span><span class="s1">sparse_fun_flat(*args_flat):</span>
+      <span class="s1">out = sparse_fun(*tree_util.tree_unflatten(tree</span><span class="s3">, </span><span class="s1">args_flat))</span>
+      <span class="s3">return </span><span class="s1">tree_util.tree_map(sparse.todense</span><span class="s3">, </span><span class="s1">out</span><span class="s3">, </span><span class="s1">is_leaf=is_sparse)</span>
+
+    <span class="s3">if </span><span class="s4">'rev' </span><span class="s3">in </span><span class="s1">modes:</span>
+      <span class="s1">result_de = jax.jacrev(dense_fun_flat</span><span class="s3">, </span><span class="s1">argnums=argnums_flat)(*args_flat)</span>
+      <span class="s1">result_sp = jax.jacrev(sparse_fun_flat</span><span class="s3">, </span><span class="s1">argnums=argnums_flat)(*args_flat)</span>
+      <span class="s1">self.assertAllClose(result_de</span><span class="s3">, </span><span class="s1">result_sp</span><span class="s3">, </span><span class="s1">atol=atol</span><span class="s3">, </span><span class="s1">rtol=rtol)</span>
+
+    <span class="s3">if </span><span class="s4">'fwd' </span><span class="s3">in </span><span class="s1">modes:</span>
+      <span class="s1">result_de = jax.jacfwd(dense_fun_flat</span><span class="s3">, </span><span class="s1">argnums=argnums_flat)(*args_flat)</span>
+      <span class="s1">result_sp = jax.jacfwd(sparse_fun_flat</span><span class="s3">, </span><span class="s1">argnums=argnums_flat)(*args_flat)</span>
+      <span class="s1">self.assertAllClose(result_de</span><span class="s3">, </span><span class="s1">result_sp</span><span class="s3">, </span><span class="s1">atol=atol</span><span class="s3">, </span><span class="s1">rtol=rtol)</span>
+
+  <span class="s3">def </span><span class="s1">_random_bdims(self</span><span class="s3">, </span><span class="s1">*args):</span>
+    <span class="s1">rng = self.rng()</span>
+    <span class="s3">return </span><span class="s1">[rng.randint(</span><span class="s5">0</span><span class="s3">, </span><span class="s1">arg + </span><span class="s5">1</span><span class="s1">) </span><span class="s3">for </span><span class="s1">arg </span><span class="s3">in </span><span class="s1">args]</span>
+
+  <span class="s3">def </span><span class="s1">_CheckBatchingSparse(self</span><span class="s3">, </span><span class="s1">dense_fun</span><span class="s3">, </span><span class="s1">sparse_fun</span><span class="s3">, </span><span class="s1">args_maker</span><span class="s3">, </span><span class="s1">*</span><span class="s3">, </span><span class="s1">batch_size=</span><span class="s5">3</span><span class="s3">, </span><span class="s1">bdims=</span><span class="s3">None,</span>
+                           <span class="s1">check_jit=</span><span class="s3">False, </span><span class="s1">check_dtypes=</span><span class="s3">True, </span><span class="s1">tol=</span><span class="s3">None, </span><span class="s1">atol=</span><span class="s3">None, </span><span class="s1">rtol=</span><span class="s3">None,</span>
+                           <span class="s1">canonicalize_dtypes=</span><span class="s3">True</span><span class="s1">):</span>
+    <span class="s3">if </span><span class="s1">bdims </span><span class="s3">is None</span><span class="s1">:</span>
+      <span class="s1">bdims = self._random_bdims(*(arg.n_batch </span><span class="s3">if </span><span class="s1">is_sparse(arg) </span><span class="s3">else </span><span class="s1">arg.ndim</span>
+                                   <span class="s3">for </span><span class="s1">arg </span><span class="s3">in </span><span class="s1">args_maker()))</span>
+    <span class="s3">def </span><span class="s1">concat(args</span><span class="s3">, </span><span class="s1">bdim):</span>
+      <span class="s3">return </span><span class="s1">sparse.sparsify(functools.partial(lax.concatenate</span><span class="s3">, </span><span class="s1">dimension=bdim))(args)</span>
+    <span class="s3">def </span><span class="s1">expand(arg</span><span class="s3">, </span><span class="s1">bdim):</span>
+      <span class="s3">return </span><span class="s1">sparse.sparsify(functools.partial(lax.expand_dims</span><span class="s3">, </span><span class="s1">dimensions=[bdim]))(arg)</span>
+    <span class="s3">def </span><span class="s1">batched_args_maker():</span>
+      <span class="s1">args = list(zip(*(args_maker() </span><span class="s3">for </span><span class="s1">_ </span><span class="s3">in </span><span class="s1">range(batch_size))))</span>
+      <span class="s3">return </span><span class="s1">[arg[</span><span class="s5">0</span><span class="s1">] </span><span class="s3">if </span><span class="s1">bdim </span><span class="s3">is None else </span><span class="s1">concat([expand(x</span><span class="s3">, </span><span class="s1">bdim) </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">arg]</span><span class="s3">, </span><span class="s1">bdim)</span>
+              <span class="s3">for </span><span class="s1">arg</span><span class="s3">, </span><span class="s1">bdim </span><span class="s3">in </span><span class="s1">safe_zip(args</span><span class="s3">, </span><span class="s1">bdims)]</span>
+    <span class="s1">self._CheckAgainstDense(jax.vmap(dense_fun</span><span class="s3">, </span><span class="s1">bdims)</span><span class="s3">, </span><span class="s1">jax.vmap(sparse_fun</span><span class="s3">, </span><span class="s1">bdims)</span><span class="s3">, </span><span class="s1">batched_args_maker</span><span class="s3">,</span>
+                            <span class="s1">check_dtypes=check_dtypes</span><span class="s3">, </span><span class="s1">tol=tol</span><span class="s3">, </span><span class="s1">atol=atol</span><span class="s3">, </span><span class="s1">rtol=rtol</span><span class="s3">, </span><span class="s1">check_jit=check_jit</span><span class="s3">,</span>
+                            <span class="s1">canonicalize_dtypes=canonicalize_dtypes)</span>
+
+<span class="s3">def </span><span class="s1">_rand_sparse(shape: Sequence[int]</span><span class="s3">, </span><span class="s1">dtype: DTypeLike</span><span class="s3">, </span><span class="s1">*</span><span class="s3">,</span>
+                 <span class="s1">rng: np.random.RandomState</span><span class="s3">, </span><span class="s1">rand_method: Callable[...</span><span class="s3">, </span><span class="s1">Any]</span><span class="s3">,</span>
+                 <span class="s1">nse: Union[int</span><span class="s3">, </span><span class="s1">float]</span><span class="s3">, </span><span class="s1">n_batch: int</span><span class="s3">, </span><span class="s1">n_dense: int</span><span class="s3">,</span>
+                 <span class="s1">sparse_format: str) -&gt; Union[sparse.BCOO</span><span class="s3">, </span><span class="s1">sparse.BCSR]:</span>
+  <span class="s3">if </span><span class="s1">sparse_format </span><span class="s3">not in </span><span class="s1">[</span><span class="s4">'bcoo'</span><span class="s3">, </span><span class="s4">'bcsr'</span><span class="s1">]:</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">f&quot;Sparse format </span><span class="s3">{</span><span class="s1">sparse_format</span><span class="s3">} </span><span class="s4">not supported.&quot;</span><span class="s1">)</span>
+
+  <span class="s1">n_sparse = len(shape) - n_batch - n_dense</span>
+
+  <span class="s3">if </span><span class="s1">n_sparse &lt; </span><span class="s5">0 </span><span class="s3">or </span><span class="s1">n_batch &lt; </span><span class="s5">0 </span><span class="s3">or </span><span class="s1">n_dense &lt; </span><span class="s5">0</span><span class="s1">:</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">f&quot;Invalid parameters: </span><span class="s3">{</span><span class="s1">shape=</span><span class="s3">} {</span><span class="s1">n_batch=</span><span class="s3">} {</span><span class="s1">n_sparse=</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+
+  <span class="s3">if </span><span class="s1">sparse_format == </span><span class="s4">'bcsr' </span><span class="s3">and </span><span class="s1">n_sparse != </span><span class="s5">2</span><span class="s1">:</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;bcsr array must have 2 sparse dimensions; &quot;</span>
+                     <span class="s4">f&quot;</span><span class="s3">{</span><span class="s1">n_sparse</span><span class="s3">} </span><span class="s4">is given.&quot;</span><span class="s1">)</span>
+
+  <span class="s1">batch_shape</span><span class="s3">, </span><span class="s1">sparse_shape</span><span class="s3">, </span><span class="s1">dense_shape = split_list(shape</span><span class="s3">,</span>
+                                                      <span class="s1">[n_batch</span><span class="s3">, </span><span class="s1">n_sparse])</span>
+  <span class="s3">if </span><span class="s5">0 </span><span class="s1">&lt;= nse &lt; </span><span class="s5">1</span><span class="s1">:</span>
+    <span class="s1">nse = int(np.ceil(nse * np.prod(sparse_shape)))</span>
+  <span class="s1">data_rng = rand_method(rng)</span>
+  <span class="s1">data_shape = (*batch_shape</span><span class="s3">, </span><span class="s1">nse</span><span class="s3">, </span><span class="s1">*dense_shape)</span>
+  <span class="s1">data = jnp.array(data_rng(data_shape</span><span class="s3">, </span><span class="s1">dtype))</span>
+
+  <span class="s3">if </span><span class="s1">sparse_format == </span><span class="s4">'bcoo'</span><span class="s1">:</span>
+    <span class="s1">index_shape = (*batch_shape</span><span class="s3">, </span><span class="s1">nse</span><span class="s3">, </span><span class="s1">n_sparse)</span>
+    <span class="s1">indices = jnp.array(</span>
+      <span class="s1">rng.randint(</span><span class="s5">0</span><span class="s3">, </span><span class="s1">sparse_shape</span><span class="s3">, </span><span class="s1">size=index_shape</span><span class="s3">, </span><span class="s1">dtype=np.int32))  </span><span class="s0"># type: ignore[arg-type]</span>
+    <span class="s3">return </span><span class="s1">sparse.BCOO((data</span><span class="s3">, </span><span class="s1">indices)</span><span class="s3">, </span><span class="s1">shape=shape)</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s1">index_shape = (*batch_shape</span><span class="s3">, </span><span class="s1">nse)</span>
+    <span class="s1">indptr_shape = (*batch_shape</span><span class="s3">, </span><span class="s1">sparse_shape[</span><span class="s5">0</span><span class="s1">] + </span><span class="s5">1</span><span class="s1">)</span>
+    <span class="s1">indices = jnp.array(</span>
+      <span class="s1">rng.randint(</span><span class="s5">0</span><span class="s3">, </span><span class="s1">sparse_shape[</span><span class="s5">1</span><span class="s1">]</span><span class="s3">, </span><span class="s1">size=index_shape</span><span class="s3">, </span><span class="s1">dtype=np.int32))  </span><span class="s0"># type: ignore[arg-type]</span>
+    <span class="s1">indptr = jnp.sort(</span>
+      <span class="s1">rng.randint(</span><span class="s5">0</span><span class="s3">, </span><span class="s1">nse + </span><span class="s5">1</span><span class="s3">, </span><span class="s1">size=indptr_shape</span><span class="s3">, </span><span class="s1">dtype=np.int32)</span><span class="s3">, </span><span class="s1">axis=-</span><span class="s5">1</span><span class="s1">)  </span><span class="s0"># type: ignore[call-overload]</span>
+    <span class="s1">indptr = indptr.at[...</span><span class="s3">, </span><span class="s5">0</span><span class="s1">].set(</span><span class="s5">0</span><span class="s1">)</span>
+    <span class="s3">return </span><span class="s1">sparse.BCSR((data</span><span class="s3">, </span><span class="s1">indices</span><span class="s3">, </span><span class="s1">indptr)</span><span class="s3">, </span><span class="s1">shape=shape)</span>
+
+<span class="s3">def </span><span class="s1">rand_bcoo(rng: np.random.RandomState</span><span class="s3">,</span>
+              <span class="s1">rand_method: Callable[...</span><span class="s3">, </span><span class="s1">Any]=jtu.rand_default</span><span class="s3">,</span>
+              <span class="s1">nse: Union[int</span><span class="s3">, </span><span class="s1">float]=</span><span class="s5">0.5</span><span class="s3">, </span><span class="s1">n_batch: int=</span><span class="s5">0</span><span class="s3">, </span><span class="s1">n_dense: int=</span><span class="s5">0</span><span class="s1">):</span>
+  <span class="s2">&quot;&quot;&quot;Generates a random BCOO array.&quot;&quot;&quot;</span>
+  <span class="s3">return </span><span class="s1">functools.partial(_rand_sparse</span><span class="s3">, </span><span class="s1">rng=rng</span><span class="s3">, </span><span class="s1">rand_method=rand_method</span><span class="s3">,</span>
+                           <span class="s1">nse=nse</span><span class="s3">, </span><span class="s1">n_batch=n_batch</span><span class="s3">, </span><span class="s1">n_dense=n_dense</span><span class="s3">,</span>
+                           <span class="s1">sparse_format=</span><span class="s4">'bcoo'</span><span class="s1">)</span>
+
+<span class="s3">def </span><span class="s1">rand_bcsr(rng: np.random.RandomState</span><span class="s3">,</span>
+              <span class="s1">rand_method: Callable[...</span><span class="s3">, </span><span class="s1">Any]=jtu.rand_default</span><span class="s3">,</span>
+              <span class="s1">nse: Union[int</span><span class="s3">, </span><span class="s1">float]=</span><span class="s5">0.5</span><span class="s3">, </span><span class="s1">n_batch: int=</span><span class="s5">0</span><span class="s3">, </span><span class="s1">n_dense: int=</span><span class="s5">0</span><span class="s1">):</span>
+  <span class="s2">&quot;&quot;&quot;Generates a random BCSR array.&quot;&quot;&quot;</span>
+  <span class="s3">return </span><span class="s1">functools.partial(_rand_sparse</span><span class="s3">, </span><span class="s1">rng=rng</span><span class="s3">, </span><span class="s1">rand_method=rand_method</span><span class="s3">,</span>
+                           <span class="s1">nse=nse</span><span class="s3">, </span><span class="s1">n_batch=n_batch</span><span class="s3">, </span><span class="s1">n_dense=n_dense</span><span class="s3">,</span>
+                           <span class="s1">sparse_format=</span><span class="s4">'bcsr'</span><span class="s1">)</span>
+</pre>
+</body>
+</html>

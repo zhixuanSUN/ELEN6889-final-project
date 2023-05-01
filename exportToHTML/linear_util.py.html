@@ -1,0 +1,389 @@
+<html>
+<head>
+<title>linear_util.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+linear_util.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2018 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s2">&quot;&quot;&quot; 
+Utilities for defining functions composed with transformations. 
+ 
+For example, 
+ 
+   from jax._src import linear_util as lu 
+ 
+   wf = lu.wrap_init(f)  # Produce a WrappedFun for applying transformations on `f` 
+ 
+A `WrappedFun` object represents a function `f`, together with a sequence of 
+nested transformations that are to be applied to the positional and keyword 
+arguments at call time and function return values at return time. 
+A transformation can take some static positional arguments that are given 
+at the wrapping time, and may also return some auxiliary output: 
+ 
+    wf, aux_out_thunk = trans1(wf, static_arg) 
+ 
+We can call the transformed function. First, the transformation is applied 
+to the dynamic args and keyword args to produce new dynamic and keyword args. 
+Then the underlying function is called and the transformation is applied to 
+the results. 
+If there are multiple transformations, they form a stack. The arguments are 
+transformed first with the last applied transformation; the results are 
+transformed first with the first applied transformation. 
+ 
+    res = wf.call_wrapped(dynamic_args, kwargs) 
+    # Now `aux_out_thunk()` is the auxiliary output. 
+ 
+A transformation is written as a generator function that takes zero or more 
+static positional arguments (given when the transformation is instantiated), 
+along with positional and keyword arguments to be transformed. 
+The generator will yield twice: 
+ 
+    @lu.transformation_with_aux 
+    def trans1(static_arg, *dynamic_args, **kwargs): 
+      ... 
+      # First yield: pair of transformed (args, kwargs). Get back the results. 
+      results = yield (new_dynamic_args, new_kwargs) 
+      ... 
+      # Second yield: pair of (transformed results, and auxiliary output) 
+      yield new_results, auxiliary_output 
+ 
+ 
+`WrappedFun` objects explicitly represent the set of transformations so that 
+they can be used as dictionary keys for memoization. `WrappedFun` objects 
+compare as equal only if they compute the same function. The static and the 
+dynamic positional arguments for the generators, and also the auxiliary output 
+data must be immutable, because it will be stored in function memoization tables. 
+&quot;&quot;&quot;</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">annotations</span>
+
+<span class="s3">from </span><span class="s1">functools </span><span class="s3">import </span><span class="s1">partial</span>
+<span class="s3">from </span><span class="s1">typing </span><span class="s3">import </span><span class="s1">Any</span><span class="s3">, </span><span class="s1">Tuple</span><span class="s3">, </span><span class="s1">Callable</span><span class="s3">, </span><span class="s1">Optional</span><span class="s3">, </span><span class="s1">NamedTuple</span>
+<span class="s3">import </span><span class="s1">weakref</span>
+
+<span class="s3">from </span><span class="s1">jax._src.tree_util </span><span class="s3">import </span><span class="s1">tree_map</span>
+<span class="s3">from </span><span class="s1">jax._src.config </span><span class="s3">import </span><span class="s1">config</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">core</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">traceback_util</span>
+<span class="s3">from </span><span class="s1">jax._src.util </span><span class="s3">import </span><span class="s1">curry</span>
+
+<span class="s1">traceback_util.register_exclusion(__file__)</span>
+
+
+<span class="s3">class </span><span class="s1">StoreException(Exception): </span><span class="s3">pass</span>
+
+
+<span class="s3">class </span><span class="s1">EmptyStoreValue: </span><span class="s3">pass</span>
+<span class="s1">_EMPTY_STORE_VALUE = EmptyStoreValue()</span>
+
+<span class="s3">class </span><span class="s1">Store:</span>
+  <span class="s2">&quot;&quot;&quot;Storage for a value, with checks for overwriting or reading empty store.&quot;&quot;&quot;</span>
+  <span class="s1">__slots__ = (</span><span class="s4">&quot;_val&quot;</span><span class="s3">,</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">__init__(self):</span>
+    <span class="s1">self._val = _EMPTY_STORE_VALUE</span>
+
+  <span class="s3">def </span><span class="s1">store(self</span><span class="s3">, </span><span class="s1">val):</span>
+    <span class="s3">if </span><span class="s1">self._val </span><span class="s3">is not </span><span class="s1">_EMPTY_STORE_VALUE:</span>
+      <span class="s3">raise </span><span class="s1">StoreException(</span><span class="s4">&quot;Store occupied&quot;</span><span class="s1">)</span>
+    <span class="s1">self._val = val</span>
+
+  <span class="s3">def </span><span class="s1">reset(self):</span>
+    <span class="s0"># This should only be called in exceptional circumstances (e.g. debugging).</span>
+    <span class="s1">self._val = _EMPTY_STORE_VALUE</span>
+
+  <span class="s1">@property</span>
+  <span class="s3">def </span><span class="s1">val(self):</span>
+    <span class="s3">if not </span><span class="s1">self:</span>
+      <span class="s3">raise </span><span class="s1">StoreException(</span><span class="s4">&quot;Store empty&quot;</span><span class="s1">)</span>
+    <span class="s3">return </span><span class="s1">self._val</span>
+
+  <span class="s3">def </span><span class="s1">__nonzero__(self):</span>
+    <span class="s3">return </span><span class="s1">self._val </span><span class="s3">is not </span><span class="s1">_EMPTY_STORE_VALUE</span>
+
+  <span class="s1">__bool__ = __nonzero__</span>
+
+
+<span class="s3">class </span><span class="s1">WrappedFun:</span>
+  <span class="s2">&quot;&quot;&quot;Represents a function `f` to which `transforms` are to be applied. 
+ 
+  Args: 
+    f: the function to be transformed. 
+    transforms: a list of `(gen, gen_static_args)` tuples representing 
+      transformations to apply to `f.` Here `gen` is a generator function and 
+      `gen_static_args` is a tuple of static arguments for the generator. See 
+      description at the start of this module for the expected behavior of the 
+      generator. 
+    stores: a list of out_store for the auxiliary output of the `transforms`. 
+    params: extra parameters to pass as keyword arguments to `f`, along with the 
+      transformed keyword arguments. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">__slots__ = (</span><span class="s4">&quot;f&quot;</span><span class="s3">, </span><span class="s4">&quot;transforms&quot;</span><span class="s3">, </span><span class="s4">&quot;stores&quot;</span><span class="s3">, </span><span class="s4">&quot;params&quot;</span><span class="s3">, </span><span class="s4">&quot;in_type&quot;</span><span class="s3">, </span><span class="s4">&quot;debug_info&quot;</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">f</span><span class="s3">, </span><span class="s1">transforms</span><span class="s3">, </span><span class="s1">stores</span><span class="s3">, </span><span class="s1">params</span><span class="s3">, </span><span class="s1">in_type</span><span class="s3">, </span><span class="s1">debug_info):</span>
+    <span class="s1">self.f = f</span>
+    <span class="s1">self.transforms = transforms</span>
+    <span class="s1">self.stores = stores</span>
+    <span class="s1">self.params = params</span>
+    <span class="s1">self.in_type = in_type</span>
+    <span class="s1">self.debug_info = debug_info</span>
+
+  <span class="s1">@property</span>
+  <span class="s3">def </span><span class="s1">__name__(self):</span>
+    <span class="s3">return </span><span class="s1">getattr(self.f</span><span class="s3">, </span><span class="s4">'__name__'</span><span class="s3">, </span><span class="s4">'&lt;unnamed wrapped function&gt;'</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">wrap(self</span><span class="s3">, </span><span class="s1">gen</span><span class="s3">, </span><span class="s1">gen_static_args</span><span class="s3">, </span><span class="s1">out_store) -&gt; WrappedFun:</span>
+    <span class="s2">&quot;&quot;&quot;Add another transform and its store.&quot;&quot;&quot;</span>
+    <span class="s3">return </span><span class="s1">WrappedFun(self.f</span><span class="s3">, </span><span class="s1">((gen</span><span class="s3">, </span><span class="s1">gen_static_args)</span><span class="s3">,</span><span class="s1">) + self.transforms</span><span class="s3">,</span>
+                      <span class="s1">(out_store</span><span class="s3">,</span><span class="s1">) + self.stores</span><span class="s3">, </span><span class="s1">self.params</span><span class="s3">, None, None</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">populate_stores(self</span><span class="s3">, </span><span class="s1">stores):</span>
+    <span class="s2">&quot;&quot;&quot;Copy the values from the `stores` into `self.stores`.&quot;&quot;&quot;</span>
+    <span class="s3">for </span><span class="s1">self_store</span><span class="s3">, </span><span class="s1">other_store </span><span class="s3">in </span><span class="s1">zip(self.stores</span><span class="s3">, </span><span class="s1">stores):</span>
+      <span class="s3">if </span><span class="s1">self_store </span><span class="s3">is not None</span><span class="s1">:</span>
+        <span class="s1">self_store.store(other_store.val)</span>
+
+  <span class="s3">def </span><span class="s1">call_wrapped(self</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+    <span class="s2">&quot;&quot;&quot;Calls the underlying function, applying the transforms. 
+ 
+    The positional `args` and keyword `kwargs` are passed to the first 
+    transformation generator. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">stack = []</span>
+    <span class="s3">for </span><span class="s1">(gen</span><span class="s3">, </span><span class="s1">gen_static_args)</span><span class="s3">, </span><span class="s1">out_store </span><span class="s3">in </span><span class="s1">zip(self.transforms</span><span class="s3">, </span><span class="s1">self.stores):</span>
+      <span class="s1">gen = gen(*(gen_static_args + tuple(args))</span><span class="s3">, </span><span class="s1">**kwargs)</span>
+      <span class="s1">args</span><span class="s3">, </span><span class="s1">kwargs = next(gen)</span>
+      <span class="s1">stack.append((gen</span><span class="s3">, </span><span class="s1">out_store))</span>
+    <span class="s1">gen = gen_static_args = out_store = </span><span class="s3">None</span>
+
+    <span class="s3">try</span><span class="s1">:</span>
+      <span class="s1">ans = self.f(*args</span><span class="s3">, </span><span class="s1">**dict(self.params</span><span class="s3">, </span><span class="s1">**kwargs))</span>
+    <span class="s3">except</span><span class="s1">:</span>
+      <span class="s0"># Some transformations yield from inside context managers, so we have to</span>
+      <span class="s0"># interrupt them before reraising the exception. Otherwise they will only</span>
+      <span class="s0"># get garbage-collected at some later time, running their cleanup tasks</span>
+      <span class="s0"># only after this exception is handled, which can corrupt the global</span>
+      <span class="s0"># state.</span>
+      <span class="s3">while </span><span class="s1">stack:</span>
+        <span class="s1">stack.pop()[</span><span class="s5">0</span><span class="s1">].close()</span>
+      <span class="s3">raise</span>
+
+    <span class="s1">args = kwargs = </span><span class="s3">None</span>
+    <span class="s3">while </span><span class="s1">stack:</span>
+      <span class="s1">gen</span><span class="s3">, </span><span class="s1">out_store = stack.pop()</span>
+      <span class="s3">try</span><span class="s1">:</span>
+        <span class="s1">ans = gen.send(ans)</span>
+      <span class="s3">except</span><span class="s1">:</span>
+        <span class="s0"># As above does for the first half of the transformation, exceptions</span>
+        <span class="s0"># raised in the second half of the transformation also require us to</span>
+        <span class="s0"># clean up references here.</span>
+        <span class="s3">while </span><span class="s1">stack:</span>
+          <span class="s1">stack.pop()[</span><span class="s5">0</span><span class="s1">].close()</span>
+        <span class="s3">raise</span>
+      <span class="s3">if </span><span class="s1">out_store </span><span class="s3">is not None</span><span class="s1">:</span>
+        <span class="s1">ans</span><span class="s3">, </span><span class="s1">side = ans</span>
+        <span class="s1">out_store.store(side)</span>
+
+    <span class="s3">return </span><span class="s1">ans</span>
+
+  <span class="s3">def </span><span class="s1">__repr__(self):</span>
+    <span class="s3">def </span><span class="s1">transform_to_str(x):</span>
+      <span class="s1">i</span><span class="s3">, </span><span class="s1">(gen</span><span class="s3">, </span><span class="s1">args) = x</span>
+      <span class="s3">return </span><span class="s4">f&quot;</span><span class="s3">{</span><span class="s1">i</span><span class="s3">}   </span><span class="s4">: </span><span class="s3">{</span><span class="s1">fun_name(gen)</span><span class="s3">}   {</span><span class="s1">fun_name(args)</span><span class="s3">}</span><span class="s4">&quot;</span>
+    <span class="s1">transformation_stack = map(transform_to_str</span><span class="s3">, </span><span class="s1">enumerate(self.transforms))</span>
+    <span class="s3">return </span><span class="s4">&quot;Wrapped function:</span><span class="s3">\n</span><span class="s4">&quot; </span><span class="s1">+ </span><span class="s4">'</span><span class="s3">\n</span><span class="s4">'</span><span class="s1">.join(transformation_stack) + </span><span class="s4">'</span><span class="s3">\n</span><span class="s4">Core: ' </span><span class="s1">+ fun_name(self.f) + </span><span class="s4">'</span><span class="s3">\n</span><span class="s4">'</span>
+
+  <span class="s3">def </span><span class="s1">__hash__(self):</span>
+    <span class="s3">return </span><span class="s1">hash((self.f</span><span class="s3">, </span><span class="s1">self.transforms</span><span class="s3">, </span><span class="s1">self.params</span><span class="s3">, </span><span class="s1">self.in_type</span><span class="s3">,</span>
+                 <span class="s1">self.debug_info))</span>
+
+  <span class="s3">def </span><span class="s1">__eq__(self</span><span class="s3">, </span><span class="s1">other):</span>
+    <span class="s3">return </span><span class="s1">(self.f == other.f </span><span class="s3">and </span><span class="s1">self.transforms == other.transforms </span><span class="s3">and</span>
+            <span class="s1">self.params == other.params </span><span class="s3">and </span><span class="s1">self.in_type == other.in_type </span><span class="s3">and</span>
+            <span class="s1">self.debug_info == other.debug_info)</span>
+
+<span class="s1">@curry</span>
+<span class="s3">def </span><span class="s1">transformation(gen</span><span class="s3">, </span><span class="s1">fun: WrappedFun</span><span class="s3">, </span><span class="s1">*gen_static_args) -&gt; WrappedFun:</span>
+  <span class="s2">&quot;&quot;&quot;Adds one more transformation to a WrappedFun. 
+  Args: 
+    gen: the transformation generator function 
+    fun: a WrappedFun on which to apply the transformation 
+    gen_static_args: static args for the generator function 
+  &quot;&quot;&quot;</span>
+  <span class="s3">return </span><span class="s1">fun.wrap(gen</span><span class="s3">, </span><span class="s1">gen_static_args</span><span class="s3">, None</span><span class="s1">)</span>
+
+<span class="s1">@curry</span>
+<span class="s3">def </span><span class="s1">transformation_with_aux(gen</span><span class="s3">, </span><span class="s1">fun: WrappedFun</span><span class="s3">, </span><span class="s1">*gen_static_args) -&gt; Tuple[WrappedFun</span><span class="s3">, </span><span class="s1">Any]:</span>
+  <span class="s2">&quot;&quot;&quot;Adds one more transformation with auxiliary output to a WrappedFun.&quot;&quot;&quot;</span>
+  <span class="s1">out_store = Store()</span>
+  <span class="s1">out_thunk = </span><span class="s3">lambda</span><span class="s1">: out_store.val</span>
+  <span class="s3">return </span><span class="s1">fun.wrap(gen</span><span class="s3">, </span><span class="s1">gen_static_args</span><span class="s3">, </span><span class="s1">out_store)</span><span class="s3">, </span><span class="s1">out_thunk</span>
+
+<span class="s3">def </span><span class="s1">fun_name(f):</span>
+  <span class="s3">try</span><span class="s1">:</span>
+    <span class="s3">return </span><span class="s1">f.__name__</span>
+  <span class="s3">except</span><span class="s1">:</span>
+    <span class="s3">return </span><span class="s1">str(f)</span>
+
+<span class="s3">def </span><span class="s1">wrap_init(f</span><span class="s3">, </span><span class="s1">params=</span><span class="s3">None</span><span class="s1">) -&gt; WrappedFun:</span>
+  <span class="s2">&quot;&quot;&quot;Wraps function `f` as a `WrappedFun`, suitable for transformation.&quot;&quot;&quot;</span>
+  <span class="s1">params = () </span><span class="s3">if </span><span class="s1">params </span><span class="s3">is None else </span><span class="s1">tuple(sorted(params.items()))</span>
+  <span class="s3">return </span><span class="s1">WrappedFun(f</span><span class="s3">, </span><span class="s1">()</span><span class="s3">, </span><span class="s1">()</span><span class="s3">, </span><span class="s1">params</span><span class="s3">, None, None</span><span class="s1">)</span>
+
+
+<span class="s3">def </span><span class="s1">annotate(f: WrappedFun</span><span class="s3">, </span><span class="s1">in_type: Optional[core.InputType]) -&gt; WrappedFun:</span>
+  <span class="s3">assert </span><span class="s1">f.in_type </span><span class="s3">is None</span>
+  <span class="s3">if </span><span class="s1">in_type </span><span class="s3">is None</span><span class="s1">:</span>
+    <span class="s3">return </span><span class="s1">f</span>
+  <span class="s1">_check_input_type(in_type)</span>
+  <span class="s3">return </span><span class="s1">WrappedFun(f.f</span><span class="s3">, </span><span class="s1">f.transforms</span><span class="s3">, </span><span class="s1">f.stores</span><span class="s3">, </span><span class="s1">f.params</span><span class="s3">, </span><span class="s1">in_type</span><span class="s3">, </span><span class="s1">f.debug_info)</span>
+
+<span class="s3">def </span><span class="s1">_check_input_type(in_type: core.InputType) -&gt; </span><span class="s3">None</span><span class="s1">:</span>
+  <span class="s0"># Check that in_type is syntactically well-formed</span>
+  <span class="s3">assert </span><span class="s1">type(in_type) </span><span class="s3">is </span><span class="s1">tuple </span><span class="s3">and </span><span class="s1">all(type(e) </span><span class="s3">is </span><span class="s1">tuple </span><span class="s3">for </span><span class="s1">e </span><span class="s3">in </span><span class="s1">in_type)</span>
+  <span class="s3">assert </span><span class="s1">all(isinstance(a</span><span class="s3">, </span><span class="s1">core.AbstractValue) </span><span class="s3">and </span><span class="s1">type(b) </span><span class="s3">is </span><span class="s1">bool</span>
+             <span class="s3">and not </span><span class="s1">isinstance(a</span><span class="s3">, </span><span class="s1">core.ConcreteArray) </span><span class="s3">for </span><span class="s1">a</span><span class="s3">, </span><span class="s1">b </span><span class="s3">in </span><span class="s1">in_type)</span>
+
+  <span class="s3">def </span><span class="s1">valid_size(d) -&gt; bool:</span>
+    <span class="s3">if </span><span class="s1">isinstance(d</span><span class="s3">, </span><span class="s1">core.DBIdx) </span><span class="s3">and </span><span class="s1">type(d.val) </span><span class="s3">is </span><span class="s1">int </span><span class="s3">and </span><span class="s1">d.val &gt;= </span><span class="s5">0</span><span class="s1">:</span>
+      <span class="s3">return True</span>
+    <span class="s3">return </span><span class="s1">(isinstance(d</span><span class="s3">, </span><span class="s1">(int</span><span class="s3">, </span><span class="s1">core.DBIdx</span><span class="s3">, </span><span class="s1">core.DArray)) </span><span class="s3">and</span>
+            <span class="s1">(</span><span class="s3">not </span><span class="s1">isinstance(d</span><span class="s3">, </span><span class="s1">core.DArray) </span><span class="s3">or </span><span class="s1">type(d) </span><span class="s3">is </span><span class="s1">core.bint </span><span class="s3">and not </span><span class="s1">d.shape))</span>
+  <span class="s3">assert </span><span class="s1">all(valid_size(d) </span><span class="s3">for </span><span class="s1">a</span><span class="s3">, </span><span class="s1">_ </span><span class="s3">in </span><span class="s1">in_type </span><span class="s3">if </span><span class="s1">type(a) </span><span class="s3">is </span><span class="s1">core.DShapedArray</span>
+             <span class="s3">for </span><span class="s1">d </span><span class="s3">in </span><span class="s1">a.shape)</span>
+
+  <span class="s0"># Check that all DBIdx point to positions to the left of the input on which</span>
+  <span class="s0"># they appear.</span>
+  <span class="s3">assert </span><span class="s1">all(d.val &lt; i </span><span class="s3">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">(aval</span><span class="s3">, </span><span class="s1">_) </span><span class="s3">in </span><span class="s1">enumerate(in_type)</span>
+             <span class="s3">if </span><span class="s1">isinstance(aval</span><span class="s3">, </span><span class="s1">core.DShapedArray) </span><span class="s3">for </span><span class="s1">d </span><span class="s3">in </span><span class="s1">aval.shape</span>
+             <span class="s3">if </span><span class="s1">isinstance(d</span><span class="s3">, </span><span class="s1">core.DBIdx))</span>
+
+  <span class="s0"># Check that all implicit arguments have at least one DBIdx pointing to them.</span>
+  <span class="s1">provided = [e </span><span class="s3">for </span><span class="s1">_</span><span class="s3">, </span><span class="s1">e </span><span class="s3">in </span><span class="s1">in_type]</span>
+  <span class="s3">for </span><span class="s1">aval</span><span class="s3">, </span><span class="s1">_ </span><span class="s3">in </span><span class="s1">in_type:</span>
+    <span class="s3">if </span><span class="s1">type(aval) </span><span class="s3">is </span><span class="s1">core.DShapedArray:</span>
+      <span class="s3">for </span><span class="s1">d </span><span class="s3">in </span><span class="s1">aval.shape:</span>
+        <span class="s3">if </span><span class="s1">isinstance(d</span><span class="s3">, </span><span class="s1">core.DBIdx):</span>
+          <span class="s1">provided[d.val] = </span><span class="s3">True</span>
+  <span class="s3">assert </span><span class="s1">all(provided)</span>
+
+
+<span class="s3">class </span><span class="s1">TracingDebugInfo(NamedTuple):</span>
+  <span class="s0"># Packages up trace/staging-time debug info about a func and its parameters,</span>
+  <span class="s0"># formed just before staging to a jaxpr and read in trace-time error messages.</span>
+  <span class="s0"># TODO(mattjj): delete partial_eval.DebugInfo, replace all uses with this cls</span>
+  <span class="s1">traced_for: str             </span><span class="s0"># e.g. 'jit', 'scan', etc</span>
+  <span class="s1">func_src_info: str          </span><span class="s0"># e.g. f'{fun.__name__} at {filename}:{lineno}'</span>
+  <span class="s1">arg_names: Tuple[str</span><span class="s3">, </span><span class="s1">...]  </span><span class="s0"># e.g. ('args[0]', ... )</span>
+  <span class="s1">result_paths: Optional[Callable[[]</span><span class="s3">, </span><span class="s1">Tuple[str</span><span class="s3">, </span><span class="s1">...]]]</span>
+
+<span class="s3">def </span><span class="s1">add_debug_info(f: WrappedFun</span><span class="s3">, </span><span class="s1">debug_info: Optional[TracingDebugInfo]</span>
+                   <span class="s1">) -&gt; WrappedFun:</span>
+  <span class="s2">&quot;&quot;&quot;Produce a new WrappedFun with debug_info attached.&quot;&quot;&quot;</span>
+  <span class="s3">assert </span><span class="s1">f.debug_info </span><span class="s3">is None</span>
+  <span class="s3">if </span><span class="s1">debug_info </span><span class="s3">is None</span><span class="s1">:</span>
+    <span class="s3">return </span><span class="s1">f</span>
+  <span class="s3">return </span><span class="s1">WrappedFun(f.f</span><span class="s3">, </span><span class="s1">f.transforms</span><span class="s3">, </span><span class="s1">f.stores</span><span class="s3">, </span><span class="s1">f.params</span><span class="s3">, </span><span class="s1">f.in_type</span><span class="s3">, </span><span class="s1">debug_info)</span>
+
+
+<span class="s3">def </span><span class="s1">cache(call: Callable):</span>
+  <span class="s2">&quot;&quot;&quot;Memoization decorator for functions taking a WrappedFun as first argument. 
+ 
+  Args: 
+    call: a Python callable that takes a WrappedFun as its first argument. The 
+      underlying transforms and params on the WrappedFun are used as part of the 
+      memoization cache key. 
+ 
+  Returns: 
+     A memoized version of ``call``. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">fun_caches: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()</span>
+
+  <span class="s3">def </span><span class="s1">memoized_fun(fun: WrappedFun</span><span class="s3">, </span><span class="s1">*args):</span>
+    <span class="s1">cache = fun_caches.setdefault(fun.f</span><span class="s3">, </span><span class="s1">{})</span>
+    <span class="s3">if </span><span class="s1">config.jax_check_tracer_leaks:</span>
+      <span class="s1">key = (_copy_main_traces(fun.transforms)</span><span class="s3">, </span><span class="s1">fun.params</span><span class="s3">, </span><span class="s1">fun.in_type</span><span class="s3">, </span><span class="s1">args</span><span class="s3">,</span>
+             <span class="s1">config.x64_enabled</span><span class="s3">, </span><span class="s1">config.jax_default_device</span><span class="s3">,</span>
+             <span class="s1">config._trace_context())</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s1">key = (fun.transforms</span><span class="s3">, </span><span class="s1">fun.params</span><span class="s3">, </span><span class="s1">fun.in_type</span><span class="s3">, </span><span class="s1">args</span><span class="s3">, </span><span class="s1">config.x64_enabled</span><span class="s3">,</span>
+             <span class="s1">config.jax_default_device</span><span class="s3">, </span><span class="s1">config._trace_context())</span>
+    <span class="s1">result = cache.get(key</span><span class="s3">, None</span><span class="s1">)</span>
+    <span class="s3">if </span><span class="s1">result </span><span class="s3">is not None</span><span class="s1">:</span>
+      <span class="s1">ans</span><span class="s3">, </span><span class="s1">stores = result</span>
+      <span class="s1">fun.populate_stores(stores)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s1">ans = call(fun</span><span class="s3">, </span><span class="s1">*args)</span>
+      <span class="s1">cache[key] = (ans</span><span class="s3">, </span><span class="s1">fun.stores)</span>
+
+    <span class="s3">return </span><span class="s1">ans</span>
+
+  <span class="s3">def </span><span class="s1">_evict_function(f):</span>
+    <span class="s1">fun_caches.pop(f</span><span class="s3">, None</span><span class="s1">)</span>
+
+  <span class="s1">memoized_fun.cache_clear = fun_caches.clear  </span><span class="s0"># type: ignore</span>
+  <span class="s1">memoized_fun.evict_function = _evict_function  </span><span class="s0"># type: ignore</span>
+
+  <span class="s3">return </span><span class="s1">memoized_fun</span>
+
+<span class="s1">@partial(partial</span><span class="s3">, </span><span class="s1">tree_map)</span>
+<span class="s3">def </span><span class="s1">_copy_main_traces(x):</span>
+  <span class="s3">if </span><span class="s1">isinstance(x</span><span class="s3">, </span><span class="s1">core.MainTrace):</span>
+    <span class="s3">return </span><span class="s1">core.MainTrace(x.level</span><span class="s3">, </span><span class="s1">x.trace_type</span><span class="s3">, </span><span class="s1">**x.payload)</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s3">return </span><span class="s1">x</span>
+
+
+<span class="s1">@transformation</span>
+<span class="s3">def </span><span class="s1">hashable_partial(x</span><span class="s3">, </span><span class="s1">*args):</span>
+  <span class="s1">ans = </span><span class="s3">yield </span><span class="s1">(x</span><span class="s3">,</span><span class="s1">) + args</span><span class="s3">, </span><span class="s1">{}</span>
+  <span class="s3">yield </span><span class="s1">ans</span>
+
+
+<span class="s3">def </span><span class="s1">merge_linear_aux(aux1</span><span class="s3">, </span><span class="s1">aux2):</span>
+  <span class="s3">try</span><span class="s1">:</span>
+    <span class="s1">out1 = aux1()</span>
+  <span class="s3">except </span><span class="s1">StoreException:</span>
+    <span class="s0"># store 1 was not occupied, so store 2 better be</span>
+    <span class="s3">try</span><span class="s1">:</span>
+      <span class="s1">out2 = aux2()</span>
+    <span class="s3">except </span><span class="s1">StoreException:</span>
+      <span class="s3">raise </span><span class="s1">StoreException(</span><span class="s4">&quot;neither store occupied&quot;</span><span class="s1">) </span><span class="s3">from None</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s3">return False, </span><span class="s1">out2</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s0"># store 1 was occupied, so let's check store 2 is not occupied</span>
+    <span class="s3">try</span><span class="s1">:</span>
+      <span class="s1">out2 = aux2()</span>
+    <span class="s3">except </span><span class="s1">StoreException:</span>
+      <span class="s3">return True, </span><span class="s1">out1</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s3">raise </span><span class="s1">StoreException(</span><span class="s4">&quot;both stores occupied&quot;</span><span class="s1">)</span>
+</pre>
+</body>
+</html>

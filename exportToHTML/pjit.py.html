@@ -1,0 +1,98 @@
+<html>
+<head>
+<title>pjit.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+pjit.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2021 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s0"># flake8: noqa</span>
+
+<span class="s2">from </span><span class="s1">jax._src.pjit </span><span class="s2">import </span><span class="s1">(</span>
+  <span class="s1">AUTO </span><span class="s2">as </span><span class="s1">AUTO</span><span class="s2">,</span>
+  <span class="s1">ParsedPartitionSpec </span><span class="s2">as </span><span class="s1">ParsedPartitionSpec</span><span class="s2">,</span>
+  <span class="s1">get_array_mapping </span><span class="s2">as </span><span class="s1">get_array_mapping</span><span class="s2">,</span>
+  <span class="s1">hashable_pytree </span><span class="s2">as </span><span class="s1">hashable_pytree</span><span class="s2">,</span>
+  <span class="s1">parse_flatten_op_sharding </span><span class="s2">as </span><span class="s1">parse_flatten_op_sharding</span><span class="s2">,</span>
+  <span class="s1">pjit </span><span class="s2">as </span><span class="s1">pjit</span><span class="s2">,</span>
+  <span class="s1">pjit_p </span><span class="s2">as </span><span class="s1">pjit_p</span><span class="s2">,</span>
+  <span class="s1">with_sharding_constraint </span><span class="s2">as </span><span class="s1">with_sharding_constraint</span><span class="s2">,</span>
+<span class="s1">)</span>
+
+<span class="s2">from </span><span class="s1">jax._src.pjit </span><span class="s2">import </span><span class="s1">(_UNSPECIFIED</span><span class="s2">, </span><span class="s1">_prepare_axis_resources</span><span class="s2">,</span>
+                           <span class="s1">_get_op_sharding_from_executable</span><span class="s2">,</span>
+                           <span class="s1">_get_pspec_from_executable</span><span class="s2">, </span><span class="s1">_pjit_lower_cached</span><span class="s2">,</span>
+                           <span class="s1">_pjit_lower</span><span class="s2">, </span><span class="s1">_get_op_sharding</span><span class="s2">,</span>
+                           <span class="s1">_pjit_jaxpr</span><span class="s2">,</span>
+                           <span class="s1">_create_mesh_pspec_sharding_from_parsed_pspec</span><span class="s2">,</span>
+                           <span class="s1">_process_in_axis_resources)</span>
+
+
+<span class="s2">from </span><span class="s1">jax._src.pjit </span><span class="s2">import </span><span class="s1">(</span>
+  <span class="s1">NamedSharding </span><span class="s2">as </span><span class="s1">_deprecated_NamedSharding</span><span class="s2">,</span>
+  <span class="s1">PartitionSpec </span><span class="s2">as </span><span class="s1">_deprecated_PartitionSpec</span><span class="s2">,</span>
+<span class="s1">)</span>
+
+<span class="s2">import </span><span class="s1">typing</span>
+<span class="s2">if </span><span class="s1">typing.TYPE_CHECKING:</span>
+  <span class="s2">from </span><span class="s1">jax._src.pjit </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">NamedSharding </span><span class="s2">as </span><span class="s1">NamedSharding</span><span class="s2">,</span>
+    <span class="s1">PartitionSpec </span><span class="s2">as </span><span class="s1">PartitionSpec</span><span class="s2">,</span>
+  <span class="s1">)</span>
+<span class="s2">del </span><span class="s1">typing</span>
+
+<span class="s1">_deprecations = {</span>
+    <span class="s0"># Added Feb 13, 2023:</span>
+    <span class="s3">&quot;NamedSharding&quot;</span><span class="s1">: (</span>
+        <span class="s1">(</span>
+            <span class="s3">&quot;jax.experimental.pjit.NamedSharding is deprecated. Use &quot;</span>
+            <span class="s3">&quot;jax.sharding.NamedSharding.&quot;</span>
+        <span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">_deprecated_NamedSharding</span><span class="s2">,</span>
+    <span class="s1">)</span><span class="s2">,</span>
+    <span class="s3">&quot;PartitionSpec&quot;</span><span class="s1">: (</span>
+        <span class="s1">(</span>
+            <span class="s3">&quot;jax.experimental.pjit.PartitionSpec is deprecated. Use &quot;</span>
+            <span class="s3">&quot;jax.sharding.PartitionSpec.&quot;</span>
+        <span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">_deprecated_PartitionSpec</span><span class="s2">,</span>
+    <span class="s1">)</span><span class="s2">,</span>
+    <span class="s3">&quot;FROM_GDA&quot;</span><span class="s1">: (</span>
+        <span class="s1">(</span>
+            <span class="s3">&quot;jax.experimental.pjit.FROM_GDA has been removed. Please pass in&quot;</span>
+            <span class="s3">&quot; sharded jax.Arrays as input and remove the in_shardings argument&quot;</span>
+            <span class="s3">&quot; to pjit since pjit will infer the shardings from jax.Array.&quot;</span>
+        <span class="s1">)</span><span class="s2">,</span>
+        <span class="s2">None,</span>
+    <span class="s1">)</span><span class="s2">,</span>
+<span class="s1">}</span>
+
+<span class="s2">from </span><span class="s1">jax._src.deprecations </span><span class="s2">import </span><span class="s1">deprecation_getattr </span><span class="s2">as </span><span class="s1">_deprecation_getattr</span>
+<span class="s1">__getattr__ = _deprecation_getattr(__name__</span><span class="s2">, </span><span class="s1">_deprecations)</span>
+<span class="s2">del </span><span class="s1">_deprecation_getattr</span>
+</pre>
+</body>
+</html>

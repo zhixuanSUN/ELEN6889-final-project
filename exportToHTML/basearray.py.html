@@ -1,0 +1,90 @@
+<html>
+<head>
+<title>basearray.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #629755; font-style: italic;}
+.s4 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+basearray.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2022 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s0"># Note that type annotations for this file are defined in basearray.pyi</span>
+
+<span class="s2">import </span><span class="s1">abc</span>
+<span class="s2">import </span><span class="s1">numpy </span><span class="s2">as </span><span class="s1">np</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Union</span>
+
+<span class="s0"># Array is a type annotation for standard JAX arrays and tracers produced by</span>
+<span class="s0"># core functions in jax.lax and jax.numpy; it is not meant to include</span>
+<span class="s0"># future non-standard array types like KeyArray and BInt.</span>
+<span class="s2">class </span><span class="s1">Array(abc.ABC):</span>
+  <span class="s3">&quot;&quot;&quot;Array base class for JAX 
+ 
+  ``jax.Array`` is the public interface for instance checks and type annotation 
+  of JAX arrays and tracers. Its main applications are in instance checks and 
+  type annotations; for example:: 
+ 
+    x = jnp.arange(5) 
+    isinstance(x, jax.Array)  # returns True both inside and outside traced functions. 
+ 
+    def f(x: Array) -&gt; Array:  # type annotations are valid for traced and non-traced types. 
+      return x 
+ 
+  ``jax.Array`` should not be used directly for creation of arrays; instead you 
+  should use array creation routines offered in :mod:`jax.numpy`, such as 
+  :func:`jax.numpy.array`, :func:`jax.numpy.zeros`, :func:`jax.numpy.ones`, 
+  :func:`jax.numpy.full`, :func:`jax.numpy.arange`, etc. 
+  &quot;&quot;&quot;</span>
+  <span class="s0"># Note: abstract methods for this class are defined dynamically in</span>
+  <span class="s0"># lax_numpy.py</span>
+  <span class="s0"># For the sake of static type analysis, these definitions are mirrored in the</span>
+  <span class="s0"># associated basearray.pyi file.</span>
+
+  <span class="s1">__slots__ = [</span><span class="s4">'__weakref__'</span><span class="s1">]</span>
+
+  <span class="s0"># at property must be defined because we overwrite its docstring in</span>
+  <span class="s0"># lax_numpy.py</span>
+  <span class="s1">@property</span>
+  <span class="s2">def </span><span class="s1">at(self):</span>
+    <span class="s2">raise </span><span class="s1">NotImplementedError(</span><span class="s4">&quot;property must be defined in subclasses&quot;</span><span class="s1">)</span>
+
+
+<span class="s1">Array.__module__ = </span><span class="s4">&quot;jax&quot;</span>
+
+
+<span class="s0"># ArrayLike is a Union of all objects that can be implicitly converted to a</span>
+<span class="s0"># standard JAX array (i.e. not including future non-standard array types like</span>
+<span class="s0"># KeyArray and BInt). It's different than np.typing.ArrayLike in that it doesn't</span>
+<span class="s0"># accept arbitrary sequences, nor does it accept string data.</span>
+<span class="s1">ArrayLike = Union[</span>
+  <span class="s1">Array</span><span class="s2">,  </span><span class="s0"># JAX array type</span>
+  <span class="s1">np.ndarray</span><span class="s2">,  </span><span class="s0"># NumPy array type</span>
+  <span class="s1">np.bool_</span><span class="s2">, </span><span class="s1">np.number</span><span class="s2">,  </span><span class="s0"># NumPy scalar types</span>
+  <span class="s1">bool</span><span class="s2">, </span><span class="s1">int</span><span class="s2">, </span><span class="s1">float</span><span class="s2">, </span><span class="s1">complex</span><span class="s2">,  </span><span class="s0"># Python scalar types</span>
+<span class="s1">]</span>
+<span class="s1">ArrayLike.__doc__ = </span><span class="s4">&quot;Type annotation for JAX array-like objects.&quot;</span>
+</pre>
+</body>
+</html>

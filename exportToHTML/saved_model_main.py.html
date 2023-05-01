@@ -1,0 +1,229 @@
+<html>
+<head>
+<title>saved_model_main.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+saved_model_main.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2020 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+<span class="s2">&quot;&quot;&quot;Demonstrates training models and saving the result as a SavedModel. 
+ 
+By default, uses a pure JAX implementation of MNIST. There are flags to choose 
+a Flax CNN version of MNIST, or to skip the training and just test a 
+previously saved SavedModel. It is possible to save a batch-polymorphic 
+version of the model, or a model prepared for specific batch sizes. 
+ 
+Try --help to see all flags. 
+ 
+This file is used both as an executable, and as a library in two other examples. 
+See discussion in README.md. 
+&quot;&quot;&quot;</span>
+
+<span class="s3">import </span><span class="s1">logging</span>
+<span class="s3">import </span><span class="s1">os</span>
+
+<span class="s3">from </span><span class="s1">absl </span><span class="s3">import </span><span class="s1">app</span>
+<span class="s3">from </span><span class="s1">absl </span><span class="s3">import </span><span class="s1">flags</span>
+
+<span class="s3">from </span><span class="s1">jax.experimental.jax2tf.examples </span><span class="s3">import </span><span class="s1">mnist_lib  </span><span class="s0"># type: ignore</span>
+<span class="s3">from </span><span class="s1">jax.experimental.jax2tf.examples </span><span class="s3">import </span><span class="s1">saved_model_lib  </span><span class="s0"># type: ignore</span>
+
+<span class="s3">import </span><span class="s1">numpy </span><span class="s3">as </span><span class="s1">np</span>
+<span class="s3">import </span><span class="s1">tensorflow </span><span class="s3">as </span><span class="s1">tf  </span><span class="s0"># type: ignore</span>
+<span class="s3">import </span><span class="s1">tensorflow_datasets </span><span class="s3">as </span><span class="s1">tfds  </span><span class="s0"># type: ignore</span>
+
+<span class="s1">flags.DEFINE_enum(</span><span class="s4">&quot;model&quot;</span><span class="s3">, </span><span class="s4">&quot;mnist_flax&quot;</span><span class="s3">, </span><span class="s1">[</span><span class="s4">&quot;mnist_flax&quot;</span><span class="s3">, </span><span class="s4">&quot;mnist_pure_jax&quot;</span><span class="s1">]</span><span class="s3">,</span>
+                  <span class="s4">&quot;Which model to use.&quot;</span><span class="s1">)</span>
+<span class="s1">flags.DEFINE_boolean(</span><span class="s4">&quot;model_classifier_layer&quot;</span><span class="s3">, True,</span>
+                     <span class="s1">(</span><span class="s4">&quot;The model should include the classifier layer, or just &quot;</span>
+                      <span class="s4">&quot;the last layer of logits. Set this to False when you &quot;</span>
+                      <span class="s4">&quot;want to reuse the classifier-less model in a larger &quot;</span>
+                      <span class="s4">&quot;model. See keras_reuse_main.py and README.md.&quot;</span><span class="s1">))</span>
+<span class="s1">flags.DEFINE_string(</span><span class="s4">&quot;model_path&quot;</span><span class="s3">, </span><span class="s4">&quot;/tmp/jax2tf/saved_models&quot;</span><span class="s3">,</span>
+                    <span class="s4">&quot;Path under which to save the SavedModel.&quot;</span><span class="s1">)</span>
+<span class="s1">flags.DEFINE_integer(</span><span class="s4">&quot;model_version&quot;</span><span class="s3">, </span><span class="s5">1</span><span class="s3">,</span>
+                     <span class="s1">(</span><span class="s4">&quot;The version number for the SavedModel. Needed for &quot;</span>
+                      <span class="s4">&quot;serving, larger versions will take precedence&quot;</span><span class="s1">)</span><span class="s3">,</span>
+                     <span class="s1">lower_bound=</span><span class="s5">1</span><span class="s1">)</span>
+<span class="s1">flags.DEFINE_integer(</span><span class="s4">&quot;serving_batch_size&quot;</span><span class="s3">, </span><span class="s5">1</span><span class="s3">,</span>
+                     <span class="s4">&quot;For what batch size to prepare the serving signature. &quot;</span>
+                     <span class="s4">&quot;Use -1 for converting and saving with batch polymorphism.&quot;</span><span class="s1">)</span>
+<span class="s1">flags.register_validator(</span>
+    <span class="s4">&quot;serving_batch_size&quot;</span><span class="s3">,</span>
+    <span class="s3">lambda </span><span class="s1">serving_batch_size: serving_batch_size &gt; </span><span class="s5">0 </span><span class="s3">or </span><span class="s1">serving_batch_size == -</span><span class="s5">1</span><span class="s3">,</span>
+    <span class="s1">message=</span><span class="s4">&quot;--serving_batch_size must be either -1 or a positive integer.&quot;</span><span class="s1">)</span>
+
+<span class="s1">flags.DEFINE_integer(</span><span class="s4">&quot;num_epochs&quot;</span><span class="s3">, </span><span class="s5">3</span><span class="s3">, </span><span class="s4">&quot;For how many epochs to train.&quot;</span><span class="s3">,</span>
+                     <span class="s1">lower_bound=</span><span class="s5">1</span><span class="s1">)</span>
+<span class="s1">flags.DEFINE_boolean(</span>
+    <span class="s4">&quot;generate_model&quot;</span><span class="s3">, True,</span>
+    <span class="s4">&quot;Train and save a new model. Otherwise, use an existing SavedModel.&quot;</span><span class="s1">)</span>
+<span class="s1">flags.DEFINE_boolean(</span>
+    <span class="s4">&quot;compile_model&quot;</span><span class="s3">, True,</span>
+    <span class="s4">&quot;Enable TensorFlow jit_compiler for the SavedModel. This is &quot;</span>
+    <span class="s4">&quot;necessary if you want to use the model for TensorFlow serving.&quot;</span><span class="s1">)</span>
+<span class="s1">flags.DEFINE_boolean(</span><span class="s4">&quot;show_model&quot;</span><span class="s3">, True, </span><span class="s4">&quot;Show details of saved SavedModel.&quot;</span><span class="s1">)</span>
+<span class="s1">flags.DEFINE_boolean(</span>
+    <span class="s4">&quot;show_images&quot;</span><span class="s3">, False,</span>
+    <span class="s4">&quot;Plot some sample images with labels and inference results.&quot;</span><span class="s1">)</span>
+<span class="s1">flags.DEFINE_boolean(</span>
+    <span class="s4">&quot;test_savedmodel&quot;</span><span class="s3">, True,</span>
+    <span class="s4">&quot;Test TensorFlow inference using the SavedModel w.r.t. the JAX model.&quot;</span><span class="s1">)</span>
+
+<span class="s1">FLAGS = flags.FLAGS</span>
+
+
+<span class="s3">def </span><span class="s1">train_and_save():</span>
+  <span class="s1">logging.info(</span><span class="s4">&quot;Loading the MNIST TensorFlow dataset&quot;</span><span class="s1">)</span>
+  <span class="s1">train_ds = mnist_lib.load_mnist(</span>
+      <span class="s1">tfds.Split.TRAIN</span><span class="s3">, </span><span class="s1">batch_size=mnist_lib.train_batch_size)</span>
+  <span class="s1">test_ds = mnist_lib.load_mnist(</span>
+      <span class="s1">tfds.Split.TEST</span><span class="s3">, </span><span class="s1">batch_size=mnist_lib.test_batch_size)</span>
+
+  <span class="s3">if </span><span class="s1">FLAGS.show_images:</span>
+    <span class="s1">mnist_lib.plot_images(train_ds</span><span class="s3">, </span><span class="s5">1</span><span class="s3">, </span><span class="s5">5</span><span class="s3">, </span><span class="s4">&quot;Training images&quot;</span><span class="s3">, </span><span class="s1">inference_fn=</span><span class="s3">None</span><span class="s1">)</span>
+
+  <span class="s1">the_model_class = pick_model_class()</span>
+  <span class="s1">model_dir = savedmodel_dir(with_version=</span><span class="s3">True</span><span class="s1">)</span>
+
+  <span class="s3">if </span><span class="s1">FLAGS.generate_model:</span>
+    <span class="s1">model_descr = model_description()</span>
+    <span class="s1">logging.info(</span><span class="s4">&quot;Generating model for %s&quot;</span><span class="s3">, </span><span class="s1">model_descr)</span>
+    <span class="s1">(predict_fn</span><span class="s3">, </span><span class="s1">predict_params) = the_model_class.train(</span>
+        <span class="s1">train_ds</span><span class="s3">,</span>
+        <span class="s1">test_ds</span><span class="s3">,</span>
+        <span class="s1">FLAGS.num_epochs</span><span class="s3">,</span>
+        <span class="s1">with_classifier=FLAGS.model_classifier_layer)</span>
+
+    <span class="s3">if </span><span class="s1">FLAGS.serving_batch_size == -</span><span class="s5">1</span><span class="s1">:</span>
+      <span class="s0"># Batch-polymorphic SavedModel</span>
+      <span class="s1">input_signatures = [</span>
+          <span class="s1">tf.TensorSpec((</span><span class="s3">None,</span><span class="s1">) + mnist_lib.input_shape</span><span class="s3">, </span><span class="s1">tf.float32)</span><span class="s3">,</span>
+      <span class="s1">]</span>
+      <span class="s1">polymorphic_shapes = </span><span class="s4">&quot;(batch, ...)&quot;</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s1">input_signatures = [</span>
+          <span class="s0"># The first one will be the serving signature</span>
+          <span class="s1">tf.TensorSpec((FLAGS.serving_batch_size</span><span class="s3">,</span><span class="s1">) + mnist_lib.input_shape</span><span class="s3">,</span>
+                        <span class="s1">tf.float32)</span><span class="s3">,</span>
+          <span class="s1">tf.TensorSpec((mnist_lib.train_batch_size</span><span class="s3">,</span><span class="s1">) + mnist_lib.input_shape</span><span class="s3">,</span>
+                        <span class="s1">tf.float32)</span><span class="s3">,</span>
+          <span class="s1">tf.TensorSpec((mnist_lib.test_batch_size</span><span class="s3">,</span><span class="s1">) + mnist_lib.input_shape</span><span class="s3">,</span>
+                        <span class="s1">tf.float32)</span><span class="s3">,</span>
+      <span class="s1">]</span>
+      <span class="s1">polymorphic_shapes = </span><span class="s3">None</span>
+
+    <span class="s1">logging.info(</span><span class="s4">&quot;Saving model for %s&quot;</span><span class="s3">, </span><span class="s1">model_descr)</span>
+    <span class="s1">saved_model_lib.convert_and_save_model(</span>
+        <span class="s1">predict_fn</span><span class="s3">,</span>
+        <span class="s1">predict_params</span><span class="s3">,</span>
+        <span class="s1">model_dir</span><span class="s3">,</span>
+        <span class="s1">with_gradient=</span><span class="s3">True,</span>
+        <span class="s1">input_signatures=input_signatures</span><span class="s3">,</span>
+        <span class="s1">polymorphic_shapes=polymorphic_shapes</span><span class="s3">,</span>
+        <span class="s1">compile_model=FLAGS.compile_model)</span>
+
+    <span class="s3">if </span><span class="s1">FLAGS.test_savedmodel:</span>
+      <span class="s1">tf_accelerator</span><span class="s3">, </span><span class="s1">tolerances = tf_accelerator_and_tolerances()</span>
+      <span class="s3">with </span><span class="s1">tf.device(tf_accelerator):</span>
+        <span class="s1">logging.info(</span><span class="s4">&quot;Testing savedmodel&quot;</span><span class="s1">)</span>
+        <span class="s1">pure_restored_model = tf.saved_model.load(model_dir)</span>
+
+        <span class="s3">if </span><span class="s1">FLAGS.show_images </span><span class="s3">and </span><span class="s1">FLAGS.model_classifier_layer:</span>
+          <span class="s1">mnist_lib.plot_images(</span>
+              <span class="s1">test_ds</span><span class="s3">,</span>
+              <span class="s5">1</span><span class="s3">,</span>
+              <span class="s5">5</span><span class="s3">,</span>
+              <span class="s4">f&quot;Inference results for </span><span class="s3">{</span><span class="s1">model_descr</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s3">,</span>
+              <span class="s1">inference_fn=pure_restored_model)</span>
+
+        <span class="s1">test_input = np.ones(</span>
+            <span class="s1">(mnist_lib.test_batch_size</span><span class="s3">,</span><span class="s1">) + mnist_lib.input_shape</span><span class="s3">,</span>
+            <span class="s1">dtype=np.float32)</span>
+        <span class="s1">np.testing.assert_allclose(</span>
+            <span class="s1">pure_restored_model(tf.convert_to_tensor(test_input))</span><span class="s3">,</span>
+            <span class="s1">predict_fn(predict_params</span><span class="s3">, </span><span class="s1">test_input)</span><span class="s3">, </span><span class="s1">**tolerances)</span>
+
+  <span class="s3">if </span><span class="s1">FLAGS.show_model:</span>
+    <span class="s3">def </span><span class="s1">print_model(model_dir: str):</span>
+      <span class="s1">cmd = </span><span class="s4">f&quot;saved_model_cli show --all --dir </span><span class="s3">{</span><span class="s1">model_dir</span><span class="s3">}</span><span class="s4">&quot;</span>
+      <span class="s1">print(cmd)</span>
+      <span class="s1">os.system(cmd)</span>
+
+    <span class="s1">print_model(model_dir)</span>
+
+
+<span class="s3">def </span><span class="s1">pick_model_class():</span>
+  <span class="s2">&quot;&quot;&quot;Picks one of PureJaxMNIST or FlaxMNIST.&quot;&quot;&quot;</span>
+  <span class="s3">if </span><span class="s1">FLAGS.model == </span><span class="s4">&quot;mnist_pure_jax&quot;</span><span class="s1">:</span>
+    <span class="s3">return </span><span class="s1">mnist_lib.PureJaxMNIST</span>
+  <span class="s3">elif </span><span class="s1">FLAGS.model == </span><span class="s4">&quot;mnist_flax&quot;</span><span class="s1">:</span>
+    <span class="s3">return </span><span class="s1">mnist_lib.FlaxMNIST</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">f&quot;Unrecognized model: </span><span class="s3">{</span><span class="s1">FLAGS.model</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+
+
+<span class="s3">def </span><span class="s1">model_description() -&gt; str:</span>
+  <span class="s2">&quot;&quot;&quot;A short description of the picked model.&quot;&quot;&quot;</span>
+  <span class="s1">res = pick_model_class().name</span>
+  <span class="s3">if not </span><span class="s1">FLAGS.model_classifier_layer:</span>
+    <span class="s1">res += </span><span class="s4">&quot; (features_only)&quot;</span>
+  <span class="s3">return </span><span class="s1">res</span>
+
+
+<span class="s3">def </span><span class="s1">savedmodel_dir(with_version: bool = </span><span class="s3">True</span><span class="s1">) -&gt; str:</span>
+  <span class="s2">&quot;&quot;&quot;The directory where we save the SavedModel.&quot;&quot;&quot;</span>
+  <span class="s1">model_dir = os.path.join(</span>
+      <span class="s1">FLAGS.model_path</span><span class="s3">,</span>
+      <span class="s1">FLAGS.model + (</span><span class="s4">'' </span><span class="s3">if </span><span class="s1">FLAGS.model_classifier_layer </span><span class="s3">else </span><span class="s4">'_features'</span><span class="s1">)</span>
+  <span class="s1">)</span>
+  <span class="s3">if </span><span class="s1">with_version:</span>
+    <span class="s1">model_dir = os.path.join(model_dir</span><span class="s3">, </span><span class="s1">str(FLAGS.model_version))</span>
+  <span class="s3">return </span><span class="s1">model_dir</span>
+
+
+<span class="s3">def </span><span class="s1">tf_accelerator_and_tolerances():</span>
+  <span class="s2">&quot;&quot;&quot;Picks the TF accelerator to use and the tolerances for numerical checks.&quot;&quot;&quot;</span>
+  <span class="s1">tf_accelerator = (tf.config.list_logical_devices(</span><span class="s4">&quot;TPU&quot;</span><span class="s1">) +</span>
+                    <span class="s1">tf.config.list_logical_devices(</span><span class="s4">&quot;GPU&quot;</span><span class="s1">) +</span>
+                    <span class="s1">tf.config.list_logical_devices(</span><span class="s4">&quot;CPU&quot;</span><span class="s1">))[</span><span class="s5">0</span><span class="s1">]</span>
+  <span class="s1">logging.info(</span><span class="s4">&quot;Using tf_accelerator = %s&quot;</span><span class="s3">, </span><span class="s1">tf_accelerator)</span>
+  <span class="s3">if </span><span class="s1">tf_accelerator.device_type == </span><span class="s4">&quot;TPU&quot;</span><span class="s1">:</span>
+    <span class="s1">tolerances = dict(atol=</span><span class="s5">1e-6</span><span class="s3">, </span><span class="s1">rtol=</span><span class="s5">1e-6</span><span class="s1">)</span>
+  <span class="s3">elif </span><span class="s1">tf_accelerator.device_type == </span><span class="s4">&quot;GPU&quot;</span><span class="s1">:</span>
+    <span class="s1">tolerances = dict(atol=</span><span class="s5">1e-6</span><span class="s3">, </span><span class="s1">rtol=</span><span class="s5">1e-4</span><span class="s1">)</span>
+  <span class="s3">elif </span><span class="s1">tf_accelerator.device_type == </span><span class="s4">&quot;CPU&quot;</span><span class="s1">:</span>
+    <span class="s1">tolerances = dict(atol=</span><span class="s5">1e-5</span><span class="s3">, </span><span class="s1">rtol=</span><span class="s5">1e-5</span><span class="s1">)</span>
+  <span class="s1">logging.info(</span><span class="s4">&quot;Using tolerances %s&quot;</span><span class="s3">, </span><span class="s1">tolerances)</span>
+  <span class="s3">return </span><span class="s1">tf_accelerator</span><span class="s3">, </span><span class="s1">tolerances</span>
+
+
+<span class="s3">if </span><span class="s1">__name__ == </span><span class="s4">&quot;__main__&quot;</span><span class="s1">:</span>
+  <span class="s1">app.run(</span><span class="s3">lambda </span><span class="s1">_: train_and_save())</span>
+</pre>
+</body>
+</html>

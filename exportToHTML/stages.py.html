@@ -1,0 +1,698 @@
+<html>
+<head>
+<title>stages.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+stages.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2022 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+<span class="s2">&quot;&quot;&quot; 
+Interfaces to JAX's compilation steps, and utilities for conforming to them. 
+ 
+This module defines a set of public-facing types that reflect the output of 
+intermediate stages in the process of compilation. Currently there are two 
+stages modeled: lowering (which produces compiler input), and compilation 
+(which produces compiler output). 
+ 
+It also defines some internal-facing types to guide what JAX can present in 
+this common form: an internal ``Lowering`` suffices to back a public-facing 
+``Lowered`` and an internal ``Executable`` suffices to back a public-facing 
+``Compiled``. 
+ 
+Finally, this module defines a couple more classes to commonly adapt our 
+various internal XLA-backed lowerings and executables into the lowering and 
+executable protocols described above. 
+&quot;&quot;&quot;</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">annotations</span>
+
+<span class="s3">import </span><span class="s1">warnings</span>
+
+<span class="s3">from </span><span class="s1">dataclasses </span><span class="s3">import </span><span class="s1">dataclass</span>
+<span class="s3">from </span><span class="s1">typing </span><span class="s3">import </span><span class="s1">Any</span><span class="s3">, </span><span class="s1">Dict</span><span class="s3">, </span><span class="s1">List</span><span class="s3">, </span><span class="s1">NamedTuple</span><span class="s3">, </span><span class="s1">Optional</span><span class="s3">, </span><span class="s1">Protocol</span><span class="s3">, </span><span class="s1">Sequence</span><span class="s3">, </span><span class="s1">Tuple</span>
+
+<span class="s3">import </span><span class="s1">jax</span>
+<span class="s3">from </span><span class="s1">jax </span><span class="s3">import </span><span class="s1">tree_util</span>
+<span class="s3">from </span><span class="s1">jax.interpreters </span><span class="s3">import </span><span class="s1">mlir</span>
+
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">core</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">source_info_util</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">traceback_util</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">util</span>
+<span class="s3">from </span><span class="s1">jax._src.lib.mlir </span><span class="s3">import </span><span class="s1">ir</span>
+<span class="s3">from </span><span class="s1">jax._src.lib </span><span class="s3">import </span><span class="s1">xla_client </span><span class="s3">as </span><span class="s1">xc</span>
+
+
+<span class="s1">source_info_util.register_exclusion(__file__)</span>
+<span class="s1">traceback_util.register_exclusion(__file__)</span>
+
+
+<span class="s1">xla_extension = xc._xla</span>
+<span class="s1">map</span><span class="s3">, </span><span class="s1">unsafe_map = util.safe_map</span><span class="s3">, </span><span class="s1">map</span>
+<span class="s1">zip</span><span class="s3">, </span><span class="s1">unsafe_zip = util.safe_zip</span><span class="s3">, </span><span class="s1">zip</span>
+
+
+<span class="s0"># -- Internal protocols</span>
+
+<span class="s3">class </span><span class="s1">Executable(Protocol):</span>
+  <span class="s2">&quot;&quot;&quot;Protocol for executables, which a user-facing ``Compiled`` encapsulates.&quot;&quot;&quot;</span>
+
+  <span class="s3">def </span><span class="s1">call(self</span><span class="s3">, </span><span class="s1">*args_flat) -&gt; Sequence[Any]:</span>
+    <span class="s2">&quot;&quot;&quot;Execute on the flat list of arguments, returning flat outputs.&quot;&quot;&quot;</span>
+    <span class="s0"># TODO(frostig): improve annotation (sequences of arrays/buffers)</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError</span>
+
+  <span class="s3">def </span><span class="s1">input_shardings(self) -&gt; Sequence[jax.sharding.XLACompatibleSharding]:</span>
+    <span class="s2">&quot;&quot;&quot;Flat sequence of input shardings. 
+ 
+    May raise ``NotImplementedError`` if unavailable, e.g. based on backend, 
+    compiler, or runtime. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError</span>
+
+  <span class="s3">def </span><span class="s1">output_shardings(self) -&gt; Sequence[jax.sharding.XLACompatibleSharding]:</span>
+    <span class="s2">&quot;&quot;&quot;Flat sequence of output shardings. 
+ 
+    May raise ``NotImplementedError`` if unavailable, e.g. based on backend, 
+    compiler, or runtime. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError</span>
+
+  <span class="s3">def </span><span class="s1">as_text(self) -&gt; str:</span>
+    <span class="s2">&quot;&quot;&quot;A human-readable text representation of this executable. 
+ 
+    Intended for visualization and debugging purposes. This need not be a valid 
+    nor reliable serialization. It is relayed directly to external callers. 
+ 
+    May raise ``NotImplementedError`` if unavailable, e.g. based on backend, 
+    compiler, or runtime. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError</span>
+
+  <span class="s3">def </span><span class="s1">cost_analysis(self) -&gt; Any:</span>
+    <span class="s2">&quot;&quot;&quot;A summary of execution cost estimates. 
+ 
+    Intended for visualization and debugging purposes. The object output by 
+    this is some simple data structure that can easily be printed or serialized 
+    (e.g. nested dicts, lists, and tuples with numeric leaves). However, its 
+    structure can be arbitrary: it need not be consistent across versions of JAX 
+    and jaxlib, or even across invocations. It is relayed directly to external 
+    callers. 
+ 
+    May raise ``NotImplementedError`` if unavailable, e.g. based on backend, 
+    compiler, or runtime. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># TODO(frostig): improve annotation (arbitrary pytree)</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError</span>
+
+  <span class="s3">def </span><span class="s1">memory_analysis(self) -&gt; Any:</span>
+    <span class="s2">&quot;&quot;&quot;A summary of estimated memory requirements. 
+ 
+    Intended for visualization and debugging purposes. The object output by 
+    this is some simple data structure that can easily be printed or serialized 
+    (e.g. nested dicts, lists, and tuples with numeric leaves). However, its 
+    structure can be arbitrary: it need not be consistent across versions of JAX 
+    and jaxlib, or even across invocations. It is relayed directly to external 
+    callers. 
+ 
+    May raise ``NotImplementedError`` if unavailable, e.g. based on backend, 
+    compiler, or runtime. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># TODO(frostig): improve annotation (arbitrary pytree)</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError</span>
+
+  <span class="s3">def </span><span class="s1">runtime_executable(self) -&gt; Any:</span>
+    <span class="s2">&quot;&quot;&quot;An arbitrary object representation of this executable. 
+ 
+    Intended for debugging purposes. This need not be a valid nor reliable 
+    serialization. It is relayed directly to external callers, with no 
+    guarantee on type, structure, or consistency across invocations. 
+ 
+    May raise ``NotImplementedError`` if unavailable, e.g. based on backend or 
+    compiler. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError</span>
+
+  <span class="s3">def </span><span class="s1">create_cpp_call(self</span><span class="s3">, </span><span class="s1">no_kwargs</span><span class="s3">, </span><span class="s1">in_tree</span><span class="s3">, </span><span class="s1">out_tree) -&gt; Any:</span>
+    <span class="s2">&quot;&quot;&quot;Optionally constructs a fast c++ dispatcher.&quot;&quot;&quot;</span>
+    <span class="s3">return None</span>
+
+
+<span class="s3">class </span><span class="s1">Lowering(Protocol):</span>
+  <span class="s2">&quot;&quot;&quot;Protocol for lowerings, which a user-facing ``Lowered`` encapsulates.&quot;&quot;&quot;</span>
+
+  <span class="s3">def </span><span class="s1">compile(self) -&gt; Executable:</span>
+    <span class="s2">&quot;&quot;&quot;Compile and return a corresponding ``Executable``.&quot;&quot;&quot;</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError</span>
+
+  <span class="s3">def </span><span class="s1">as_text(self</span><span class="s3">, </span><span class="s1">dialect: Optional[str] = </span><span class="s3">None</span><span class="s1">) -&gt; str:</span>
+    <span class="s2">&quot;&quot;&quot;A human-readable text representation of this lowering. 
+ 
+    Intended for visualization and debugging purposes. This need not be a valid 
+    nor reliable serialization. It is relayed directly to external callers. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError</span>
+
+  <span class="s3">def </span><span class="s1">compiler_ir(self</span><span class="s3">, </span><span class="s1">dialect: Optional[str] = </span><span class="s3">None</span><span class="s1">) -&gt; Any:</span>
+    <span class="s2">&quot;&quot;&quot;An arbitrary object representation of this lowering. 
+ 
+    Intended for debugging purposes. This need not be a valid nor reliable 
+    serialization. It is relayed directly to external callers, with no 
+    guarantee on type, structure, or consistency across invocations. 
+ 
+    May raise ``NotImplementedError`` if unavailable, e.g. based on backend or 
+    compiler. 
+ 
+    Args: 
+      dialect: Optional string specifying a representation dialect 
+      (e.g. &quot;stablehlo&quot;) 
+    &quot;&quot;&quot;</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError</span>
+
+  <span class="s3">def </span><span class="s1">cost_analysis(self) -&gt; Any:</span>
+    <span class="s2">&quot;&quot;&quot;A summary of execution cost estimates. 
+ 
+    Intended for visualization and debugging purposes. The object output by 
+    this is some simple data structure that can easily be printed or serialized 
+    (e.g. nested dicts, lists, and tuples with numeric leaves). However, its 
+    structure can be arbitrary: it need not be consistent across versions of JAX 
+    and jaxlib, or even across invocations. It is relayed directly to external 
+    callers. 
+ 
+    This function estimates execution cost in the absence of compiler 
+    optimizations, which may drastically affect the cost. For execution cost 
+    estimates after optimizations, compile this lowering and see 
+    ``Compiled.cost_analysis``. 
+ 
+    May raise ``NotImplementedError`` if unavailable, e.g. based on backend, 
+    compiler, or runtime. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># TODO(frostig): improve annotation (arbitrary pytree)</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError</span>
+
+<span class="s0"># -- Internal adapters from XLA-related objects to the above protocols</span>
+
+<span class="s3">class </span><span class="s1">XlaExecutable(Executable):</span>
+
+  <span class="s3">def </span><span class="s1">xla_extension_executable(self) -&gt; xc.LoadedExecutable:</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError(</span><span class="s4">&quot;must override&quot;</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">call(self</span><span class="s3">, </span><span class="s1">*args_flat) -&gt; Sequence[Any]:</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError(</span><span class="s4">&quot;must override&quot;</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">input_shardings(self) -&gt; Sequence[jax.sharding.XLACompatibleSharding]:</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError(</span>
+        <span class="s4">&quot;compiled executable carries no input sharding information&quot;</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">output_shardings(self) -&gt; Sequence[jax.sharding.XLACompatibleSharding]:</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError(</span>
+        <span class="s4">&quot;compiled executable carries no output sharding information&quot;</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">as_text(self) -&gt; str:</span>
+    <span class="s1">xla_ext_exe = self.xla_extension_executable()</span>
+    <span class="s1">err_msg = (</span><span class="s4">&quot;text view unsupported on current XLA backend: &quot;</span>
+               <span class="s4">f&quot;</span><span class="s3">{</span><span class="s1">type(xla_ext_exe)</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+    <span class="s3">if not </span><span class="s1">hasattr(xla_ext_exe</span><span class="s3">, </span><span class="s4">&quot;hlo_modules&quot;</span><span class="s1">):</span>
+      <span class="s3">raise </span><span class="s1">NotImplementedError(err_msg)</span>
+    <span class="s3">try</span><span class="s1">:</span>
+      <span class="s3">return </span><span class="s4">&quot;</span><span class="s3">\n\n</span><span class="s4">&quot;</span><span class="s1">.join([m.to_string() </span><span class="s3">for </span><span class="s1">m </span><span class="s3">in </span><span class="s1">xla_ext_exe.hlo_modules()])</span>
+    <span class="s3">except </span><span class="s1">xla_extension.XlaRuntimeError </span><span class="s3">as </span><span class="s1">e:</span>
+      <span class="s1">msg</span><span class="s3">, </span><span class="s1">*_ = e.args</span>
+      <span class="s3">if </span><span class="s1">type(msg) </span><span class="s3">is </span><span class="s1">str </span><span class="s3">and </span><span class="s1">msg.startswith(</span><span class="s4">&quot;UNIMPLEMENTED&quot;</span><span class="s1">):</span>
+        <span class="s3">raise </span><span class="s1">NotImplementedError(err_msg) </span><span class="s3">from </span><span class="s1">e</span>
+      <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">raise</span>
+
+  <span class="s3">def </span><span class="s1">cost_analysis(self) -&gt; List[Dict[str</span><span class="s3">, </span><span class="s1">float]]:</span>
+    <span class="s1">xla_ext_exe = self.xla_extension_executable()</span>
+    <span class="s1">err_msg = (</span><span class="s4">&quot;cost analysis unsupported on current XLA backend: &quot;</span>
+               <span class="s4">f&quot;</span><span class="s3">{</span><span class="s1">type(xla_ext_exe)</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+    <span class="s0"># TODO(b/259255524): Unify/merge the two cost_analysis calls below.</span>
+    <span class="s3">if </span><span class="s1">hasattr(xla_ext_exe</span><span class="s3">, </span><span class="s4">&quot;client&quot;</span><span class="s1">):</span>
+      <span class="s3">try</span><span class="s1">:</span>
+        <span class="s3">return </span><span class="s1">[</span>
+            <span class="s1">xla_extension.hlo_module_cost_analysis(xla_ext_exe.client</span><span class="s3">, </span><span class="s1">m)</span>
+            <span class="s3">for </span><span class="s1">m </span><span class="s3">in </span><span class="s1">xla_ext_exe.hlo_modules()</span>
+        <span class="s1">]</span>
+      <span class="s3">except </span><span class="s1">xla_extension.XlaRuntimeError </span><span class="s3">as </span><span class="s1">e:</span>
+        <span class="s1">msg</span><span class="s3">, </span><span class="s1">*_ = e.args</span>
+        <span class="s3">if </span><span class="s1">type(msg) </span><span class="s3">is </span><span class="s1">str </span><span class="s3">and </span><span class="s1">msg.startswith(</span><span class="s4">&quot;UNIMPLEMENTED&quot;</span><span class="s1">):</span>
+          <span class="s3">raise </span><span class="s1">NotImplementedError(err_msg) </span><span class="s3">from </span><span class="s1">e</span>
+        <span class="s3">else</span><span class="s1">:</span>
+          <span class="s3">raise</span>
+    <span class="s3">elif </span><span class="s1">hasattr(xla_ext_exe</span><span class="s3">, </span><span class="s4">&quot;cost_analysis&quot;</span><span class="s1">):</span>
+      <span class="s3">try</span><span class="s1">:</span>
+        <span class="s3">return </span><span class="s1">xla_ext_exe.cost_analysis()</span>
+      <span class="s3">except </span><span class="s1">xla_extension.XlaRuntimeError </span><span class="s3">as </span><span class="s1">e:</span>
+        <span class="s1">msg</span><span class="s3">, </span><span class="s1">*_ = e.args</span>
+        <span class="s3">if </span><span class="s1">type(msg) </span><span class="s3">is </span><span class="s1">str </span><span class="s3">and </span><span class="s1">msg.startswith(</span><span class="s4">&quot;UNIMPLEMENTED&quot;</span><span class="s1">):</span>
+          <span class="s3">raise </span><span class="s1">NotImplementedError(err_msg) </span><span class="s3">from </span><span class="s1">e</span>
+        <span class="s3">else</span><span class="s1">:</span>
+          <span class="s3">raise</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s3">raise </span><span class="s1">NotImplementedError(err_msg)</span>
+
+  <span class="s3">def </span><span class="s1">memory_analysis(self) -&gt; Any:</span>
+    <span class="s1">xla_ext_exe = self.xla_extension_executable()</span>
+    <span class="s1">err_msg = (</span><span class="s4">&quot;memory analysis unsupported on current XLA backend: &quot;</span>
+               <span class="s4">f&quot;</span><span class="s3">{</span><span class="s1">type(xla_ext_exe)</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+    <span class="s3">if not </span><span class="s1">hasattr(xla_ext_exe</span><span class="s3">, </span><span class="s4">&quot;get_compiled_memory_stats&quot;</span><span class="s1">):</span>
+      <span class="s3">raise </span><span class="s1">NotImplementedError(err_msg)</span>
+    <span class="s3">try</span><span class="s1">:</span>
+      <span class="s3">return </span><span class="s1">xla_ext_exe.get_compiled_memory_stats()</span>
+    <span class="s3">except </span><span class="s1">xla_extension.XlaRuntimeError </span><span class="s3">as </span><span class="s1">e:</span>
+      <span class="s1">msg</span><span class="s3">, </span><span class="s1">*_ = e.args</span>
+      <span class="s3">if </span><span class="s1">type(msg) </span><span class="s3">is </span><span class="s1">str </span><span class="s3">and </span><span class="s1">msg.startswith(</span><span class="s4">&quot;UNIMPLEMENTED&quot;</span><span class="s1">):</span>
+        <span class="s3">raise </span><span class="s1">NotImplementedError(err_msg) </span><span class="s3">from </span><span class="s1">e</span>
+      <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">raise</span>
+
+  <span class="s3">def </span><span class="s1">runtime_executable(self) -&gt; Any:</span>
+    <span class="s3">return </span><span class="s1">self.xla_extension_executable()</span>
+
+
+<span class="s3">class </span><span class="s1">XlaLowering(Lowering):</span>
+  <span class="s2">&quot;&quot;&quot;Adapts our various internal XLA-backed computations into a ``Lowering``.&quot;&quot;&quot;</span>
+
+  <span class="s1">compile_args: Dict[str</span><span class="s3">, </span><span class="s1">Any]</span>
+
+  <span class="s3">def </span><span class="s1">hlo(self) -&gt; xc.XlaComputation:</span>
+    <span class="s2">&quot;&quot;&quot;Return an HLO representation of this computation.&quot;&quot;&quot;</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError(</span><span class="s4">&quot;must override&quot;</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">mhlo(self) -&gt; ir.Module:</span>
+    <span class="s2">&quot;&quot;&quot;Return an MHLO representation of this computation.&quot;&quot;&quot;</span>
+    <span class="s1">module_str = xla_extension.mlir.stablehlo_to_mhlo(</span>
+        <span class="s1">mlir.module_to_bytecode(self.stablehlo()))</span>
+    <span class="s3">with </span><span class="s1">self.stablehlo().context:</span>
+      <span class="s3">return </span><span class="s1">ir.Module.parse(module_str)</span>
+
+  <span class="s3">def </span><span class="s1">stablehlo(self) -&gt; ir.Module:</span>
+    <span class="s2">&quot;&quot;&quot;Return a StableHLO representation of this computation.&quot;&quot;&quot;</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError(</span><span class="s4">&quot;must override&quot;</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">compile(self) -&gt; Executable:</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError(</span><span class="s4">&quot;must override&quot;</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">as_text(self</span><span class="s3">, </span><span class="s1">dialect: Optional[str] = </span><span class="s3">None</span><span class="s1">) -&gt; str:</span>
+    <span class="s3">if </span><span class="s1">dialect </span><span class="s3">is None</span><span class="s1">:</span>
+      <span class="s1">dialect = </span><span class="s4">&quot;stablehlo&quot;</span>
+    <span class="s3">if </span><span class="s1">dialect == </span><span class="s4">&quot;mhlo&quot;</span><span class="s1">:</span>
+      <span class="s3">return </span><span class="s1">str(self.mhlo())</span>
+    <span class="s3">elif </span><span class="s1">dialect == </span><span class="s4">&quot;stablehlo&quot;</span><span class="s1">:</span>
+      <span class="s3">return </span><span class="s1">str(self.stablehlo())</span>
+    <span class="s3">elif </span><span class="s1">dialect == </span><span class="s4">&quot;hlo&quot;</span><span class="s1">:</span>
+      <span class="s3">return </span><span class="s1">self.hlo().as_hlo_text()</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">f&quot;unknown dialect: </span><span class="s3">{</span><span class="s1">dialect</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">compiler_ir(self</span><span class="s3">, </span><span class="s1">dialect: Optional[str] = </span><span class="s3">None</span><span class="s1">) -&gt; Any:</span>
+    <span class="s3">if </span><span class="s1">dialect </span><span class="s3">is None</span><span class="s1">:</span>
+      <span class="s1">dialect = </span><span class="s4">&quot;stablehlo&quot;</span>
+    <span class="s3">if </span><span class="s1">dialect == </span><span class="s4">&quot;mhlo&quot;</span><span class="s1">:</span>
+      <span class="s3">return </span><span class="s1">self.mhlo()</span>
+    <span class="s3">elif </span><span class="s1">dialect == </span><span class="s4">&quot;stablehlo&quot;</span><span class="s1">:</span>
+      <span class="s3">return </span><span class="s1">self.stablehlo()</span>
+    <span class="s3">elif </span><span class="s1">dialect == </span><span class="s4">&quot;hlo&quot;</span><span class="s1">:</span>
+      <span class="s3">return </span><span class="s1">self.hlo()</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">f&quot;unknown dialect: </span><span class="s3">{</span><span class="s1">dialect</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">cost_analysis(self) -&gt; Dict[str</span><span class="s3">, </span><span class="s1">float]:</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError(</span><span class="s4">&quot;must override&quot;</span><span class="s1">)</span>
+
+
+<span class="s0"># -- Public-facing API, plus helpers</span>
+
+<span class="s1">@dataclass</span>
+<span class="s3">class </span><span class="s1">ArgInfo:</span>
+  <span class="s1">aval: core.AbstractValue</span>
+  <span class="s1">donated: bool</span>
+
+
+<span class="s3">class </span><span class="s1">Stage:</span>
+  <span class="s1">args_info: Any  </span><span class="s0"># PyTree of ArgInfo</span>
+
+  <span class="s1">@property</span>
+  <span class="s3">def </span><span class="s1">in_tree(self) -&gt; tree_util.PyTreeDef:</span>
+    <span class="s2">&quot;&quot;&quot;Tree structure of the pair (positional arguments, keyword arguments).&quot;&quot;&quot;</span>
+    <span class="s3">return </span><span class="s1">tree_util.tree_structure(self.args_info)</span>
+
+  <span class="s1">@property</span>
+  <span class="s3">def </span><span class="s1">in_avals(self):</span>
+    <span class="s2">&quot;&quot;&quot;Tree of input avals.&quot;&quot;&quot;</span>
+    <span class="s3">return </span><span class="s1">tree_util.tree_map(</span><span class="s3">lambda </span><span class="s1">x: x.aval</span><span class="s3">, </span><span class="s1">self.args_info)</span>
+
+  <span class="s1">@property</span>
+  <span class="s3">def </span><span class="s1">donate_argnums(self):</span>
+    <span class="s2">&quot;&quot;&quot;Flat tuple of donated argument indices.&quot;&quot;&quot;</span>
+    <span class="s3">return </span><span class="s1">tuple(</span>
+        <span class="s1">i </span><span class="s3">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">x </span><span class="s3">in </span><span class="s1">enumerate(tree_util.tree_leaves(self.args_info))</span>
+        <span class="s3">if </span><span class="s1">x.donated)</span>
+
+
+<span class="s3">def </span><span class="s1">make_args_info(in_tree</span><span class="s3">, </span><span class="s1">in_avals</span><span class="s3">, </span><span class="s1">donate_argnums):</span>
+  <span class="s1">donate_argnums = frozenset(donate_argnums)</span>
+  <span class="s1">flat_avals</span><span class="s3">, </span><span class="s1">_ = tree_util.tree_flatten(in_avals)  </span><span class="s0"># todo: remove</span>
+  <span class="s3">return </span><span class="s1">in_tree.unflatten([</span>
+      <span class="s1">ArgInfo(aval</span><span class="s3">, </span><span class="s1">i </span><span class="s3">in </span><span class="s1">donate_argnums)</span>
+      <span class="s3">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">aval </span><span class="s3">in </span><span class="s1">enumerate(flat_avals)])</span>
+
+<span class="s3">class </span><span class="s1">CompiledCallParams(NamedTuple):</span>
+  <span class="s1">executable: Executable</span>
+  <span class="s1">no_kwargs: bool</span>
+  <span class="s1">in_tree: tree_util.PyTreeDef</span>
+  <span class="s1">out_tree: tree_util.PyTreeDef</span>
+
+
+<span class="s3">class </span><span class="s1">Compiled(Stage):</span>
+  <span class="s2">&quot;&quot;&quot;Compiled representation of a function specialized to types/values. 
+ 
+  A compiled computation is associated with an executable and the 
+  remaining information needed to execute it. It also provides a 
+  common API for querying properties of compiled computations across 
+  JAX's various compilation paths and backends. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">__slots__ = [</span><span class="s4">&quot;args_info&quot;</span><span class="s3">, </span><span class="s4">&quot;out_tree&quot;</span><span class="s3">, </span><span class="s4">&quot;_executable&quot;</span><span class="s3">, </span><span class="s4">&quot;_no_kwargs&quot;</span><span class="s1">]</span>
+
+  <span class="s1">args_info: Any                </span><span class="s0"># PyTree of ArgInfo</span>
+  <span class="s1">out_tree: tree_util.PyTreeDef</span>
+  <span class="s1">_executable: Executable</span>
+  <span class="s1">_no_kwargs: bool</span>
+
+  <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">executable</span><span class="s3">, </span><span class="s1">args_info</span><span class="s3">, </span><span class="s1">out_tree</span><span class="s3">, </span><span class="s1">no_kwargs=</span><span class="s3">False</span><span class="s1">):</span>
+    <span class="s1">self._executable = executable</span>
+    <span class="s1">self._no_kwargs = no_kwargs</span>
+    <span class="s1">self.args_info = args_info</span>
+    <span class="s1">self.out_tree = out_tree</span>
+    <span class="s1">self._params = CompiledCallParams(self._executable</span><span class="s3">, </span><span class="s1">self._no_kwargs</span><span class="s3">,</span>
+                                      <span class="s1">self.in_tree</span><span class="s3">, </span><span class="s1">self.out_tree)</span>
+    <span class="s1">self._cpp_call = self._executable.create_cpp_call(self._no_kwargs</span><span class="s3">,</span>
+                                                      <span class="s1">self.in_tree</span><span class="s3">,</span>
+                                                      <span class="s1">self.out_tree)</span>
+
+  <span class="s3">def </span><span class="s1">compiler_ir(self):</span>
+    <span class="s2">&quot;&quot;&quot;Post-compilation IR. 
+ 
+    Compilation typically involves code transformation and 
+    optimization. This method exists to reflect the compiler's 
+    representation of the program after such passes, whenever 
+    possible. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># TODO(frostig): remove (deprecated)</span>
+    <span class="s1">warnings.warn(</span>
+        <span class="s4">&quot;compiler_ir() is deprecated, consider runtime_executable() instead&quot;</span><span class="s3">,</span>
+        <span class="s1">DeprecationWarning)</span>
+    <span class="s1">exe = self.runtime_executable()</span>
+    <span class="s3">return </span><span class="s1">exe.hlo_modules() </span><span class="s3">if </span><span class="s1">exe </span><span class="s3">is not None else None</span>
+
+  <span class="s3">def </span><span class="s1">as_text(self) -&gt; Optional[str]:</span>
+    <span class="s2">&quot;&quot;&quot;A human-readable text representation of this executable. 
+ 
+    Intended for visualization and debugging purposes. This is not a valid nor 
+    reliable serialization. 
+ 
+    Returns ``None`` if unavailable, e.g. based on backend, compiler, or 
+    runtime. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">try</span><span class="s1">:</span>
+      <span class="s3">return </span><span class="s1">self._executable.as_text()</span>
+    <span class="s3">except </span><span class="s1">NotImplementedError:</span>
+      <span class="s3">return None</span>
+
+  <span class="s3">def </span><span class="s1">cost_analysis(self) -&gt; Optional[Any]:</span>
+    <span class="s2">&quot;&quot;&quot;A summary of execution cost estimates. 
+ 
+    Intended for visualization and debugging purposes. The object output by 
+    this is some simple data structure that can easily be printed or serialized 
+    (e.g. nested dicts, lists, and tuples with numeric leaves). However, its 
+    structure can be arbitrary: it may be inconsistent across versions of JAX 
+    and jaxlib, or even across invocations. 
+ 
+    Returns ``None`` if unavailable, e.g. based on backend, compiler, or 
+    runtime. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># TODO(frostig): improve annotation (basic pytree of arbitrary structure)</span>
+    <span class="s3">try</span><span class="s1">:</span>
+      <span class="s3">return </span><span class="s1">self._executable.cost_analysis()</span>
+    <span class="s3">except </span><span class="s1">NotImplementedError:</span>
+      <span class="s3">return None</span>
+
+  <span class="s3">def </span><span class="s1">memory_analysis(self) -&gt; Optional[Any]:</span>
+    <span class="s2">&quot;&quot;&quot;A summary of estimated memory requirements. 
+ 
+    Intended for visualization and debugging purposes. The object output by 
+    this is some simple data structure that can easily be printed or serialized 
+    (e.g. nested dicts, lists, and tuples with numeric leaves). However, its 
+    structure can be arbitrary: it may be inconsistent across versions of JAX 
+    and jaxlib, or even across invocations. 
+ 
+    Returns ``None`` if unavailable, e.g. based on backend, compiler, or 
+    runtime. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># TODO(frostig): improve annotation (basic pytree of arbitrary structure)</span>
+    <span class="s3">try</span><span class="s1">:</span>
+      <span class="s3">return </span><span class="s1">self._executable.memory_analysis()</span>
+    <span class="s3">except </span><span class="s1">NotImplementedError:</span>
+      <span class="s3">return None</span>
+
+  <span class="s3">def </span><span class="s1">runtime_executable(self) -&gt; Optional[Any]:</span>
+    <span class="s2">&quot;&quot;&quot;An arbitrary object representation of this executable. 
+ 
+    Intended for debugging purposes. This is not valid nor reliable 
+    serialization. The output has no guarantee of consistency across 
+    invocations. 
+ 
+    Returns ``None`` if unavailable, e.g. based on backend, compiler, or 
+    runtime. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">return </span><span class="s1">self._executable.runtime_executable()</span>
+
+  <span class="s1">@property</span>
+  <span class="s3">def </span><span class="s1">input_shardings(self):  </span><span class="s0"># PyTree[sharding.XLACompatibleSharding]</span>
+    <span class="s1">shardings_flat = self._executable.input_shardings()</span>
+    <span class="s3">return </span><span class="s1">tree_util.tree_unflatten(self.in_tree</span><span class="s3">, </span><span class="s1">shardings_flat)  </span><span class="s0"># pytype: disable=attribute-error</span>
+
+  <span class="s1">@property</span>
+  <span class="s3">def </span><span class="s1">output_shardings(self):  </span><span class="s0"># PyTree[sharding.XLACompatibleSharding]</span>
+    <span class="s1">shardings_flat = self._executable.output_shardings()</span>
+    <span class="s3">return </span><span class="s1">tree_util.tree_unflatten(self.out_tree</span><span class="s3">, </span><span class="s1">shardings_flat)  </span><span class="s0"># pytype: disable=attribute-error</span>
+
+  <span class="s1">@staticmethod</span>
+  <span class="s3">def </span><span class="s1">call(*args</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+    <span class="s0"># This is because `__call__` passes in `self._params` as the first argument.</span>
+    <span class="s0"># Instead of making the call signature `call(params, *args, **kwargs)`</span>
+    <span class="s0"># extract it from args because `params` can be passed as a kwarg by users</span>
+    <span class="s0"># which might confict here.</span>
+    <span class="s1">params = args[</span><span class="s5">0</span><span class="s1">]</span>
+    <span class="s1">args = args[</span><span class="s5">1</span><span class="s1">:]</span>
+    <span class="s3">if </span><span class="s1">jax.config.jax_dynamic_shapes:</span>
+      <span class="s3">raise </span><span class="s1">NotImplementedError</span>
+    <span class="s3">if </span><span class="s1">params.no_kwargs </span><span class="s3">and </span><span class="s1">kwargs:</span>
+      <span class="s1">kws = </span><span class="s4">', '</span><span class="s1">.join(kwargs.keys())</span>
+      <span class="s3">raise </span><span class="s1">NotImplementedError(</span>
+          <span class="s4">&quot;function was compiled by a transformation that does not support &quot;</span>
+          <span class="s4">f&quot;keyword arguments, but called with keyword arguments: </span><span class="s3">{</span><span class="s1">kws</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+    <span class="s1">args_flat</span><span class="s3">, </span><span class="s1">in_tree = tree_util.tree_flatten((args</span><span class="s3">, </span><span class="s1">kwargs))</span>
+    <span class="s3">if </span><span class="s1">in_tree != params.in_tree:</span>
+      <span class="s0"># TODO(frostig): provide more info about the source function</span>
+      <span class="s0"># and transformation</span>
+      <span class="s3">raise </span><span class="s1">TypeError(</span>
+          <span class="s4">f&quot;function compiled for </span><span class="s3">{</span><span class="s1">params.in_tree</span><span class="s3">}</span><span class="s4">, called with </span><span class="s3">{</span><span class="s1">in_tree</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+    <span class="s3">try</span><span class="s1">:</span>
+      <span class="s1">out_flat = params.executable.call(*args_flat)</span>
+    <span class="s3">except </span><span class="s1">TypeError </span><span class="s3">as </span><span class="s1">e:</span>
+      <span class="s0"># We can't transform ahead-of-time compiled calls, since we've</span>
+      <span class="s0"># lowered and compiled for a fixed function signature, and JAX</span>
+      <span class="s0"># transformations change signatures. We interpret a Tracer</span>
+      <span class="s0"># argument as an indication of a transformation attempt. We</span>
+      <span class="s0"># could check this before the executable call, but we'd rather</span>
+      <span class="s0"># avoid isinstance checks on the call path. Seeing a TypeError</span>
+      <span class="s0"># might mean that arguments have JAX-invalid types, which in</span>
+      <span class="s0"># turn might mean some are Tracers.</span>
+      <span class="s3">for </span><span class="s1">arg </span><span class="s3">in </span><span class="s1">args_flat:</span>
+        <span class="s3">if </span><span class="s1">isinstance(arg</span><span class="s3">, </span><span class="s1">core.Tracer):</span>
+          <span class="s3">raise </span><span class="s1">TypeError(</span>
+              <span class="s4">&quot;Cannot apply JAX transformations to a function lowered and &quot;</span>
+              <span class="s4">&quot;compiled for a particular signature. Detected argument of &quot;</span>
+              <span class="s4">f&quot;Tracer type </span><span class="s3">{</span><span class="s1">type(arg)</span><span class="s3">}</span><span class="s4">.&quot;</span><span class="s1">) </span><span class="s3">from </span><span class="s1">e</span>
+      <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">raise</span>
+    <span class="s1">outs = tree_util.tree_unflatten(params.out_tree</span><span class="s3">, </span><span class="s1">out_flat)</span>
+    <span class="s3">return </span><span class="s1">outs</span><span class="s3">, </span><span class="s1">out_flat</span><span class="s3">, </span><span class="s1">args_flat</span>
+
+  <span class="s3">def </span><span class="s1">__call__(self</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+    <span class="s3">if </span><span class="s1">self._cpp_call </span><span class="s3">is not None</span><span class="s1">:</span>
+      <span class="s3">return </span><span class="s1">self._cpp_call(*args</span><span class="s3">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s1">outs</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">_ = Compiled.call(self._params</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">**kwargs)</span>
+    <span class="s3">return </span><span class="s1">outs</span>
+
+
+<span class="s3">class </span><span class="s1">Lowered(Stage):</span>
+  <span class="s2">&quot;&quot;&quot;Lowering of a function specialized to argument types and values. 
+ 
+  A lowering is a computation ready for compilation. This class 
+  carries a lowering together with the remaining information needed to 
+  later compile and execute it. It also provides a common API for 
+  querying properties of lowered computations across JAX's various 
+  lowering paths (:func:`~jax.jit`, :func:`~jax.pmap`, etc.). 
+  &quot;&quot;&quot;</span>
+  <span class="s1">__slots__ = [</span><span class="s4">&quot;args_info&quot;</span><span class="s3">, </span><span class="s4">&quot;out_tree&quot;</span><span class="s3">, </span><span class="s4">&quot;_lowering&quot;</span><span class="s3">, </span><span class="s4">&quot;_no_kwargs&quot;</span><span class="s1">]</span>
+
+  <span class="s1">args_info: Any                </span><span class="s0"># PyTree of ArgInfo</span>
+  <span class="s1">out_tree: tree_util.PyTreeDef</span>
+  <span class="s1">_lowering: XlaLowering</span>
+  <span class="s1">_no_kwargs: bool</span>
+
+  <span class="s3">def </span><span class="s1">__init__(</span>
+      <span class="s1">self</span><span class="s3">,</span>
+      <span class="s1">lowering: XlaLowering</span><span class="s3">,</span>
+      <span class="s1">args_info</span><span class="s3">,  </span><span class="s0"># PyTree of ArgInfo</span>
+      <span class="s1">out_tree: tree_util.PyTreeDef</span><span class="s3">,</span>
+      <span class="s1">no_kwargs: bool = </span><span class="s3">False</span><span class="s1">):</span>
+    <span class="s1">self._lowering = lowering</span>
+    <span class="s1">self._no_kwargs = no_kwargs</span>
+    <span class="s1">self.args_info = args_info</span>
+    <span class="s1">self.out_tree = out_tree</span>
+
+  <span class="s1">@classmethod</span>
+  <span class="s3">def </span><span class="s1">from_flat_info(cls</span><span class="s3">,</span>
+                     <span class="s1">lowering: XlaLowering</span><span class="s3">,</span>
+                     <span class="s1">in_tree: tree_util.PyTreeDef</span><span class="s3">,</span>
+                     <span class="s1">in_avals</span><span class="s3">,</span>
+                     <span class="s1">donate_argnums: Tuple[int</span><span class="s3">, </span><span class="s1">...]</span><span class="s3">,</span>
+                     <span class="s1">out_tree: tree_util.PyTreeDef</span><span class="s3">,</span>
+                     <span class="s1">no_kwargs: bool = </span><span class="s3">False</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot;Initialize from flat info (``in_avals`` etc.) and an input PyTreeDef. 
+ 
+    Args: 
+      in_tree: The ``PyTreeDef`` of (args, kwargs). 
+      out_tree: The ``PyTreeDef`` of the outputs. 
+      no_kwargs: If ``True`` the transformation, and the 
+        ``Compiled`` returned from this object will not support keyword 
+        arguments (an error will be raised if some are provided). 
+    &quot;&quot;&quot;</span>
+    <span class="s3">return </span><span class="s1">cls(</span>
+        <span class="s1">lowering</span><span class="s3">,</span>
+        <span class="s1">make_args_info(in_tree</span><span class="s3">, </span><span class="s1">in_avals</span><span class="s3">, </span><span class="s1">donate_argnums)</span><span class="s3">,</span>
+        <span class="s1">out_tree</span><span class="s3">,</span>
+        <span class="s1">no_kwargs=no_kwargs)</span>
+
+  <span class="s3">def </span><span class="s1">compile(self) -&gt; Compiled:</span>
+    <span class="s2">&quot;&quot;&quot;Compile, returning a corresponding ``Compiled`` instance.&quot;&quot;&quot;</span>
+    <span class="s3">from </span><span class="s1">jax._src.interpreters </span><span class="s3">import </span><span class="s1">pxla</span>
+
+    <span class="s3">if </span><span class="s1">isinstance(self._lowering</span><span class="s3">, </span><span class="s1">pxla.MeshComputation):</span>
+      <span class="s1">kw = dict(</span>
+          <span class="s1">_allow_propagation_to_outputs=[</span>
+              <span class="s1">pxla._is_unspecified(o)</span>
+              <span class="s3">for </span><span class="s1">o </span><span class="s3">in </span><span class="s1">self._lowering.compile_args[</span><span class="s4">&quot;out_shardings&quot;</span><span class="s1">]]</span>
+      <span class="s1">)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s1">kw = {}</span>
+
+    <span class="s3">return </span><span class="s1">Compiled(</span>
+        <span class="s1">self._lowering.compile(**kw)</span><span class="s3">,</span>
+        <span class="s1">self.args_info</span><span class="s3">,</span>
+        <span class="s1">self.out_tree</span><span class="s3">,</span>
+        <span class="s1">no_kwargs=self._no_kwargs)</span>
+
+  <span class="s3">def </span><span class="s1">as_text(self</span><span class="s3">, </span><span class="s1">dialect: Optional[str] = </span><span class="s3">None</span><span class="s1">) -&gt; str:</span>
+    <span class="s2">&quot;&quot;&quot;A human-readable text representation of this lowering. 
+ 
+    Intended for visualization and debugging purposes. This need not be a valid 
+    nor reliable serialization. It is relayed directly to external callers. 
+ 
+    Args: 
+      dialect: Optional string specifying a lowering dialect (e.g. &quot;stablehlo&quot;) 
+    &quot;&quot;&quot;</span>
+    <span class="s3">return </span><span class="s1">self._lowering.as_text(dialect)</span>
+
+  <span class="s3">def </span><span class="s1">compiler_ir(self</span><span class="s3">, </span><span class="s1">dialect: Optional[str] = </span><span class="s3">None</span><span class="s1">) -&gt; Optional[Any]:</span>
+    <span class="s2">&quot;&quot;&quot;An arbitrary object representation of this lowering. 
+ 
+    Intended for debugging purposes. This is not a valid nor reliable 
+    serialization. The output has no guarantee of consistency across 
+    invocations. 
+ 
+    Returns ``None`` if unavailable, e.g. based on backend, compiler, or 
+    runtime. 
+ 
+    Args: 
+      dialect: Optional string specifying a lowering dialect (e.g. &quot;stablehlo&quot;) 
+    &quot;&quot;&quot;</span>
+    <span class="s3">try</span><span class="s1">:</span>
+      <span class="s3">return </span><span class="s1">self._lowering.compiler_ir(dialect)</span>
+    <span class="s3">except </span><span class="s1">NotImplementedError:</span>
+      <span class="s3">return None</span>
+
+  <span class="s3">def </span><span class="s1">cost_analysis(self) -&gt; Optional[Any]:</span>
+    <span class="s2">&quot;&quot;&quot;A summary of execution cost estimates. 
+ 
+    Intended for visualization and debugging purposes. The object output by 
+    this is some simple data structure that can easily be printed or serialized 
+    (e.g. nested dicts, lists, and tuples with numeric leaves). However, its 
+    structure can be arbitrary: it may be inconsistent across versions of JAX 
+    and jaxlib, or even across invocations. 
+ 
+    Returns ``None`` if unavailable, e.g. based on backend, compiler, or 
+    runtime. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># TODO(frostig): improve annotation (basic pytree of arbitrary structure)</span>
+    <span class="s3">try</span><span class="s1">:</span>
+      <span class="s3">return </span><span class="s1">self._lowering.cost_analysis()</span>
+    <span class="s3">except </span><span class="s1">NotImplementedError:</span>
+      <span class="s3">return None</span>
+
+
+<span class="s3">class </span><span class="s1">Wrapped(Protocol):</span>
+  <span class="s2">&quot;&quot;&quot;A function ready to be specialized, lowered, and compiled. 
+ 
+  This protocol reflects the output of functions such as 
+  ``jax.jit``. Calling it results in JIT (just-in-time) lowering, 
+  compilation, and execution. It can also be explicitly lowered prior 
+  to compilation, and the result compiled prior to execution. 
+  &quot;&quot;&quot;</span>
+
+  <span class="s3">def </span><span class="s1">__call__(self</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+    <span class="s2">&quot;&quot;&quot;Executes the wrapped function, lowering and compiling as needed.&quot;&quot;&quot;</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError</span>
+
+  <span class="s3">def </span><span class="s1">lower(self</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">**kwargs) -&gt; Lowered:</span>
+    <span class="s2">&quot;&quot;&quot;Lower this function explicitly for the given arguments. 
+ 
+    A lowered function is staged out of Python and translated to a 
+    compiler's input language, possibly in a backend-dependent 
+    manner. It is ready for compilation but not yet compiled. 
+ 
+    Returns: 
+      A ``Lowered`` instance representing the lowering. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError</span>
+</pre>
+</body>
+</html>

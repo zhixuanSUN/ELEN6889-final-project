@@ -1,0 +1,229 @@
+<html>
+<head>
+<title>check.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #808080;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+check.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;Check a project and backend by attempting to build using PEP 517 hooks. 
+&quot;&quot;&quot;</span>
+<span class="s2">import </span><span class="s1">argparse</span>
+<span class="s2">import </span><span class="s1">logging</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">shutil</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">import </span><span class="s1">tarfile</span>
+<span class="s2">import </span><span class="s1">zipfile</span>
+<span class="s2">from </span><span class="s1">os.path </span><span class="s2">import </span><span class="s1">isfile</span>
+<span class="s2">from </span><span class="s1">os.path </span><span class="s2">import </span><span class="s1">join </span><span class="s2">as </span><span class="s1">pjoin</span>
+<span class="s2">from </span><span class="s1">subprocess </span><span class="s2">import </span><span class="s1">CalledProcessError</span>
+<span class="s2">from </span><span class="s1">tempfile </span><span class="s2">import </span><span class="s1">mkdtemp</span>
+
+<span class="s2">from </span><span class="s1">._compat </span><span class="s2">import </span><span class="s1">tomllib</span>
+<span class="s2">from </span><span class="s1">.colorlog </span><span class="s2">import </span><span class="s1">enable_colourful_output</span>
+<span class="s2">from </span><span class="s1">.envbuild </span><span class="s2">import </span><span class="s1">BuildEnvironment</span>
+<span class="s2">from </span><span class="s1">.wrappers </span><span class="s2">import </span><span class="s1">Pep517HookCaller</span>
+
+<span class="s1">log = logging.getLogger(__name__)</span>
+
+
+<span class="s2">def </span><span class="s1">check_build_sdist(hooks</span><span class="s2">, </span><span class="s1">build_sys_requires):</span>
+    <span class="s2">with </span><span class="s1">BuildEnvironment() </span><span class="s2">as </span><span class="s1">env:</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">env.pip_install(build_sys_requires)</span>
+            <span class="s1">log.info(</span><span class="s3">'Installed static build dependencies'</span><span class="s1">)</span>
+        <span class="s2">except </span><span class="s1">CalledProcessError:</span>
+            <span class="s1">log.error(</span><span class="s3">'Failed to install static build dependencies'</span><span class="s1">)</span>
+            <span class="s2">return False</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">reqs = hooks.get_requires_for_build_sdist({})</span>
+            <span class="s1">log.info(</span><span class="s3">'Got build requires: %s'</span><span class="s2">, </span><span class="s1">reqs)</span>
+        <span class="s2">except </span><span class="s1">Exception:</span>
+            <span class="s1">log.error(</span><span class="s3">'Failure in get_requires_for_build_sdist'</span><span class="s2">, </span><span class="s1">exc_info=</span><span class="s2">True</span><span class="s1">)</span>
+            <span class="s2">return False</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">env.pip_install(reqs)</span>
+            <span class="s1">log.info(</span><span class="s3">'Installed dynamic build dependencies'</span><span class="s1">)</span>
+        <span class="s2">except </span><span class="s1">CalledProcessError:</span>
+            <span class="s1">log.error(</span><span class="s3">'Failed to install dynamic build dependencies'</span><span class="s1">)</span>
+            <span class="s2">return False</span>
+
+        <span class="s1">td = mkdtemp()</span>
+        <span class="s1">log.info(</span><span class="s3">'Trying to build sdist in %s'</span><span class="s2">, </span><span class="s1">td)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">filename = hooks.build_sdist(td</span><span class="s2">, </span><span class="s1">{})</span>
+                <span class="s1">log.info(</span><span class="s3">'build_sdist returned %r'</span><span class="s2">, </span><span class="s1">filename)</span>
+            <span class="s2">except </span><span class="s1">Exception:</span>
+                <span class="s1">log.info(</span><span class="s3">'Failure in build_sdist'</span><span class="s2">, </span><span class="s1">exc_info=</span><span class="s2">True</span><span class="s1">)</span>
+                <span class="s2">return False</span>
+
+            <span class="s2">if not </span><span class="s1">filename.endswith(</span><span class="s3">'.tar.gz'</span><span class="s1">):</span>
+                <span class="s1">log.error(</span>
+                    <span class="s3">&quot;Filename %s doesn't have .tar.gz extension&quot;</span><span class="s2">, </span><span class="s1">filename)</span>
+                <span class="s2">return False</span>
+
+            <span class="s1">path = pjoin(td</span><span class="s2">, </span><span class="s1">filename)</span>
+            <span class="s2">if </span><span class="s1">isfile(path):</span>
+                <span class="s1">log.info(</span><span class="s3">&quot;Output file %s exists&quot;</span><span class="s2">, </span><span class="s1">path)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">log.error(</span><span class="s3">&quot;Output file %s does not exist&quot;</span><span class="s2">, </span><span class="s1">path)</span>
+                <span class="s2">return False</span>
+
+            <span class="s2">if </span><span class="s1">tarfile.is_tarfile(path):</span>
+                <span class="s1">log.info(</span><span class="s3">&quot;Output file is a tar file&quot;</span><span class="s1">)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">log.error(</span><span class="s3">&quot;Output file is not a tar file&quot;</span><span class="s1">)</span>
+                <span class="s2">return False</span>
+
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">shutil.rmtree(td)</span>
+
+        <span class="s2">return True</span>
+
+
+<span class="s2">def </span><span class="s1">check_build_wheel(hooks</span><span class="s2">, </span><span class="s1">build_sys_requires):</span>
+    <span class="s2">with </span><span class="s1">BuildEnvironment() </span><span class="s2">as </span><span class="s1">env:</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">env.pip_install(build_sys_requires)</span>
+            <span class="s1">log.info(</span><span class="s3">'Installed static build dependencies'</span><span class="s1">)</span>
+        <span class="s2">except </span><span class="s1">CalledProcessError:</span>
+            <span class="s1">log.error(</span><span class="s3">'Failed to install static build dependencies'</span><span class="s1">)</span>
+            <span class="s2">return False</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">reqs = hooks.get_requires_for_build_wheel({})</span>
+            <span class="s1">log.info(</span><span class="s3">'Got build requires: %s'</span><span class="s2">, </span><span class="s1">reqs)</span>
+        <span class="s2">except </span><span class="s1">Exception:</span>
+            <span class="s1">log.error(</span><span class="s3">'Failure in get_requires_for_build_sdist'</span><span class="s2">, </span><span class="s1">exc_info=</span><span class="s2">True</span><span class="s1">)</span>
+            <span class="s2">return False</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">env.pip_install(reqs)</span>
+            <span class="s1">log.info(</span><span class="s3">'Installed dynamic build dependencies'</span><span class="s1">)</span>
+        <span class="s2">except </span><span class="s1">CalledProcessError:</span>
+            <span class="s1">log.error(</span><span class="s3">'Failed to install dynamic build dependencies'</span><span class="s1">)</span>
+            <span class="s2">return False</span>
+
+        <span class="s1">td = mkdtemp()</span>
+        <span class="s1">log.info(</span><span class="s3">'Trying to build wheel in %s'</span><span class="s2">, </span><span class="s1">td)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">filename = hooks.build_wheel(td</span><span class="s2">, </span><span class="s1">{})</span>
+                <span class="s1">log.info(</span><span class="s3">'build_wheel returned %r'</span><span class="s2">, </span><span class="s1">filename)</span>
+            <span class="s2">except </span><span class="s1">Exception:</span>
+                <span class="s1">log.info(</span><span class="s3">'Failure in build_wheel'</span><span class="s2">, </span><span class="s1">exc_info=</span><span class="s2">True</span><span class="s1">)</span>
+                <span class="s2">return False</span>
+
+            <span class="s2">if not </span><span class="s1">filename.endswith(</span><span class="s3">'.whl'</span><span class="s1">):</span>
+                <span class="s1">log.error(</span><span class="s3">&quot;Filename %s doesn't have .whl extension&quot;</span><span class="s2">, </span><span class="s1">filename)</span>
+                <span class="s2">return False</span>
+
+            <span class="s1">path = pjoin(td</span><span class="s2">, </span><span class="s1">filename)</span>
+            <span class="s2">if </span><span class="s1">isfile(path):</span>
+                <span class="s1">log.info(</span><span class="s3">&quot;Output file %s exists&quot;</span><span class="s2">, </span><span class="s1">path)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">log.error(</span><span class="s3">&quot;Output file %s does not exist&quot;</span><span class="s2">, </span><span class="s1">path)</span>
+                <span class="s2">return False</span>
+
+            <span class="s2">if </span><span class="s1">zipfile.is_zipfile(path):</span>
+                <span class="s1">log.info(</span><span class="s3">&quot;Output file is a zip file&quot;</span><span class="s1">)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">log.error(</span><span class="s3">&quot;Output file is not a zip file&quot;</span><span class="s1">)</span>
+                <span class="s2">return False</span>
+
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">shutil.rmtree(td)</span>
+
+        <span class="s2">return True</span>
+
+
+<span class="s2">def </span><span class="s1">check(source_dir):</span>
+    <span class="s1">pyproject = pjoin(source_dir</span><span class="s2">, </span><span class="s3">'pyproject.toml'</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">isfile(pyproject):</span>
+        <span class="s1">log.info(</span><span class="s3">'Found pyproject.toml'</span><span class="s1">)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">log.error(</span><span class="s3">'Missing pyproject.toml'</span><span class="s1">)</span>
+        <span class="s2">return False</span>
+
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s2">with </span><span class="s1">open(pyproject</span><span class="s2">, </span><span class="s3">'rb'</span><span class="s1">) </span><span class="s2">as </span><span class="s1">f:</span>
+            <span class="s1">pyproject_data = tomllib.load(f)</span>
+        <span class="s4"># Ensure the mandatory data can be loaded</span>
+        <span class="s1">buildsys = pyproject_data[</span><span class="s3">'build-system'</span><span class="s1">]</span>
+        <span class="s1">requires = buildsys[</span><span class="s3">'requires'</span><span class="s1">]</span>
+        <span class="s1">backend = buildsys[</span><span class="s3">'build-backend'</span><span class="s1">]</span>
+        <span class="s1">backend_path = buildsys.get(</span><span class="s3">'backend-path'</span><span class="s1">)</span>
+        <span class="s1">log.info(</span><span class="s3">'Loaded pyproject.toml'</span><span class="s1">)</span>
+    <span class="s2">except </span><span class="s1">(tomllib.TOMLDecodeError</span><span class="s2">, </span><span class="s1">KeyError):</span>
+        <span class="s1">log.error(</span><span class="s3">&quot;Invalid pyproject.toml&quot;</span><span class="s2">, </span><span class="s1">exc_info=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s2">return False</span>
+
+    <span class="s1">hooks = Pep517HookCaller(source_dir</span><span class="s2">, </span><span class="s1">backend</span><span class="s2">, </span><span class="s1">backend_path)</span>
+
+    <span class="s1">sdist_ok = check_build_sdist(hooks</span><span class="s2">, </span><span class="s1">requires)</span>
+    <span class="s1">wheel_ok = check_build_wheel(hooks</span><span class="s2">, </span><span class="s1">requires)</span>
+
+    <span class="s2">if not </span><span class="s1">sdist_ok:</span>
+        <span class="s1">log.warning(</span><span class="s3">'Sdist checks failed; scroll up to see'</span><span class="s1">)</span>
+    <span class="s2">if not </span><span class="s1">wheel_ok:</span>
+        <span class="s1">log.warning(</span><span class="s3">'Wheel checks failed'</span><span class="s1">)</span>
+
+    <span class="s2">return </span><span class="s1">sdist_ok</span>
+
+
+<span class="s2">def </span><span class="s1">main(argv=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s1">log.warning(</span><span class="s3">'pep517.check is deprecated. '</span>
+                <span class="s3">'Consider switching to https://pypi.org/project/build/'</span><span class="s1">)</span>
+
+    <span class="s1">ap = argparse.ArgumentParser()</span>
+    <span class="s1">ap.add_argument(</span>
+        <span class="s3">'source_dir'</span><span class="s2">,</span>
+        <span class="s1">help=</span><span class="s3">&quot;A directory containing pyproject.toml&quot;</span><span class="s1">)</span>
+    <span class="s1">args = ap.parse_args(argv)</span>
+
+    <span class="s1">enable_colourful_output()</span>
+
+    <span class="s1">ok = check(args.source_dir)</span>
+
+    <span class="s2">if </span><span class="s1">ok:</span>
+        <span class="s1">print(ansi(</span><span class="s3">'Checks passed'</span><span class="s2">, </span><span class="s3">'green'</span><span class="s1">))</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">print(ansi(</span><span class="s3">'Checks failed'</span><span class="s2">, </span><span class="s3">'red'</span><span class="s1">))</span>
+        <span class="s1">sys.exit(</span><span class="s5">1</span><span class="s1">)</span>
+
+
+<span class="s1">ansi_codes = {</span>
+    <span class="s3">'reset'</span><span class="s1">: </span><span class="s3">'</span><span class="s2">\x1b</span><span class="s3">[0m'</span><span class="s2">,</span>
+    <span class="s3">'bold'</span><span class="s1">: </span><span class="s3">'</span><span class="s2">\x1b</span><span class="s3">[1m'</span><span class="s2">,</span>
+    <span class="s3">'red'</span><span class="s1">: </span><span class="s3">'</span><span class="s2">\x1b</span><span class="s3">[31m'</span><span class="s2">,</span>
+    <span class="s3">'green'</span><span class="s1">: </span><span class="s3">'</span><span class="s2">\x1b</span><span class="s3">[32m'</span><span class="s2">,</span>
+<span class="s1">}</span>
+
+
+<span class="s2">def </span><span class="s1">ansi(s</span><span class="s2">, </span><span class="s1">attr):</span>
+    <span class="s2">if </span><span class="s1">os.name != </span><span class="s3">'nt' </span><span class="s2">and </span><span class="s1">sys.stdout.isatty():</span>
+        <span class="s2">return </span><span class="s1">ansi_codes[attr] + str(s) + ansi_codes[</span><span class="s3">'reset'</span><span class="s1">]</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">str(s)</span>
+
+
+<span class="s2">if </span><span class="s1">__name__ == </span><span class="s3">'__main__'</span><span class="s1">:</span>
+    <span class="s1">main()</span>
+</pre>
+</body>
+</html>

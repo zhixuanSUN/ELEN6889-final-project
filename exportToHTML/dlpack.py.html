@@ -1,0 +1,93 @@
+<html>
+<head>
+<title>dlpack.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #629755; font-style: italic;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+dlpack.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2020 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s2">from </span><span class="s1">jax </span><span class="s2">import </span><span class="s1">numpy </span><span class="s2">as </span><span class="s1">jnp</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">device_array</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">array</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">xla_bridge</span>
+<span class="s2">from </span><span class="s1">jax._src.lib </span><span class="s2">import </span><span class="s1">xla_client</span>
+
+
+<span class="s1">SUPPORTED_DTYPES = frozenset({</span>
+    <span class="s1">jnp.int8</span><span class="s2">, </span><span class="s1">jnp.int16</span><span class="s2">, </span><span class="s1">jnp.int32</span><span class="s2">, </span><span class="s1">jnp.int64</span><span class="s2">, </span><span class="s1">jnp.uint8</span><span class="s2">, </span><span class="s1">jnp.uint16</span><span class="s2">,</span>
+    <span class="s1">jnp.uint32</span><span class="s2">, </span><span class="s1">jnp.uint64</span><span class="s2">, </span><span class="s1">jnp.float16</span><span class="s2">, </span><span class="s1">jnp.bfloat16</span><span class="s2">, </span><span class="s1">jnp.float32</span><span class="s2">,</span>
+    <span class="s1">jnp.float64</span><span class="s2">, </span><span class="s1">jnp.complex64</span><span class="s2">, </span><span class="s1">jnp.complex128})</span>
+
+
+<span class="s2">def </span><span class="s1">to_dlpack(x: device_array.DeviceArrayProtocol</span><span class="s2">, </span><span class="s1">take_ownership: bool = </span><span class="s2">False</span><span class="s1">):</span>
+  <span class="s3">&quot;&quot;&quot;Returns a DLPack tensor that encapsulates a ``DeviceArray`` `x`. 
+ 
+  Takes ownership of the contents of ``x``; leaves `x` in an invalid/deleted 
+  state. 
+ 
+  Args: 
+    x: a ``DeviceArray``, on either CPU or GPU. 
+    take_ownership: If ``True``, JAX hands ownership of the buffer to DLPack, 
+      and the consumer is free to mutate the buffer; the JAX buffer acts as if 
+      it were deleted. If ``False``, JAX retains ownership of the buffer; it is 
+      undefined behavior if the DLPack consumer writes to a buffer that JAX 
+      owns. 
+  &quot;&quot;&quot;</span>
+  <span class="s2">if not </span><span class="s1">isinstance(x</span><span class="s2">, </span><span class="s1">array.ArrayImpl):</span>
+    <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;Argument to to_dlpack must be a jax.Array, &quot;</span>
+                    <span class="s4">f&quot;got </span><span class="s2">{</span><span class="s1">type(x)</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+  <span class="s2">assert </span><span class="s1">len(x.devices()) == </span><span class="s5">1</span>
+  <span class="s2">return </span><span class="s1">xla_client._xla.buffer_to_dlpack_managed_tensor(</span>
+      <span class="s1">x.addressable_data(</span><span class="s5">0</span><span class="s1">)</span><span class="s2">, </span><span class="s1">take_ownership=take_ownership)  </span><span class="s0"># type: ignore</span>
+
+<span class="s2">def </span><span class="s1">from_dlpack(dlpack):</span>
+  <span class="s3">&quot;&quot;&quot;Returns a ``DeviceArray`` representation of a DLPack tensor. 
+ 
+  The returned ``DeviceArray`` shares memory with ``dlpack``. 
+ 
+  Args: 
+    dlpack: a DLPack tensor, on either CPU or GPU. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">cpu_backend = xla_bridge.get_backend(</span><span class="s4">&quot;cpu&quot;</span><span class="s1">)</span>
+  <span class="s2">try</span><span class="s1">:</span>
+    <span class="s1">gpu_backend = xla_bridge.get_backend(</span><span class="s4">&quot;cuda&quot;</span><span class="s1">)</span>
+  <span class="s2">except </span><span class="s1">RuntimeError:</span>
+    <span class="s1">gpu_backend = </span><span class="s2">None</span>
+
+  <span class="s0"># Try ROCm if CUDA backend not found</span>
+  <span class="s2">if </span><span class="s1">gpu_backend </span><span class="s2">is None</span><span class="s1">:</span>
+    <span class="s2">try</span><span class="s1">:</span>
+      <span class="s1">gpu_backend = xla_bridge.get_backend(</span><span class="s4">&quot;rocm&quot;</span><span class="s1">)</span>
+    <span class="s2">except </span><span class="s1">RuntimeError:</span>
+      <span class="s1">gpu_backend = </span><span class="s2">None</span>
+
+  <span class="s2">return </span><span class="s1">jnp.asarray(xla_client._xla.dlpack_managed_tensor_to_buffer(</span>
+      <span class="s1">dlpack</span><span class="s2">, </span><span class="s1">cpu_backend</span><span class="s2">, </span><span class="s1">gpu_backend))</span>
+</pre>
+</body>
+</html>

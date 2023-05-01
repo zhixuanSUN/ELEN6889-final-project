@@ -1,0 +1,35 @@
+<html>
+<head>
+<title>test.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">re</span>
+<span class="s0">import </span><span class="s1">pandas </span><span class="s0">as </span><span class="s1">pd</span>
+
+
+<span class="s0">def </span><span class="s1">preprocess_tweet(text):</span>
+    <span class="s1">text = re.sub(</span><span class="s2">r'http\S+|www\S+|https\S+'</span><span class="s0">, </span><span class="s2">''</span><span class="s0">, </span><span class="s1">text</span><span class="s0">, </span><span class="s1">flags=re.MULTILINE)</span>
+    <span class="s1">text = re.sub(</span><span class="s2">r'\@\w+|\#'</span><span class="s0">, </span><span class="s2">''</span><span class="s0">, </span><span class="s1">text)</span>
+    <span class="s1">text = text.lower()</span>
+    <span class="s0">return </span><span class="s1">text</span>
+
+
+<span class="s1">file_name = </span><span class="s2">'tweeter.csv'</span>
+<span class="s1">data = pd.read_excel(file_name)</span>
+<span class="s1">data[</span><span class="s2">'cleaned_text'</span><span class="s1">] = data[</span><span class="s2">'tweet_text'</span><span class="s1">].apply(preprocess_tweet)</span>
+<span class="s1">print(data[</span><span class="s2">'clean_text'</span><span class="s1">])</span>
+
+</pre>
+</body>
+</html>

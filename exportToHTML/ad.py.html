@@ -1,0 +1,97 @@
+<html>
+<head>
+<title>ad.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+ad.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2023 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s0"># Note: import &lt;name&gt; as &lt;name&gt; is required for names to be exported.</span>
+<span class="s0"># See PEP 484 &amp; https://github.com/google/jax/issues/7570</span>
+
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">from </span><span class="s1">jax._src.interpreters.ad </span><span class="s2">import </span><span class="s1">(</span>
+  <span class="s1">CustomJVPException </span><span class="s2">as </span><span class="s1">CustomJVPException</span><span class="s2">,</span>
+  <span class="s1">CustomVJPException </span><span class="s2">as </span><span class="s1">CustomVJPException</span><span class="s2">,</span>
+  <span class="s1">JVPTrace </span><span class="s2">as </span><span class="s1">JVPTrace</span><span class="s2">,</span>
+  <span class="s1">JVPTracer </span><span class="s2">as </span><span class="s1">JVPTracer</span><span class="s2">,</span>
+  <span class="s1">UndefinedPrimal </span><span class="s2">as </span><span class="s1">UndefinedPrimal</span><span class="s2">,</span>
+  <span class="s1">Zero </span><span class="s2">as </span><span class="s1">Zero</span><span class="s2">,</span>
+  <span class="s1">add_jaxvals </span><span class="s2">as </span><span class="s1">add_jaxvals</span><span class="s2">,</span>
+  <span class="s1">add_jaxvals_p </span><span class="s2">as </span><span class="s1">add_jaxvals_p</span><span class="s2">,</span>
+  <span class="s1">add_tangents </span><span class="s2">as </span><span class="s1">add_tangents</span><span class="s2">,</span>
+  <span class="s1">backward_pass </span><span class="s2">as </span><span class="s1">backward_pass</span><span class="s2">,</span>
+  <span class="s1">bilinear_transpose </span><span class="s2">as </span><span class="s1">bilinear_transpose</span><span class="s2">,</span>
+  <span class="s1">call_param_updaters </span><span class="s2">as </span><span class="s1">call_param_updaters</span><span class="s2">,</span>
+  <span class="s1">call_transpose </span><span class="s2">as </span><span class="s1">call_transpose</span><span class="s2">,</span>
+  <span class="s1">call_transpose_param_updaters </span><span class="s2">as </span><span class="s1">call_transpose_param_updaters</span><span class="s2">,</span>
+  <span class="s1">closed_backward_pass </span><span class="s2">as </span><span class="s1">closed_backward_pass</span><span class="s2">,</span>
+  <span class="s1">custom_lin_p </span><span class="s2">as </span><span class="s1">custom_lin_p</span><span class="s2">,</span>
+  <span class="s1">defbilinear </span><span class="s2">as </span><span class="s1">defbilinear</span><span class="s2">,</span>
+  <span class="s1">defjvp </span><span class="s2">as </span><span class="s1">defjvp</span><span class="s2">,</span>
+  <span class="s1">defjvp2 </span><span class="s2">as </span><span class="s1">defjvp2</span><span class="s2">,</span>
+  <span class="s1">defjvp_zero </span><span class="s2">as </span><span class="s1">defjvp_zero</span><span class="s2">,</span>
+  <span class="s1">deflinear </span><span class="s2">as </span><span class="s1">deflinear</span><span class="s2">,</span>
+  <span class="s1">deflinear2 </span><span class="s2">as </span><span class="s1">deflinear2</span><span class="s2">,</span>
+  <span class="s1">f_jvp_traceable </span><span class="s2">as </span><span class="s1">f_jvp_traceable</span><span class="s2">,</span>
+  <span class="s1">get_primitive_transpose </span><span class="s2">as </span><span class="s1">get_primitive_transpose</span><span class="s2">,</span>
+  <span class="s1">instantiate_zeros </span><span class="s2">as </span><span class="s1">instantiate_zeros</span><span class="s2">,</span>
+  <span class="s1">instantiate_zeros_aval </span><span class="s2">as </span><span class="s1">instantiate_zeros_aval</span><span class="s2">,</span>
+  <span class="s1">is_undefined_primal </span><span class="s2">as </span><span class="s1">is_undefined_primal</span><span class="s2">,</span>
+  <span class="s1">jvp </span><span class="s2">as </span><span class="s1">jvp</span><span class="s2">,</span>
+  <span class="s1">jvp_jaxpr </span><span class="s2">as </span><span class="s1">jvp_jaxpr</span><span class="s2">,</span>
+  <span class="s1">jvp_subtrace </span><span class="s2">as </span><span class="s1">jvp_subtrace</span><span class="s2">,</span>
+  <span class="s1">jvp_subtrace_aux </span><span class="s2">as </span><span class="s1">jvp_subtrace_aux</span><span class="s2">,</span>
+  <span class="s1">jvpfun </span><span class="s2">as </span><span class="s1">jvpfun</span><span class="s2">,</span>
+  <span class="s1">linear_jvp </span><span class="s2">as </span><span class="s1">linear_jvp</span><span class="s2">,</span>
+  <span class="s1">linear_transpose </span><span class="s2">as </span><span class="s1">linear_transpose</span><span class="s2">,</span>
+  <span class="s1">linear_transpose2 </span><span class="s2">as </span><span class="s1">linear_transpose2</span><span class="s2">,</span>
+  <span class="s1">linearize </span><span class="s2">as </span><span class="s1">linearize</span><span class="s2">,</span>
+  <span class="s1">map_transpose </span><span class="s2">as </span><span class="s1">map_transpose</span><span class="s2">,</span>
+  <span class="s1">nonzero_outputs </span><span class="s2">as </span><span class="s1">nonzero_outputs</span><span class="s2">,</span>
+  <span class="s1">nonzero_tangent_outputs </span><span class="s2">as </span><span class="s1">nonzero_tangent_outputs</span><span class="s2">,</span>
+  <span class="s1">primitive_jvps </span><span class="s2">as </span><span class="s1">primitive_jvps</span><span class="s2">,</span>
+  <span class="s1">primitive_transposes </span><span class="s2">as </span><span class="s1">primitive_transposes</span><span class="s2">,</span>
+  <span class="s1">rearrange_binders </span><span class="s2">as </span><span class="s1">rearrange_binders</span><span class="s2">,</span>
+  <span class="s1">recast_to_float0 </span><span class="s2">as </span><span class="s1">recast_to_float0</span><span class="s2">,</span>
+  <span class="s1">reducing_transposes </span><span class="s2">as </span><span class="s1">reducing_transposes</span><span class="s2">,</span>
+  <span class="s1">replace_float0s </span><span class="s2">as </span><span class="s1">replace_float0s</span><span class="s2">,</span>
+  <span class="s1">standard_jvp </span><span class="s2">as </span><span class="s1">standard_jvp</span><span class="s2">,</span>
+  <span class="s1">standard_jvp2 </span><span class="s2">as </span><span class="s1">standard_jvp2</span><span class="s2">,</span>
+  <span class="s1">traceable </span><span class="s2">as </span><span class="s1">traceable</span><span class="s2">,</span>
+  <span class="s1">unpair_pval </span><span class="s2">as </span><span class="s1">unpair_pval</span><span class="s2">,</span>
+  <span class="s1">vjp </span><span class="s2">as </span><span class="s1">vjp</span><span class="s2">,</span>
+  <span class="s1">zero_jvp </span><span class="s2">as </span><span class="s1">zero_jvp</span><span class="s2">,</span>
+  <span class="s1">zeros_like_aval </span><span class="s2">as </span><span class="s1">zeros_like_aval</span><span class="s2">,</span>
+  <span class="s1">zeros_like_jaxval </span><span class="s2">as </span><span class="s1">zeros_like_jaxval</span><span class="s2">,</span>
+  <span class="s1">zeros_like_p </span><span class="s2">as </span><span class="s1">zeros_like_p</span><span class="s2">,</span>
+<span class="s1">)</span>
+
+<span class="s2">from </span><span class="s1">jax.config </span><span class="s2">import </span><span class="s1">config</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">source_info_util</span>
+</pre>
+</body>
+</html>

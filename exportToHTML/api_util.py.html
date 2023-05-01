@@ -1,0 +1,673 @@
+<html>
+<head>
+<title>api_util.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #629755; font-style: italic;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+api_util.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2018 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s2">import </span><span class="s1">inspect</span>
+<span class="s2">import </span><span class="s1">operator</span>
+<span class="s2">from </span><span class="s1">functools </span><span class="s2">import </span><span class="s1">partial</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">(Any</span><span class="s2">, </span><span class="s1">Callable</span><span class="s2">, </span><span class="s1">Dict</span><span class="s2">, </span><span class="s1">Iterable</span><span class="s2">, </span><span class="s1">List</span><span class="s2">, </span><span class="s1">Optional</span><span class="s2">, </span><span class="s1">Sequence</span><span class="s2">,</span>
+                    <span class="s1">Set</span><span class="s2">, </span><span class="s1">Tuple</span><span class="s2">, </span><span class="s1">Union)</span>
+<span class="s2">import </span><span class="s1">warnings</span>
+
+<span class="s2">import </span><span class="s1">numpy </span><span class="s2">as </span><span class="s1">np</span>
+
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">core</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">dtypes</span>
+<span class="s2">from </span><span class="s1">jax._src.abstract_arrays </span><span class="s2">import </span><span class="s1">numpy_scalar_types</span>
+<span class="s2">from </span><span class="s1">jax._src.core </span><span class="s2">import </span><span class="s1">ShapedArray</span>
+<span class="s2">from </span><span class="s1">jax._src.tree_util </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">PyTreeDef</span><span class="s2">, </span><span class="s1">tree_flatten</span><span class="s2">, </span><span class="s1">tree_unflatten</span><span class="s2">, </span><span class="s1">tree_map</span><span class="s2">, </span><span class="s1">tree_structure</span><span class="s2">,</span>
+    <span class="s1">treedef_children</span><span class="s2">, </span><span class="s1">generate_key_paths</span><span class="s2">, </span><span class="s1">keystr)</span>
+<span class="s2">from </span><span class="s1">jax._src.tree_util </span><span class="s2">import </span><span class="s1">_replace_nones</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">linear_util </span><span class="s2">as </span><span class="s1">lu</span>
+<span class="s2">from </span><span class="s1">jax._src.linear_util </span><span class="s2">import </span><span class="s1">TracingDebugInfo</span>
+<span class="s2">from </span><span class="s1">jax._src.util </span><span class="s2">import </span><span class="s1">(safe_map</span><span class="s2">, </span><span class="s1">WrapKwArgs</span><span class="s2">, </span><span class="s1">Hashable</span><span class="s2">, </span><span class="s1">HashableFunction</span><span class="s2">,</span>
+                           <span class="s1">Unhashable)</span>
+<span class="s2">from </span><span class="s1">jax._src.config </span><span class="s2">import </span><span class="s1">flags</span><span class="s2">, </span><span class="s1">bool_env</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">traceback_util</span>
+<span class="s1">traceback_util.register_exclusion(__file__)</span>
+
+<span class="s1">FLAGS = flags.FLAGS</span>
+
+<span class="s1">flags.DEFINE_bool(</span>
+    <span class="s3">&quot;experimental_cpp_jit&quot;</span><span class="s2">, </span><span class="s1">bool_env(</span><span class="s3">&quot;JAX_CPP_JIT&quot;</span><span class="s2">, True</span><span class="s1">)</span><span class="s2">,</span>
+    <span class="s3">&quot;A flag enabling the C++ jax.jit fast path.&quot;</span>
+    <span class="s3">&quot;Set this to `False` only if it crashes otherwise and report &quot;</span>
+    <span class="s3">&quot;the error to the jax-team.&quot;</span><span class="s1">)</span>
+<span class="s1">flags.DEFINE_bool(</span>
+    <span class="s3">&quot;experimental_cpp_pmap&quot;</span><span class="s2">, </span><span class="s1">bool_env(</span><span class="s3">&quot;JAX_CPP_PMAP&quot;</span><span class="s2">, True</span><span class="s1">)</span><span class="s2">,</span>
+    <span class="s3">&quot;A flag enabling the C++ jax.pmap fast path. Until the default &quot;</span>
+    <span class="s3">&quot;is switched to True, the feature is not supported and possibly broken &quot;</span>
+    <span class="s3">&quot;(e.g. it may use unreleased code from jaxlib.&quot;</span><span class="s1">)</span>
+<span class="s1">flags.DEFINE_bool(</span>
+    <span class="s3">&quot;experimental_cpp_pjit&quot;</span><span class="s2">, </span><span class="s1">bool_env(</span><span class="s3">&quot;JAX_CPP_PJIT&quot;</span><span class="s2">, True</span><span class="s1">)</span><span class="s2">,</span>
+    <span class="s3">&quot;A flag enabling the C++ pjit fast path. Until the default &quot;</span>
+    <span class="s3">&quot;is switched to True, the feature is not supported and possibly broken &quot;</span>
+    <span class="s3">&quot;(e.g. it may use unreleased code from jaxlib.&quot;</span><span class="s1">)</span>
+
+<span class="s1">map = safe_map</span>
+
+<span class="s2">def </span><span class="s1">_ensure_index(x: Any) -&gt; Union[int</span><span class="s2">, </span><span class="s1">Tuple[int</span><span class="s2">, </span><span class="s1">...]]:</span>
+  <span class="s4">&quot;&quot;&quot;Ensure x is either an index or a tuple of indices.&quot;&quot;&quot;</span>
+  <span class="s1">x = core.concrete_or_error(</span><span class="s2">None, </span><span class="s1">x</span><span class="s2">, </span><span class="s3">&quot;expected a static index or sequence of indices.&quot;</span><span class="s1">)</span>
+  <span class="s2">try</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">operator.index(x)</span>
+  <span class="s2">except </span><span class="s1">TypeError:</span>
+    <span class="s2">return </span><span class="s1">tuple(map(operator.index</span><span class="s2">, </span><span class="s1">x))</span>
+
+<span class="s2">def </span><span class="s1">_ensure_index_tuple(x: Any) -&gt; Tuple[int</span><span class="s2">, </span><span class="s1">...]:</span>
+  <span class="s4">&quot;&quot;&quot;Convert x to a tuple of indices.&quot;&quot;&quot;</span>
+  <span class="s1">x = core.concrete_or_error(</span><span class="s2">None, </span><span class="s1">x</span><span class="s2">, </span><span class="s3">&quot;expected a static index or sequence of indices.&quot;</span><span class="s1">)</span>
+  <span class="s2">try</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">(operator.index(x)</span><span class="s2">,</span><span class="s1">)</span>
+  <span class="s2">except </span><span class="s1">TypeError:</span>
+    <span class="s2">return </span><span class="s1">tuple(map(operator.index</span><span class="s2">, </span><span class="s1">x))</span>
+
+<span class="s2">def </span><span class="s1">_ensure_str(x: str) -&gt; str:</span>
+  <span class="s2">if not </span><span class="s1">isinstance(x</span><span class="s2">, </span><span class="s1">str):</span>
+    <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">f&quot;argument is not a string: </span><span class="s2">{</span><span class="s1">x</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+  <span class="s2">return </span><span class="s1">x</span>
+
+<span class="s2">def </span><span class="s1">_ensure_str_tuple(x: Union[str</span><span class="s2">, </span><span class="s1">Iterable[str]]) -&gt; Tuple[str</span><span class="s2">, </span><span class="s1">...]:</span>
+  <span class="s4">&quot;&quot;&quot;Convert x to a tuple of strings.&quot;&quot;&quot;</span>
+  <span class="s2">if </span><span class="s1">isinstance(x</span><span class="s2">, </span><span class="s1">str):</span>
+    <span class="s2">return </span><span class="s1">(x</span><span class="s2">,</span><span class="s1">)</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">tuple(map(_ensure_str</span><span class="s2">, </span><span class="s1">x))</span>
+
+<span class="s1">@lu.transformation_with_aux</span>
+<span class="s2">def </span><span class="s1">flatten_fun(in_tree</span><span class="s2">, </span><span class="s1">*args_flat):</span>
+  <span class="s1">py_args</span><span class="s2">, </span><span class="s1">py_kwargs = tree_unflatten(in_tree</span><span class="s2">, </span><span class="s1">args_flat)</span>
+  <span class="s1">ans = </span><span class="s2">yield </span><span class="s1">py_args</span><span class="s2">, </span><span class="s1">py_kwargs</span>
+  <span class="s2">yield </span><span class="s1">tree_flatten(ans)</span>
+
+<span class="s2">def </span><span class="s1">apply_flat_fun(fun</span><span class="s2">, </span><span class="s1">io_tree</span><span class="s2">, </span><span class="s1">*py_args):</span>
+  <span class="s1">in_tree_expected</span><span class="s2">, </span><span class="s1">out_tree = io_tree</span>
+  <span class="s1">args</span><span class="s2">, </span><span class="s1">in_tree = tree_flatten((py_args</span><span class="s2">, </span><span class="s1">{}))</span>
+  <span class="s2">if </span><span class="s1">in_tree != in_tree_expected:</span>
+    <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">f&quot;Expected </span><span class="s2">{</span><span class="s1">in_tree_expected</span><span class="s2">}</span><span class="s3">, got </span><span class="s2">{</span><span class="s1">in_tree</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+  <span class="s1">ans = fun(*args)</span>
+  <span class="s2">return </span><span class="s1">tree_unflatten(out_tree</span><span class="s2">, </span><span class="s1">ans)</span>
+
+<span class="s1">@lu.transformation_with_aux</span>
+<span class="s2">def </span><span class="s1">flatten_fun_nokwargs(in_tree</span><span class="s2">, </span><span class="s1">*args_flat):</span>
+  <span class="s1">py_args = tree_unflatten(in_tree</span><span class="s2">, </span><span class="s1">args_flat)</span>
+  <span class="s1">ans = </span><span class="s2">yield </span><span class="s1">py_args</span><span class="s2">, </span><span class="s1">{}</span>
+  <span class="s2">yield </span><span class="s1">tree_flatten(ans)</span>
+
+<span class="s2">def </span><span class="s1">apply_flat_fun_nokwargs(fun</span><span class="s2">, </span><span class="s1">io_tree</span><span class="s2">, </span><span class="s1">py_args):</span>
+  <span class="s1">in_tree_expected</span><span class="s2">, </span><span class="s1">out_tree = io_tree</span>
+  <span class="s1">args</span><span class="s2">, </span><span class="s1">in_tree = tree_flatten(py_args)</span>
+  <span class="s2">if </span><span class="s1">in_tree != in_tree_expected:</span>
+    <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">f&quot;Expected </span><span class="s2">{</span><span class="s1">in_tree_expected</span><span class="s2">}</span><span class="s3">, got </span><span class="s2">{</span><span class="s1">in_tree</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+  <span class="s1">ans = fun(*args)</span>
+  <span class="s2">return </span><span class="s1">tree_unflatten(out_tree</span><span class="s2">, </span><span class="s1">ans)</span>
+
+<span class="s2">def </span><span class="s1">flattened_fun_in_tree(</span>
+    <span class="s1">fn: lu.WrappedFun</span>
+  <span class="s1">) -&gt; Optional[Tuple[PyTreeDef</span><span class="s2">, </span><span class="s1">Callable[[]</span><span class="s2">, </span><span class="s1">PyTreeDef]</span><span class="s2">, </span><span class="s1">bool]]:</span>
+  <span class="s0"># This implementation relies on internal details of linear_util.py's</span>
+  <span class="s0"># WrappedFun, but it's for the worthy cause of better user error messages.</span>
+  <span class="s0"># It can fail (i.e. return None) if its WrappedFun argument is not transformed</span>
+  <span class="s0"># with flatten_fun or flatten_fun_nokwargs, which could happen e.g. when</span>
+  <span class="s0"># core.eval_jaxpr encounters a call primitive (though at that point we're just</span>
+  <span class="s0"># round-tripping jaxprs and the user errors in question are impossible).</span>
+  <span class="s2">assert </span><span class="s1">isinstance(flatten_fun</span><span class="s2">, </span><span class="s1">partial) </span><span class="s2">and </span><span class="s1">len(flatten_fun.args) == </span><span class="s5">1</span>
+  <span class="s2">assert </span><span class="s1">(isinstance(flatten_fun_nokwargs</span><span class="s2">, </span><span class="s1">partial) </span><span class="s2">and</span>
+          <span class="s1">len(flatten_fun_nokwargs.args) == </span><span class="s5">1</span><span class="s1">)</span>
+  <span class="s1">flattens = {flatten_fun.args[</span><span class="s5">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">flatten_fun_nokwargs.args[</span><span class="s5">0</span><span class="s1">]}</span>
+  <span class="s2">try</span><span class="s1">:</span>
+    <span class="s1">((in_tree</span><span class="s2">,</span><span class="s1">)</span><span class="s2">, </span><span class="s1">out_tree_store</span><span class="s2">, </span><span class="s1">has_kwargs)</span><span class="s2">, </span><span class="s1">= (</span>
+        <span class="s1">(args</span><span class="s2">, </span><span class="s1">store</span><span class="s2">, </span><span class="s1">f </span><span class="s2">is </span><span class="s1">flatten_fun.args[</span><span class="s5">0</span><span class="s1">])</span>
+        <span class="s2">for </span><span class="s1">(f</span><span class="s2">, </span><span class="s1">args)</span><span class="s2">, </span><span class="s1">store </span><span class="s2">in </span><span class="s1">zip(fn.transforms</span><span class="s2">, </span><span class="s1">fn.stores) </span><span class="s2">if </span><span class="s1">f </span><span class="s2">in </span><span class="s1">flattens)</span>
+  <span class="s2">except </span><span class="s1">ValueError:</span>
+    <span class="s2">return None</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">in_tree</span><span class="s2">, lambda</span><span class="s1">: out_tree_store.val</span><span class="s2">, </span><span class="s1">has_kwargs</span>
+
+<span class="s1">@lu.transformation_with_aux</span>
+<span class="s2">def </span><span class="s1">flatten_fun_nokwargs2(in_tree</span><span class="s2">, </span><span class="s1">*args_flat):</span>
+  <span class="s1">py_args = tree_unflatten(in_tree</span><span class="s2">, </span><span class="s1">args_flat)</span>
+  <span class="s1">pair = </span><span class="s2">yield </span><span class="s1">py_args</span><span class="s2">, </span><span class="s1">{}</span>
+  <span class="s2">if not </span><span class="s1">isinstance(pair</span><span class="s2">, </span><span class="s1">(list</span><span class="s2">, </span><span class="s1">tuple)) </span><span class="s2">or </span><span class="s1">len(pair) != </span><span class="s5">2</span><span class="s1">:</span>
+    <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;expected function with aux output to return a two-element &quot;</span>
+                    <span class="s3">f&quot;tuple, but got type </span><span class="s2">{</span><span class="s1">type(pair)</span><span class="s2">} </span><span class="s3">with value </span><span class="s2">{</span><span class="s1">repr(pair)</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+  <span class="s1">ans</span><span class="s2">, </span><span class="s1">aux = pair</span>
+  <span class="s1">ans_flat</span><span class="s2">, </span><span class="s1">ans_tree = tree_flatten(ans)</span>
+  <span class="s1">aux_flat</span><span class="s2">, </span><span class="s1">aux_tree = tree_flatten(aux)</span>
+  <span class="s2">yield </span><span class="s1">(ans_flat</span><span class="s2">, </span><span class="s1">aux_flat)</span><span class="s2">, </span><span class="s1">(ans_tree</span><span class="s2">, </span><span class="s1">aux_tree)</span>
+
+<span class="s2">class </span><span class="s1">_HashableWithStrictTypeEquality:</span>
+  <span class="s4">&quot;&quot;&quot;Box object used when comparing static arguments as a jit key. 
+ 
+  Requires exact type equality using `is` and value equality.&quot;&quot;&quot;</span>
+  <span class="s1">__slots__ = [</span><span class="s3">&quot;val&quot;</span><span class="s1">]</span>
+
+  <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">val):</span>
+    <span class="s1">self.val = val</span>
+
+  <span class="s2">def </span><span class="s1">__hash__(self):</span>
+    <span class="s2">return </span><span class="s1">hash(self.val)</span>
+
+  <span class="s2">def </span><span class="s1">__eq__(self</span><span class="s2">, </span><span class="s1">other):</span>
+    <span class="s2">return </span><span class="s1">type(self.val) </span><span class="s2">is </span><span class="s1">type(other.val) </span><span class="s2">and </span><span class="s1">self.val == other.val</span>
+
+<span class="s1">_POSITIONAL_ARGUMENTS = (</span>
+  <span class="s1">inspect.Parameter.POSITIONAL_ONLY</span><span class="s2">,</span>
+  <span class="s1">inspect.Parameter.POSITIONAL_OR_KEYWORD</span>
+<span class="s1">)</span>
+
+<span class="s2">def </span><span class="s1">validate_argnums(sig: inspect.Signature</span><span class="s2">, </span><span class="s1">argnums: Tuple[int</span><span class="s2">, </span><span class="s1">...]</span><span class="s2">, </span><span class="s1">argnums_name: str) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+  <span class="s4">&quot;&quot;&quot; 
+  Validate that the argnums are sensible for a given function. 
+ 
+  For functions that accept a variable number of positions arguments 
+  (`f(..., *args)`) all positive argnums are considered valid. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">n_pos_args = </span><span class="s5">0</span>
+  <span class="s2">for </span><span class="s1">param </span><span class="s2">in </span><span class="s1">sig.parameters.values():</span>
+    <span class="s2">if </span><span class="s1">param.kind </span><span class="s2">in </span><span class="s1">_POSITIONAL_ARGUMENTS:</span>
+      <span class="s1">n_pos_args += </span><span class="s5">1</span>
+
+    <span class="s2">elif </span><span class="s1">param.kind </span><span class="s2">is </span><span class="s1">inspect.Parameter.VAR_POSITIONAL:</span>
+      <span class="s0"># We can have any number of positional arguments</span>
+      <span class="s2">return</span>
+
+  <span class="s2">if </span><span class="s1">argnums </span><span class="s2">and </span><span class="s1">(-min(argnums) &gt; n_pos_args </span><span class="s2">or </span><span class="s1">max(argnums) &gt;= n_pos_args):</span>
+    <span class="s0"># raise ValueError(f&quot;Jitted function has {argnums_name}={argnums}, &quot;</span>
+    <span class="s0">#                  f&quot;but only accepts {n_pos_args} positional arguments.&quot;)</span>
+    <span class="s0"># TODO: 2022-08-20 or later: replace with error</span>
+    <span class="s1">warnings.warn(</span><span class="s3">f&quot;Jitted function has </span><span class="s2">{</span><span class="s1">argnums_name</span><span class="s2">}</span><span class="s3">=</span><span class="s2">{</span><span class="s1">argnums</span><span class="s2">}</span><span class="s3">, &quot;</span>
+                  <span class="s3">f&quot;but only accepts </span><span class="s2">{</span><span class="s1">n_pos_args</span><span class="s2">} </span><span class="s3">positional arguments. &quot;</span>
+                  <span class="s3">&quot;This warning will be replaced by an error after 2022-08-20 &quot;</span>
+                  <span class="s3">&quot;at the earliest.&quot;</span><span class="s2">, </span><span class="s1">SyntaxWarning)</span>
+
+<span class="s1">_INVALID_KEYWORD_ARGUMENTS = (</span>
+  <span class="s1">inspect.Parameter.POSITIONAL_ONLY</span><span class="s2">,</span>
+  <span class="s1">inspect.Parameter.VAR_POSITIONAL</span>
+<span class="s1">)</span>
+
+<span class="s1">_KEYWORD_ARGUMENTS = (</span>
+  <span class="s1">inspect.Parameter.POSITIONAL_OR_KEYWORD</span><span class="s2">,</span>
+  <span class="s1">inspect.Parameter.KEYWORD_ONLY</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">def </span><span class="s1">validate_argnames(sig: inspect.Signature</span><span class="s2">, </span><span class="s1">argnames: Tuple[str</span><span class="s2">, </span><span class="s1">...]</span><span class="s2">, </span><span class="s1">argnames_name: str) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+  <span class="s4">&quot;&quot;&quot; 
+  Validate that the argnames are sensible for a given function. 
+ 
+  For functions that accept a variable keyword arguments 
+  (`f(..., **kwargs)`) all argnames are considered valid except those 
+  marked as position-only (`f(pos_only, /, ...)`). 
+  &quot;&quot;&quot;</span>
+  <span class="s1">var_kwargs = </span><span class="s2">False</span>
+  <span class="s1">valid_kwargs: Set[str] = set()</span>
+  <span class="s1">invalid_kwargs: Set[str] = set()</span>
+  <span class="s2">for </span><span class="s1">param_name</span><span class="s2">, </span><span class="s1">param </span><span class="s2">in </span><span class="s1">sig.parameters.items():</span>
+    <span class="s2">if </span><span class="s1">param.kind </span><span class="s2">in </span><span class="s1">_KEYWORD_ARGUMENTS:</span>
+      <span class="s1">valid_kwargs.add(param_name)</span>
+
+    <span class="s2">elif </span><span class="s1">param.kind </span><span class="s2">is </span><span class="s1">inspect.Parameter.VAR_KEYWORD:</span>
+      <span class="s1">var_kwargs = </span><span class="s2">True</span>
+
+    <span class="s2">elif </span><span class="s1">param.kind </span><span class="s2">in </span><span class="s1">_INVALID_KEYWORD_ARGUMENTS:</span>
+      <span class="s1">invalid_kwargs.add(param_name)</span>
+
+
+  <span class="s0"># Check whether any kwargs are invalid due to position only</span>
+  <span class="s1">invalid_argnames = invalid_kwargs &amp; set(argnames)</span>
+  <span class="s2">if </span><span class="s1">invalid_argnames:</span>
+    <span class="s0"># raise ValueError(f&quot;Jitted function has invalid argnames {invalid_argnames} &quot;</span>
+    <span class="s0">#                  f&quot;in {argnames_name}. These are positional-only&quot;)</span>
+    <span class="s0"># TODO: 2022-08-20 or later: replace with error</span>
+    <span class="s1">warnings.warn(</span><span class="s3">f&quot;Jitted function has invalid argnames </span><span class="s2">{</span><span class="s1">invalid_argnames</span><span class="s2">} </span><span class="s3">&quot;</span>
+                  <span class="s3">f&quot;in </span><span class="s2">{</span><span class="s1">argnames_name</span><span class="s2">}</span><span class="s3">. These are positional-only. &quot;</span>
+                  <span class="s3">&quot;This warning will be replaced by an error after 2022-08-20 &quot;</span>
+                  <span class="s3">&quot;at the earliest.&quot;</span><span class="s2">, </span><span class="s1">SyntaxWarning)</span>
+
+  <span class="s0"># Takes any kwargs</span>
+  <span class="s2">if </span><span class="s1">var_kwargs:</span>
+    <span class="s2">return</span>
+
+  <span class="s0"># Check that all argnames exist on function</span>
+  <span class="s1">invalid_argnames = set(argnames) - valid_kwargs</span>
+  <span class="s2">if </span><span class="s1">invalid_argnames:</span>
+    <span class="s0"># TODO: 2022-08-20 or later: replace with error</span>
+    <span class="s0"># raise ValueError(f&quot;Jitted function has invalid argnames {invalid_argnames} &quot;</span>
+    <span class="s0">#                  f&quot;in {argnames_name}. Function does not take these args.&quot;)</span>
+    <span class="s1">warnings.warn(</span><span class="s3">f&quot;Jitted function has invalid argnames </span><span class="s2">{</span><span class="s1">invalid_argnames</span><span class="s2">} </span><span class="s3">&quot;</span>
+                  <span class="s3">f&quot;in </span><span class="s2">{</span><span class="s1">argnames_name</span><span class="s2">}</span><span class="s3">. Function does not take these args.&quot;</span>
+                  <span class="s3">&quot;This warning will be replaced by an error after 2022-08-20 &quot;</span>
+                  <span class="s3">&quot;at the earliest.&quot;</span><span class="s2">, </span><span class="s1">SyntaxWarning)</span>
+
+
+
+<span class="s2">def </span><span class="s1">argnums_partial(f</span><span class="s2">, </span><span class="s1">dyn_argnums</span><span class="s2">, </span><span class="s1">args</span><span class="s2">, </span><span class="s1">require_static_args_hashable=</span><span class="s2">True</span><span class="s1">):</span>
+  <span class="s1">dyn_argnums = _ensure_index_tuple(dyn_argnums)</span>
+  <span class="s1">dyn_argnums = _ensure_inbounds(</span><span class="s2">False, </span><span class="s1">len(args)</span><span class="s2">, </span><span class="s1">dyn_argnums)</span>
+  <span class="s2">if </span><span class="s1">require_static_args_hashable:</span>
+    <span class="s1">fixed_args = []</span>
+    <span class="s2">for </span><span class="s1">i</span><span class="s2">, </span><span class="s1">arg </span><span class="s2">in </span><span class="s1">enumerate(args):</span>
+      <span class="s2">if </span><span class="s1">i </span><span class="s2">in </span><span class="s1">dyn_argnums: </span><span class="s2">continue</span>
+      <span class="s2">if not </span><span class="s1">is_hashable(arg):</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span>
+            <span class="s3">&quot;Non-hashable static arguments are not supported, as this can lead &quot;</span>
+            <span class="s3">f&quot;to unexpected cache-misses. Static argument (index </span><span class="s2">{</span><span class="s1">i</span><span class="s2">}</span><span class="s3">) of type &quot;</span>
+            <span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">type(arg)</span><span class="s2">} </span><span class="s3">for function </span><span class="s2">{</span><span class="s1">f.__name__</span><span class="s2">} </span><span class="s3">is non-hashable.&quot;</span><span class="s1">)</span>
+      <span class="s1">fixed_args.append(_HashableWithStrictTypeEquality(arg))</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s1">fixed_args = [Unhashable(arg) </span><span class="s2">for </span><span class="s1">i</span><span class="s2">, </span><span class="s1">arg </span><span class="s2">in </span><span class="s1">enumerate(args)</span>
+                  <span class="s2">if </span><span class="s1">i </span><span class="s2">not in </span><span class="s1">dyn_argnums]</span>
+  <span class="s1">dyn_args = tuple(args[i] </span><span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">dyn_argnums)</span>
+  <span class="s2">return </span><span class="s1">_argnums_partial(f</span><span class="s2">, </span><span class="s1">dyn_argnums</span><span class="s2">, </span><span class="s1">tuple(fixed_args))</span><span class="s2">, </span><span class="s1">dyn_args</span>
+
+<span class="s2">def </span><span class="s1">_ensure_inbounds(allow_invalid: bool</span><span class="s2">, </span><span class="s1">num_args: int</span><span class="s2">, </span><span class="s1">argnums: Sequence[int]</span>
+                     <span class="s1">) -&gt; Tuple[int</span><span class="s2">, </span><span class="s1">...]:</span>
+  <span class="s4">&quot;&quot;&quot;Ensure argnum is within bounds. Also resolves negative argnums.&quot;&quot;&quot;</span>
+  <span class="s1">result = []</span>
+  <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">argnums:</span>
+    <span class="s2">if </span><span class="s1">i &gt;= num_args </span><span class="s2">and </span><span class="s1">allow_invalid: </span><span class="s2">continue</span>
+    <span class="s2">if not </span><span class="s1">-num_args &lt;= i &lt; num_args:</span>
+      <span class="s2">raise </span><span class="s1">ValueError(</span>
+          <span class="s3">&quot;Positional argument indices, e.g. for `static_argnums`, must have &quot;</span>
+          <span class="s3">&quot;value greater than or equal to -len(args) and less than len(args), &quot;</span>
+          <span class="s3">f&quot;but got value </span><span class="s2">{</span><span class="s1">i</span><span class="s2">} </span><span class="s3">for len(args) == </span><span class="s2">{</span><span class="s1">num_args</span><span class="s2">}</span><span class="s3">.&quot;</span><span class="s1">)</span>
+    <span class="s1">result.append(i % num_args)  </span><span class="s0"># Resolve negative</span>
+  <span class="s2">return </span><span class="s1">tuple(result)</span>
+
+
+<span class="s2">def </span><span class="s1">argnums_partial_except(f: lu.WrappedFun</span><span class="s2">, </span><span class="s1">static_argnums: Tuple[int</span><span class="s2">, </span><span class="s1">...]</span><span class="s2">,</span>
+                           <span class="s1">args: Tuple[Any</span><span class="s2">, </span><span class="s1">...]</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">allow_invalid: bool):</span>
+  <span class="s4">&quot;Version of ``argnums_partial`` that checks hashability of static_argnums.&quot;</span>
+  <span class="s2">if not </span><span class="s1">static_argnums:</span>
+    <span class="s2">return </span><span class="s1">f</span><span class="s2">, </span><span class="s1">args</span>
+  <span class="s1">static_argnums = _ensure_inbounds(allow_invalid</span><span class="s2">, </span><span class="s1">len(args)</span><span class="s2">, </span><span class="s1">static_argnums)</span>
+  <span class="s1">dyn_argnums = tuple(i </span><span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range(len(args)) </span><span class="s2">if </span><span class="s1">i </span><span class="s2">not in </span><span class="s1">static_argnums)</span>
+  <span class="s1">dyn_args = tuple(args[i] </span><span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">dyn_argnums)</span>
+
+  <span class="s1">fixed_args = []</span>
+  <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">static_argnums:</span>
+    <span class="s0"># TODO(shoyer): set allow_invalid=True permanently after static_argnames.</span>
+    <span class="s2">if </span><span class="s1">allow_invalid </span><span class="s2">and </span><span class="s1">i &gt;= len(args):</span>
+      <span class="s2">continue</span>
+    <span class="s1">static_arg = args[i]</span>
+    <span class="s2">if not </span><span class="s1">is_hashable(static_arg):</span>
+      <span class="s2">raise </span><span class="s1">ValueError(</span>
+          <span class="s3">&quot;Non-hashable static arguments are not supported, as this can lead &quot;</span>
+          <span class="s3">f&quot;to unexpected cache-misses. Static argument (index </span><span class="s2">{</span><span class="s1">i</span><span class="s2">}</span><span class="s3">) of type &quot;</span>
+          <span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">type(static_arg)</span><span class="s2">} </span><span class="s3">for function </span><span class="s2">{</span><span class="s1">f.__name__</span><span class="s2">} </span><span class="s3">is non-hashable.&quot;</span><span class="s1">)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+      <span class="s1">fixed_args.append(_HashableWithStrictTypeEquality(static_arg))  </span><span class="s0"># type: ignore</span>
+
+  <span class="s2">return </span><span class="s1">_argnums_partial(f</span><span class="s2">, </span><span class="s1">dyn_argnums</span><span class="s2">, </span><span class="s1">tuple(fixed_args))</span><span class="s2">, </span><span class="s1">dyn_args</span>
+
+<span class="s1">@lu.transformation</span>
+<span class="s2">def </span><span class="s1">_argnums_partial(dyn_argnums</span><span class="s2">, </span><span class="s1">fixed_args</span><span class="s2">, </span><span class="s1">*dyn_args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+  <span class="s1">sentinel = object()</span>
+  <span class="s1">args = [sentinel] * (len(fixed_args) + len(dyn_args))</span>
+  <span class="s2">for </span><span class="s1">i</span><span class="s2">, </span><span class="s1">arg </span><span class="s2">in </span><span class="s1">zip(dyn_argnums</span><span class="s2">, </span><span class="s1">dyn_args):</span>
+    <span class="s1">args[i] = arg</span>
+  <span class="s1">fixed_args_ = iter(fixed_args)</span>
+  <span class="s1">args = [next(fixed_args_).val </span><span class="s2">if </span><span class="s1">x </span><span class="s2">is </span><span class="s1">sentinel </span><span class="s2">else </span><span class="s1">x </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">args]</span>
+  <span class="s2">assert </span><span class="s1">next(fixed_args_</span><span class="s2">, </span><span class="s1">sentinel) </span><span class="s2">is </span><span class="s1">sentinel</span>
+  <span class="s1">ans = </span><span class="s2">yield </span><span class="s1">args</span><span class="s2">, </span><span class="s1">kwargs</span>
+  <span class="s2">yield </span><span class="s1">ans</span>
+
+
+<span class="s2">def </span><span class="s1">argnames_partial_except(f: lu.WrappedFun</span><span class="s2">, </span><span class="s1">static_argnames: Tuple[str</span><span class="s2">, </span><span class="s1">...]</span><span class="s2">,</span>
+                            <span class="s1">kwargs: Dict[str</span><span class="s2">, </span><span class="s1">Any]):</span>
+  <span class="s2">if not </span><span class="s1">static_argnames:</span>
+    <span class="s2">return </span><span class="s1">f</span><span class="s2">, </span><span class="s1">kwargs</span>
+  <span class="s1">dyn_kwargs = {k: v </span><span class="s2">for </span><span class="s1">k</span><span class="s2">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">kwargs.items() </span><span class="s2">if </span><span class="s1">k </span><span class="s2">not in </span><span class="s1">static_argnames}</span>
+
+  <span class="s1">fixed_kwargs: Dict[str</span><span class="s2">, </span><span class="s1">Any] = {}</span>
+  <span class="s2">for </span><span class="s1">k</span><span class="s2">, </span><span class="s1">arg </span><span class="s2">in </span><span class="s1">kwargs.items():</span>
+    <span class="s2">if </span><span class="s1">k </span><span class="s2">not in </span><span class="s1">dyn_kwargs:</span>
+      <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">hash(arg)</span>
+      <span class="s2">except </span><span class="s1">TypeError:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span>
+            <span class="s3">&quot;Non-hashable static arguments are not supported, as this can lead &quot;</span>
+            <span class="s3">f&quot;to unexpected cache-misses. Static argument (name </span><span class="s2">{</span><span class="s1">k</span><span class="s2">}</span><span class="s3">) of type &quot;</span>
+            <span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">type(arg)</span><span class="s2">} </span><span class="s3">for function </span><span class="s2">{</span><span class="s1">f.__name__</span><span class="s2">} </span><span class="s3">is non-hashable.&quot;</span><span class="s1">)</span>
+      <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">fixed_kwargs[k] = Hashable(arg)  </span><span class="s0"># type: ignore</span>
+
+  <span class="s2">return </span><span class="s1">_argnames_partial(f</span><span class="s2">, </span><span class="s1">WrapKwArgs(fixed_kwargs))</span><span class="s2">, </span><span class="s1">dyn_kwargs</span>
+
+<span class="s1">@lu.transformation</span>
+<span class="s2">def </span><span class="s1">_argnames_partial(fixed_kwargs: WrapKwArgs</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**dyn_kwargs):</span>
+  <span class="s1">kwargs = dict({k: v.val </span><span class="s2">for </span><span class="s1">k</span><span class="s2">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">fixed_kwargs.val.items()}</span><span class="s2">, </span><span class="s1">**dyn_kwargs)</span>
+  <span class="s1">ans = </span><span class="s2">yield </span><span class="s1">args</span><span class="s2">, </span><span class="s1">kwargs</span>
+  <span class="s2">yield </span><span class="s1">ans</span>
+
+
+<span class="s2">def </span><span class="s1">donation_vector(donate_argnums</span><span class="s2">, </span><span class="s1">args</span><span class="s2">, </span><span class="s1">kwargs) -&gt; Tuple[bool</span><span class="s2">, </span><span class="s1">...]:</span>
+  <span class="s4">&quot;&quot;&quot;Returns a tuple with a boolean value for each leaf in args.&quot;&quot;&quot;</span>
+  <span class="s1">res: List[bool] = []</span>
+  <span class="s2">for </span><span class="s1">i</span><span class="s2">, </span><span class="s1">arg </span><span class="s2">in </span><span class="s1">enumerate(args):</span>
+    <span class="s1">donate = bool(i </span><span class="s2">in </span><span class="s1">donate_argnums)</span>
+    <span class="s1">res.extend((donate</span><span class="s2">,</span><span class="s1">) * tree_structure(arg).num_leaves)</span>
+  <span class="s1">res.extend((</span><span class="s2">False,</span><span class="s1">) * tree_structure(kwargs).num_leaves)</span>
+  <span class="s2">return </span><span class="s1">tuple(res)</span>
+
+<span class="s2">def </span><span class="s1">rebase_donate_argnums(donate_argnums</span><span class="s2">, </span><span class="s1">static_argnums) -&gt; Tuple[int</span><span class="s2">, </span><span class="s1">...]:</span>
+  <span class="s4">&quot;&quot;&quot;Shifts donate to account for static. 
+ 
+  &gt;&gt;&gt; rebase_donate_argnums((3, 4), (0, 1)) 
+  (1, 2) 
+ 
+  Args: 
+    donate_argnums: An iterable of ints. 
+    static_argnums: An iterable of ints. 
+ 
+  Returns: 
+    A tuple of unique, sorted integer values based on donate_argnums with each 
+    element offset to account for static_argnums. 
+  &quot;&quot;&quot;</span>
+  <span class="s2">if not </span><span class="s1">(static_argnums </span><span class="s2">or </span><span class="s1">donate_argnums):</span>
+    <span class="s2">return </span><span class="s1">tuple(sorted(donate_argnums))</span>
+
+  <span class="s1">static_argnums = sorted(set(static_argnums))</span>
+  <span class="s1">donate_argnums = sorted(set(donate_argnums))</span>
+  <span class="s1">i = j = o = </span><span class="s5">0</span>
+  <span class="s1">out = []</span>
+  <span class="s2">while </span><span class="s1">j &lt; len(donate_argnums):</span>
+    <span class="s2">if </span><span class="s1">i &lt; len(static_argnums) </span><span class="s2">and </span><span class="s1">static_argnums[i] == donate_argnums[j]:</span>
+      <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">f&quot;`static_argnums` </span><span class="s2">{</span><span class="s1">static_argnums</span><span class="s2">} </span><span class="s3">and &quot;</span>
+                       <span class="s3">f&quot;`donate_argnums` </span><span class="s2">{</span><span class="s1">donate_argnums</span><span class="s2">} </span><span class="s3">cannot intersect.&quot;</span><span class="s1">)</span>
+
+    <span class="s2">if </span><span class="s1">i &lt; len(static_argnums) </span><span class="s2">and </span><span class="s1">static_argnums[i] &lt; donate_argnums[j]:</span>
+      <span class="s1">o += </span><span class="s5">1</span>
+      <span class="s1">i += </span><span class="s5">1</span>
+    <span class="s2">else</span><span class="s1">:</span>
+      <span class="s1">out.append(donate_argnums[j] - o)</span>
+      <span class="s1">j += </span><span class="s5">1</span>
+  <span class="s2">return </span><span class="s1">tuple(out)</span>
+
+
+<span class="s2">def </span><span class="s1">is_hashable(arg):</span>
+  <span class="s2">try</span><span class="s1">:</span>
+    <span class="s1">hash(arg)</span>
+    <span class="s2">return True</span>
+  <span class="s2">except </span><span class="s1">TypeError:</span>
+    <span class="s2">return False</span>
+
+
+<span class="s2">def </span><span class="s1">flatten_axes(name</span><span class="s2">, </span><span class="s1">treedef</span><span class="s2">, </span><span class="s1">axis_tree</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">kws=</span><span class="s2">False, </span><span class="s1">tupled_args=</span><span class="s2">False</span><span class="s1">):</span>
+  <span class="s0"># given an axis spec tree axis_tree (a pytree with integers and Nones at the</span>
+  <span class="s0"># leaves, i.e. the Nones are to be considered leaves) that is a tree prefix of</span>
+  <span class="s0"># the given treedef, build a complete axis spec tree with the same structure</span>
+  <span class="s0"># and return the flattened result</span>
+  <span class="s0"># TODO(mattjj,phawkins): improve this implementation</span>
+
+  <span class="s1">proxy = object()</span>
+  <span class="s1">dummy = tree_unflatten(treedef</span><span class="s2">, </span><span class="s1">[object()] * treedef.num_leaves)</span>
+  <span class="s1">axes = []</span>
+  <span class="s1">add_leaves = </span><span class="s2">lambda </span><span class="s1">i</span><span class="s2">, </span><span class="s1">x: axes.extend([i] * len(tree_flatten(x)[</span><span class="s5">0</span><span class="s1">]))</span>
+  <span class="s2">try</span><span class="s1">:</span>
+    <span class="s1">tree_map(add_leaves</span><span class="s2">, </span><span class="s1">_replace_nones(proxy</span><span class="s2">, </span><span class="s1">axis_tree)</span><span class="s2">, </span><span class="s1">dummy)</span>
+  <span class="s2">except </span><span class="s1">ValueError:</span>
+    <span class="s2">if </span><span class="s1">kws:</span>
+      <span class="s0"># if keyword arguments are included in the tree, we make adapt the error</span>
+      <span class="s0"># message only to be about the positional arguments</span>
+      <span class="s1">treedef</span><span class="s2">, </span><span class="s1">_ = treedef_children(treedef)</span>
+      <span class="s1">axis_tree</span><span class="s2">, </span><span class="s1">_ = axis_tree</span>
+    <span class="s1">hint = </span><span class="s3">&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">tupled_args:</span>
+      <span class="s1">hint += (</span><span class="s3">f&quot; Note that </span><span class="s2">{</span><span class="s1">name</span><span class="s2">} </span><span class="s3">that are non-trivial pytrees should always be &quot;</span>
+               <span class="s3">f&quot;wrapped in a tuple representing the argument list.&quot;</span><span class="s1">)</span>
+      <span class="s2">if </span><span class="s1">len(treedef.children()) == </span><span class="s5">1</span><span class="s1">:</span>
+        <span class="s2">try</span><span class="s1">:</span>
+          <span class="s1">flatten_axes(name</span><span class="s2">, </span><span class="s1">treedef</span><span class="s2">, </span><span class="s1">(axis_tree</span><span class="s2">,</span><span class="s1">))</span>
+        <span class="s2">except </span><span class="s1">ValueError:</span>
+          <span class="s2">pass  </span><span class="s0"># That's not the issue.</span>
+        <span class="s2">else</span><span class="s1">:</span>
+          <span class="s1">hint += (</span><span class="s3">f&quot; In particular, you're passing in a single argument which &quot;</span>
+                   <span class="s3">f&quot;means that </span><span class="s2">{</span><span class="s1">name</span><span class="s2">} </span><span class="s3">might need to be wrapped in &quot;</span>
+                   <span class="s3">f&quot;a singleton tuple.&quot;</span><span class="s1">)</span>
+    <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">name</span><span class="s2">} </span><span class="s3">specification must be a tree prefix of the &quot;</span>
+                     <span class="s3">f&quot;corresponding value, got specification </span><span class="s2">{</span><span class="s1">axis_tree</span><span class="s2">} </span><span class="s3">&quot;</span>
+                     <span class="s3">f&quot;for value tree </span><span class="s2">{</span><span class="s1">treedef</span><span class="s2">}</span><span class="s3">.</span><span class="s2">{</span><span class="s1">hint</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">) </span><span class="s2">from None</span>
+  <span class="s1">axes = [</span><span class="s2">None if </span><span class="s1">a </span><span class="s2">is </span><span class="s1">proxy </span><span class="s2">else </span><span class="s1">a </span><span class="s2">for </span><span class="s1">a </span><span class="s2">in </span><span class="s1">axes]</span>
+  <span class="s2">assert </span><span class="s1">len(axes) == treedef.num_leaves</span>
+  <span class="s2">return </span><span class="s1">axes</span>
+
+
+<span class="s2">def </span><span class="s1">_isgeneratorfunction(fun):</span>
+  <span class="s0"># TODO 3.9+: remove</span>
+  <span class="s0"># re-implemented here because of https://bugs.python.org/issue33261</span>
+  <span class="s2">while </span><span class="s1">inspect.ismethod(fun):</span>
+    <span class="s1">fun = fun.__func__</span>
+  <span class="s2">while </span><span class="s1">isinstance(fun</span><span class="s2">, </span><span class="s1">partial):</span>
+    <span class="s1">fun = fun.func</span>
+  <span class="s2">return </span><span class="s1">inspect.isfunction(fun) </span><span class="s2">and </span><span class="s1">bool(fun.__code__.co_flags &amp; inspect.CO_GENERATOR)</span>
+
+
+<span class="s2">def </span><span class="s1">check_callable(fun):</span>
+  <span class="s0"># In Python 3.10+, the only thing stopping us from supporting staticmethods</span>
+  <span class="s0"># is that we can't take weak references to them, which the C++ JIT requires.</span>
+  <span class="s2">if </span><span class="s1">isinstance(fun</span><span class="s2">, </span><span class="s1">staticmethod):</span>
+    <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">f&quot;staticmethod arguments are not supported, got </span><span class="s2">{</span><span class="s1">fun</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+  <span class="s2">if not </span><span class="s1">callable(fun):</span>
+    <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">f&quot;Expected a callable value, got </span><span class="s2">{</span><span class="s1">fun</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+  <span class="s2">if </span><span class="s1">_isgeneratorfunction(fun):</span>
+    <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">f&quot;Expected a function, got a generator function: </span><span class="s2">{</span><span class="s1">fun</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+
+<span class="s1">_POSITIONAL_OR_KEYWORD = inspect.Parameter.POSITIONAL_OR_KEYWORD</span>
+
+<span class="s2">def </span><span class="s1">infer_argnums_and_argnames(</span>
+    <span class="s1">sig: inspect.Signature</span><span class="s2">,</span>
+    <span class="s1">argnums: Union[int</span><span class="s2">, </span><span class="s1">Iterable[int]</span><span class="s2">, None</span><span class="s1">]</span><span class="s2">,</span>
+    <span class="s1">argnames: Union[str</span><span class="s2">, </span><span class="s1">Iterable[str]</span><span class="s2">, None</span><span class="s1">]</span><span class="s2">,</span>
+  <span class="s1">) -&gt; Tuple[Tuple[int</span><span class="s2">, </span><span class="s1">...]</span><span class="s2">, </span><span class="s1">Tuple[str</span><span class="s2">, </span><span class="s1">...]]:</span>
+  <span class="s4">&quot;&quot;&quot;Infer missing argnums and argnames for a function with inspect.&quot;&quot;&quot;</span>
+  <span class="s2">if </span><span class="s1">argnums </span><span class="s2">is None and </span><span class="s1">argnames </span><span class="s2">is None</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">()</span><span class="s2">, </span><span class="s1">()</span>
+
+  <span class="s2">if </span><span class="s1">argnums </span><span class="s2">is not None and </span><span class="s1">argnames </span><span class="s2">is not None</span><span class="s1">:</span>
+    <span class="s1">argnums = _ensure_index_tuple(argnums)</span>
+    <span class="s1">argnames = _ensure_str_tuple(argnames)</span>
+
+    <span class="s2">return </span><span class="s1">argnums</span><span class="s2">, </span><span class="s1">argnames</span>
+
+  <span class="s1">parameters = sig.parameters</span>
+  <span class="s2">if </span><span class="s1">argnums </span><span class="s2">is None</span><span class="s1">:</span>
+    <span class="s2">assert </span><span class="s1">argnames </span><span class="s2">is not None</span>
+    <span class="s1">argnames = _ensure_str_tuple(argnames)</span>
+    <span class="s1">argnums = tuple(</span>
+        <span class="s1">i </span><span class="s2">for </span><span class="s1">i</span><span class="s2">, </span><span class="s1">(k</span><span class="s2">, </span><span class="s1">param) </span><span class="s2">in </span><span class="s1">enumerate(parameters.items())</span>
+        <span class="s2">if </span><span class="s1">param.kind == _POSITIONAL_OR_KEYWORD </span><span class="s2">and </span><span class="s1">k </span><span class="s2">in </span><span class="s1">argnames</span>
+    <span class="s1">)</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s1">argnums = _ensure_index_tuple(argnums)</span>
+    <span class="s1">argnames = tuple(</span>
+        <span class="s1">k </span><span class="s2">for </span><span class="s1">i</span><span class="s2">, </span><span class="s1">(k</span><span class="s2">, </span><span class="s1">param) </span><span class="s2">in </span><span class="s1">enumerate(parameters.items())</span>
+        <span class="s2">if </span><span class="s1">param.kind == _POSITIONAL_OR_KEYWORD </span><span class="s2">and </span><span class="s1">i </span><span class="s2">in </span><span class="s1">argnums</span>
+    <span class="s1">)</span>
+
+  <span class="s2">return </span><span class="s1">argnums</span><span class="s2">, </span><span class="s1">argnames</span>
+
+
+<span class="s2">def </span><span class="s1">resolve_argnums(</span>
+    <span class="s1">fun</span><span class="s2">, </span><span class="s1">donate_argnums</span><span class="s2">, </span><span class="s1">static_argnums</span><span class="s2">, </span><span class="s1">static_argnames</span>
+<span class="s1">) -&gt; Tuple[Tuple[int</span><span class="s2">, </span><span class="s1">...]</span><span class="s2">, </span><span class="s1">Tuple[int</span><span class="s2">, </span><span class="s1">...]</span><span class="s2">, </span><span class="s1">Tuple[str</span><span class="s2">, </span><span class="s1">...]]:</span>
+  <span class="s0"># Coerce input</span>
+  <span class="s1">donate_argnums = _ensure_index_tuple(donate_argnums)</span>
+
+  <span class="s2">try</span><span class="s1">:</span>
+    <span class="s1">sig = inspect.signature(fun)</span>
+  <span class="s2">except </span><span class="s1">ValueError:</span>
+    <span class="s0"># Some built-in functions don't support signature.</span>
+    <span class="s0"># See: https://github.com/python/cpython/issues/73485</span>
+    <span class="s0"># In this case no validation is done</span>
+    <span class="s1">static_argnums = () </span><span class="s2">if </span><span class="s1">static_argnums </span><span class="s2">is None else </span><span class="s1">_ensure_index_tuple(</span>
+        <span class="s1">static_argnums)</span>
+    <span class="s1">static_argnames = () </span><span class="s2">if </span><span class="s1">static_argnames </span><span class="s2">is None else </span><span class="s1">_ensure_str_tuple(</span>
+        <span class="s1">static_argnames)</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s0"># Infer argnums and argnames according to docstring</span>
+    <span class="s1">static_argnums</span><span class="s2">, </span><span class="s1">static_argnames = infer_argnums_and_argnames(</span>
+        <span class="s1">sig</span><span class="s2">, </span><span class="s1">static_argnums</span><span class="s2">, </span><span class="s1">static_argnames)</span>
+
+    <span class="s0"># Validation</span>
+    <span class="s1">validate_argnums(sig</span><span class="s2">, </span><span class="s1">static_argnums</span><span class="s2">, </span><span class="s3">&quot;static_argnums&quot;</span><span class="s1">)</span>
+    <span class="s1">validate_argnums(sig</span><span class="s2">, </span><span class="s1">donate_argnums</span><span class="s2">, </span><span class="s3">&quot;donate_argnums&quot;</span><span class="s1">)</span>
+    <span class="s1">validate_argnames(sig</span><span class="s2">, </span><span class="s1">static_argnames</span><span class="s2">, </span><span class="s3">&quot;static_argnames&quot;</span><span class="s1">)</span>
+
+  <span class="s0"># Compensate for static argnums absorbing args</span>
+  <span class="s1">donate_argnums = rebase_donate_argnums(donate_argnums</span><span class="s2">, </span><span class="s1">static_argnums)</span>
+  <span class="s2">return </span><span class="s1">donate_argnums</span><span class="s2">, </span><span class="s1">static_argnums</span><span class="s2">, </span><span class="s1">static_argnames</span>
+
+
+<span class="s2">def </span><span class="s1">_dtype(x):</span>
+  <span class="s2">try</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">dtypes.result_type(x)</span>
+  <span class="s2">except </span><span class="s1">ValueError:</span>
+    <span class="s2">return </span><span class="s1">dtypes.result_type(getattr(x</span><span class="s2">, </span><span class="s3">'dtype'</span><span class="s1">))</span>
+
+<span class="s2">def </span><span class="s1">_shaped_abstractify_slow(x):</span>
+  <span class="s2">try</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">core.raise_to_shaped(</span>
+      <span class="s1">x </span><span class="s2">if </span><span class="s1">isinstance(x</span><span class="s2">, </span><span class="s1">core.AbstractValue) </span><span class="s2">else </span><span class="s1">core.get_aval(x))</span>
+  <span class="s2">except </span><span class="s1">TypeError:</span>
+    <span class="s2">pass</span>
+
+  <span class="s1">weak_type = getattr(x</span><span class="s2">, </span><span class="s3">'weak_type'</span><span class="s2">, False</span><span class="s1">)</span>
+  <span class="s1">named_shape = getattr(x</span><span class="s2">, </span><span class="s3">'named_shape'</span><span class="s2">, </span><span class="s1">{})</span>
+  <span class="s2">if </span><span class="s1">hasattr(x</span><span class="s2">, </span><span class="s3">'dtype'</span><span class="s1">):</span>
+    <span class="s1">dtype = dtypes.canonicalize_dtype(x.dtype</span><span class="s2">, </span><span class="s1">allow_opaque_dtype=</span><span class="s2">True</span><span class="s1">)</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s2">raise </span><span class="s1">TypeError(</span>
+        <span class="s3">f&quot;Cannot interpret value of type </span><span class="s2">{</span><span class="s1">type(x)</span><span class="s2">} </span><span class="s3">as an abstract array; it &quot;</span>
+        <span class="s3">&quot;does not have a dtype attribute&quot;</span><span class="s1">)</span>
+  <span class="s2">return </span><span class="s1">core.ShapedArray(np.shape(x)</span><span class="s2">, </span><span class="s1">dtype</span><span class="s2">, </span><span class="s1">weak_type=weak_type</span><span class="s2">,</span>
+                          <span class="s1">named_shape=named_shape)</span>
+
+<span class="s0"># TODO(mattjj,yashkatariya): replace xla.abstractify with this, same behavior</span>
+<span class="s2">def </span><span class="s1">shaped_abstractify(x):</span>
+  <span class="s2">try</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">_shaped_abstractify_handlers[type(x)](x)</span>
+  <span class="s2">except </span><span class="s1">KeyError:</span>
+    <span class="s2">return </span><span class="s1">_shaped_abstractify_slow(x)</span>
+<span class="s1">_shaped_abstractify_handlers: Dict[Any</span><span class="s2">, </span><span class="s1">Callable[[Any]</span><span class="s2">, </span><span class="s1">core.ShapedArray]] = {}</span>
+
+
+<span class="s2">def </span><span class="s1">_str_abstractify(x):</span>
+  <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">f&quot;Argument '</span><span class="s2">{</span><span class="s1">x</span><span class="s2">}</span><span class="s3">' of type </span><span class="s2">{</span><span class="s1">type(x)</span><span class="s2">} </span><span class="s3">is not a valid JAX type&quot;</span><span class="s1">)</span>
+<span class="s1">_shaped_abstractify_handlers[str] = _str_abstractify</span>
+
+<span class="s2">def </span><span class="s1">_numpy_array_abstractify(x: np.ndarray) -&gt; ShapedArray:</span>
+  <span class="s1">dtype = x.dtype</span>
+  <span class="s1">dtypes.check_valid_dtype(dtype)</span>
+  <span class="s2">return </span><span class="s1">ShapedArray(x.shape</span><span class="s2">,</span>
+      <span class="s1">dtypes.canonicalize_dtype(dtype</span><span class="s2">, </span><span class="s1">allow_opaque_dtype=</span><span class="s2">True</span><span class="s1">))</span>
+<span class="s1">_shaped_abstractify_handlers[np.ndarray] = _numpy_array_abstractify</span>
+
+<span class="s2">def </span><span class="s1">_np_scalar_abstractify(x: np.generic) -&gt; ShapedArray:</span>
+  <span class="s1">dtype = np.dtype(x)</span>
+  <span class="s1">dtypes.check_valid_dtype(dtype)</span>
+  <span class="s2">return </span><span class="s1">ShapedArray(np.shape(x)</span><span class="s2">,</span>
+      <span class="s1">dtypes.canonicalize_dtype(dtype</span><span class="s2">, </span><span class="s1">allow_opaque_dtype=</span><span class="s2">True</span><span class="s1">))</span>
+<span class="s1">_shaped_abstractify_handlers.update((t</span><span class="s2">, </span><span class="s1">_np_scalar_abstractify)</span>
+                                    <span class="s2">for </span><span class="s1">t </span><span class="s2">in </span><span class="s1">numpy_scalar_types)</span>
+
+<span class="s0"># This decorator exists to make it easier to monkey-patch APIs in JAX.</span>
+<span class="s0"># By default it does nothing, but it can be monkey-patched to do other things.</span>
+<span class="s2">def </span><span class="s1">api_hook(fun</span><span class="s2">, </span><span class="s1">tag: str):</span>
+  <span class="s2">return </span><span class="s1">fun</span>
+
+
+<span class="s2">def </span><span class="s1">debug_info(traced_for: str</span><span class="s2">, </span><span class="s1">fun: Callable</span><span class="s2">, </span><span class="s1">args: Tuple[Any]</span><span class="s2">,</span>
+               <span class="s1">kwargs: Dict[str</span><span class="s2">, </span><span class="s1">Any]</span><span class="s2">, </span><span class="s1">static_argnums: Tuple[int</span><span class="s2">, </span><span class="s1">...]</span><span class="s2">,</span>
+               <span class="s1">static_argnames: Tuple[str</span><span class="s2">, </span><span class="s1">...]) -&gt; Optional[TracingDebugInfo]:</span>
+  <span class="s4">&quot;&quot;&quot;Try to build trace-time debug info for fun when applied to args/kwargs.&quot;&quot;&quot;</span>
+  <span class="s1">src = fun_sourceinfo(fun)</span>
+  <span class="s1">arg_names = _arg_names(fun</span><span class="s2">, </span><span class="s1">args</span><span class="s2">, </span><span class="s1">kwargs</span><span class="s2">, </span><span class="s1">static_argnums</span><span class="s2">, </span><span class="s1">static_argnames)</span>
+  <span class="s2">if </span><span class="s1">src </span><span class="s2">is None or </span><span class="s1">arg_names </span><span class="s2">is None</span><span class="s1">: </span><span class="s2">return None</span>
+  <span class="s2">return </span><span class="s1">TracingDebugInfo(traced_for</span><span class="s2">, </span><span class="s1">src</span><span class="s2">, </span><span class="s1">arg_names</span><span class="s2">, None</span><span class="s1">)</span>
+
+<span class="s0"># TODO(mattjj): make this function internal to this module</span>
+<span class="s2">def </span><span class="s1">fun_sourceinfo(fun: Callable) -&gt; Optional[str]:</span>
+  <span class="s2">while </span><span class="s1">isinstance(fun</span><span class="s2">, </span><span class="s1">partial):</span>
+    <span class="s1">fun = fun.func</span>
+  <span class="s1">fun = inspect.unwrap(fun)</span>
+  <span class="s2">try</span><span class="s1">:</span>
+    <span class="s1">filename = fun.__code__.co_filename</span>
+    <span class="s1">lineno = fun.__code__.co_firstlineno</span>
+    <span class="s2">return </span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">fun.__name__</span><span class="s2">} </span><span class="s3">at </span><span class="s2">{</span><span class="s1">filename</span><span class="s2">}</span><span class="s3">:</span><span class="s2">{</span><span class="s1">lineno</span><span class="s2">}</span><span class="s3">&quot;</span>
+  <span class="s2">except </span><span class="s1">AttributeError:</span>
+    <span class="s2">return None</span>
+
+<span class="s2">def </span><span class="s1">_arg_names(fn</span><span class="s2">, </span><span class="s1">args</span><span class="s2">, </span><span class="s1">kwargs</span><span class="s2">, </span><span class="s1">static_argnums</span><span class="s2">, </span><span class="s1">static_argnames</span><span class="s2">,</span>
+               <span class="s1">) -&gt; Optional[Tuple[str</span><span class="s2">, </span><span class="s1">...]]:</span>
+  <span class="s1">static = object()</span>
+  <span class="s1">static_argnums_ = _ensure_inbounds(</span><span class="s2">True, </span><span class="s1">len(args)</span><span class="s2">, </span><span class="s1">static_argnums)</span>
+  <span class="s1">static_argnames_ = set(static_argnames)</span>
+  <span class="s1">args_ = [static </span><span class="s2">if </span><span class="s1">i </span><span class="s2">in </span><span class="s1">static_argnums_ </span><span class="s2">else </span><span class="s1">x </span><span class="s2">for </span><span class="s1">i</span><span class="s2">, </span><span class="s1">x </span><span class="s2">in </span><span class="s1">enumerate(args)]</span>
+  <span class="s1">kwargs = {k:static </span><span class="s2">if </span><span class="s1">k </span><span class="s2">in </span><span class="s1">static_argnames_ </span><span class="s2">else </span><span class="s1">x </span><span class="s2">for </span><span class="s1">k</span><span class="s2">, </span><span class="s1">x </span><span class="s2">in </span><span class="s1">kwargs.items()}</span>
+  <span class="s2">try</span><span class="s1">:</span>
+    <span class="s1">ba = inspect.signature(fn).bind(*args_</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+  <span class="s2">except </span><span class="s1">(ValueError</span><span class="s2">, </span><span class="s1">TypeError):</span>
+    <span class="s2">return None</span>
+  <span class="s2">return </span><span class="s1">tuple(</span><span class="s3">f'</span><span class="s2">{</span><span class="s1">name</span><span class="s2">}{</span><span class="s1">keystr(path)</span><span class="s2">}</span><span class="s3">' </span><span class="s2">for </span><span class="s1">name</span><span class="s2">, </span><span class="s1">x </span><span class="s2">in </span><span class="s1">ba.arguments.items()</span>
+               <span class="s2">for </span><span class="s1">path</span><span class="s2">, </span><span class="s1">l </span><span class="s2">in </span><span class="s1">generate_key_paths(x) </span><span class="s2">if </span><span class="s1">l </span><span class="s2">is not </span><span class="s1">static)</span>
+
+<span class="s1">@lu.transformation_with_aux</span>
+<span class="s2">def </span><span class="s1">result_paths(*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+  <span class="s4">&quot;linear_util transform to get output pytree paths of pre-flattened function.&quot;</span>
+  <span class="s1">ans = </span><span class="s2">yield </span><span class="s1">args</span><span class="s2">, </span><span class="s1">kwargs</span>
+  <span class="s2">yield </span><span class="s1">ans</span><span class="s2">, </span><span class="s1">[keystr(path) </span><span class="s2">for </span><span class="s1">path</span><span class="s2">, </span><span class="s1">_ </span><span class="s2">in </span><span class="s1">generate_key_paths(ans)]</span>
+
+<span class="s2">def </span><span class="s1">jaxpr_debug_info(jaxpr: core.Jaxpr</span><span class="s2">, </span><span class="s1">trace_debug: Optional[TracingDebugInfo]</span><span class="s2">,</span>
+                     <span class="s1">result_paths: Optional[Tuple[Optional[str]</span><span class="s2">, </span><span class="s1">...]] = </span><span class="s2">None,</span>
+                     <span class="s1">) -&gt; core.Jaxpr:</span>
+  <span class="s4">&quot;&quot;&quot;Add debug info to jaxpr, given trace-time debug info and result paths.&quot;&quot;&quot;</span>
+  <span class="s2">if </span><span class="s1">trace_debug </span><span class="s2">is None</span><span class="s1">:</span>
+    <span class="s2">return </span><span class="s1">jaxpr</span>
+  <span class="s2">assert </span><span class="s1">(result_paths </span><span class="s2">is not None</span><span class="s1">) ^ (trace_debug.result_paths </span><span class="s2">is not None</span><span class="s1">)</span>
+  <span class="s2">if </span><span class="s1">result_paths </span><span class="s2">is None</span><span class="s1">:</span>
+    <span class="s1">result_paths = trace_debug.result_paths()  </span><span class="s0"># type: ignore</span>
+  <span class="s1">debug_info = core.JaxprDebugInfo(</span>
+      <span class="s1">trace_debug.traced_for</span><span class="s2">, </span><span class="s1">trace_debug.func_src_info</span><span class="s2">,</span>
+      <span class="s1">trace_debug.arg_names</span><span class="s2">, </span><span class="s1">result_paths)</span>
+  <span class="s2">return </span><span class="s1">jaxpr.replace(debug_info=debug_info)</span>
+
+<span class="s2">def </span><span class="s1">debug_info_final(f: lu.WrappedFun</span><span class="s2">, </span><span class="s1">dbg: Optional[TracingDebugInfo]</span><span class="s2">,</span>
+                     <span class="s1">res_paths: Callable[[]</span><span class="s2">, </span><span class="s1">Tuple[str</span><span class="s2">, </span><span class="s1">...]]) -&gt; lu.WrappedFun:</span>
+  <span class="s4">&quot;Attach trace-time debug info and result paths lazy thunk to an lu.WrappedFun&quot;</span>
+  <span class="s2">if </span><span class="s1">dbg </span><span class="s2">is None</span><span class="s1">: </span><span class="s2">return </span><span class="s1">f</span>
+  <span class="s2">assert </span><span class="s1">dbg.result_paths </span><span class="s2">is None</span>
+  <span class="s1">res_paths_ = HashableFunction(res_paths</span><span class="s2">, </span><span class="s1">closure=())</span>
+  <span class="s2">return </span><span class="s1">lu.add_debug_info(f</span><span class="s2">, </span><span class="s1">dbg._replace(result_paths=res_paths_))</span>
+</pre>
+</body>
+</html>

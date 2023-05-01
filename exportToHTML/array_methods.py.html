@@ -1,0 +1,839 @@
+<html>
+<head>
+<title>array_methods.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #6a8759;}
+.s4 { color: #cc7832;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+array_methods.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2023 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s0"># pytype: skip-file</span>
+<span class="s0"># mypy: disable-error-code=has-type</span>
+<span class="s2">&quot;&quot;&quot;Define methods which are dynamically added to JAX's Arrays and Tracers. 
+ 
+This is done dynamically in order to avoid circular imports. 
+&quot;&quot;&quot;</span>
+
+<span class="s1">__all__ = [</span><span class="s3">'register_jax_array_methods'</span><span class="s1">]</span>
+
+<span class="s4">from </span><span class="s1">functools </span><span class="s4">import </span><span class="s1">partial</span><span class="s4">, </span><span class="s1">wraps</span>
+<span class="s4">import </span><span class="s1">inspect</span>
+<span class="s4">from </span><span class="s1">typing </span><span class="s4">import </span><span class="s1">Any</span><span class="s4">, </span><span class="s1">List</span><span class="s4">, </span><span class="s1">Optional</span><span class="s4">, </span><span class="s1">Tuple</span><span class="s4">, </span><span class="s1">Union</span>
+<span class="s4">import </span><span class="s1">warnings</span>
+
+<span class="s4">import </span><span class="s1">numpy </span><span class="s4">as </span><span class="s1">np</span>
+<span class="s4">import </span><span class="s1">jax</span>
+<span class="s4">from </span><span class="s1">jax </span><span class="s4">import </span><span class="s1">lax</span>
+<span class="s4">from </span><span class="s1">jax._src </span><span class="s4">import </span><span class="s1">core</span>
+<span class="s4">from </span><span class="s1">jax._src </span><span class="s4">import </span><span class="s1">dtypes</span>
+<span class="s4">from </span><span class="s1">jax._src </span><span class="s4">import </span><span class="s1">device_array</span>
+<span class="s4">from </span><span class="s1">jax._src.api_util </span><span class="s4">import </span><span class="s1">_ensure_index_tuple</span>
+<span class="s4">from </span><span class="s1">jax._src.array </span><span class="s4">import </span><span class="s1">ArrayImpl</span>
+<span class="s4">from </span><span class="s1">jax._src.lax </span><span class="s4">import </span><span class="s1">lax </span><span class="s4">as </span><span class="s1">lax_internal</span>
+<span class="s4">from </span><span class="s1">jax._src.numpy </span><span class="s4">import </span><span class="s1">lax_numpy</span>
+<span class="s4">from </span><span class="s1">jax._src.numpy </span><span class="s4">import </span><span class="s1">reductions</span>
+<span class="s4">from </span><span class="s1">jax._src.numpy </span><span class="s4">import </span><span class="s1">ufuncs</span>
+<span class="s4">from </span><span class="s1">jax._src.numpy </span><span class="s4">import </span><span class="s1">util</span>
+<span class="s4">from </span><span class="s1">jax._src.ops </span><span class="s4">import </span><span class="s1">scatter</span>
+<span class="s4">from </span><span class="s1">jax._src.typing </span><span class="s4">import </span><span class="s1">Array</span><span class="s4">, </span><span class="s1">ArrayLike</span><span class="s4">, </span><span class="s1">DimSize</span><span class="s4">, </span><span class="s1">DTypeLike</span><span class="s4">, </span><span class="s1">Shape</span>
+<span class="s4">from </span><span class="s1">jax._src.util </span><span class="s4">import </span><span class="s1">safe_zip</span>
+
+
+<span class="s0">### add method and operator overloads to arraylike classes</span>
+
+<span class="s0"># We add operator overloads to DeviceArray and ShapedArray. These method and</span>
+<span class="s0"># operator overloads mainly just forward calls to the corresponding lax_numpy</span>
+<span class="s0"># functions, which can themselves handle instances from any of these classes.</span>
+
+
+<span class="s4">def </span><span class="s1">_astype(arr: ArrayLike</span><span class="s4">, </span><span class="s1">dtype: DTypeLike) -&gt; Array:</span>
+  <span class="s2">&quot;&quot;&quot;Copy the array and cast to a specified dtype. 
+ 
+  This is implemeted via :func:`jax.lax.convert_element_type`, which may 
+  have slightly different behavior than :meth:`numpy.ndarray.astype` in 
+  some cases. In particular, the details of float-to-int and int-to-float 
+  casts are implementation dependent. 
+  &quot;&quot;&quot;</span>
+  <span class="s4">if </span><span class="s1">dtype </span><span class="s4">is None</span><span class="s1">:</span>
+    <span class="s1">dtype = dtypes.canonicalize_dtype(lax_numpy.float_)</span>
+  <span class="s1">dtypes.check_user_dtype_supported(dtype</span><span class="s4">, </span><span class="s3">&quot;astype&quot;</span><span class="s1">)</span>
+  <span class="s4">return </span><span class="s1">lax.convert_element_type(arr</span><span class="s4">, </span><span class="s1">dtype)</span>
+
+
+<span class="s4">def </span><span class="s1">_nbytes(arr: ArrayLike) -&gt; int:</span>
+  <span class="s2">&quot;&quot;&quot;Total bytes consumed by the elements of the array.&quot;&quot;&quot;</span>
+  <span class="s4">return </span><span class="s1">np.size(arr) * dtypes.dtype(arr</span><span class="s4">, </span><span class="s1">canonicalize=</span><span class="s4">True</span><span class="s1">).itemsize</span>
+
+
+<span class="s4">def </span><span class="s1">_item(a: Array) -&gt; Any:</span>
+  <span class="s2">&quot;&quot;&quot;Copy an element of an array to a standard Python scalar and return it.&quot;&quot;&quot;</span>
+  <span class="s4">if </span><span class="s1">dtypes.issubdtype(a.dtype</span><span class="s4">, </span><span class="s1">np.complexfloating):</span>
+    <span class="s4">return </span><span class="s1">complex(a)</span>
+  <span class="s4">elif </span><span class="s1">dtypes.issubdtype(a.dtype</span><span class="s4">, </span><span class="s1">np.floating):</span>
+    <span class="s4">return </span><span class="s1">float(a)</span>
+  <span class="s4">elif </span><span class="s1">dtypes.issubdtype(a.dtype</span><span class="s4">, </span><span class="s1">np.integer):</span>
+    <span class="s4">return </span><span class="s1">int(a)</span>
+  <span class="s4">elif </span><span class="s1">dtypes.issubdtype(a.dtype</span><span class="s4">, </span><span class="s1">np.bool_):</span>
+    <span class="s4">return </span><span class="s1">bool(a)</span>
+  <span class="s4">else</span><span class="s1">:</span>
+    <span class="s4">raise </span><span class="s1">TypeError(a.dtype)</span>
+
+
+<span class="s4">def </span><span class="s1">_itemsize(arr: ArrayLike) -&gt; int:</span>
+  <span class="s2">&quot;&quot;&quot;Length of one array element in bytes.&quot;&quot;&quot;</span>
+  <span class="s4">return </span><span class="s1">dtypes.dtype(arr</span><span class="s4">, </span><span class="s1">canonicalize=</span><span class="s4">True</span><span class="s1">).itemsize</span>
+
+
+<span class="s4">def </span><span class="s1">_clip(number: ArrayLike</span><span class="s4">,</span>
+          <span class="s1">min: Optional[ArrayLike] = </span><span class="s4">None, </span><span class="s1">max: Optional[ArrayLike] = </span><span class="s4">None,</span>
+          <span class="s1">out: </span><span class="s4">None </span><span class="s1">= </span><span class="s4">None</span><span class="s1">) -&gt; Array:</span>
+  <span class="s2">&quot;&quot;&quot;Return an array whose values are limited to a specified range. 
+ 
+  Refer to :func:`jax.numpy.clip` for full documentation.&quot;&quot;&quot;</span>
+  <span class="s4">return </span><span class="s1">lax_numpy.clip(number</span><span class="s4">, </span><span class="s1">a_min=min</span><span class="s4">, </span><span class="s1">a_max=max</span><span class="s4">, </span><span class="s1">out=out)</span>
+
+
+<span class="s4">def </span><span class="s1">_transpose(a: Array</span><span class="s4">, </span><span class="s1">*args: Any) -&gt; Array:</span>
+  <span class="s2">&quot;&quot;&quot;Returns a view of the array with axes transposed. 
+ 
+  Refer to :func:`jax.numpy.transpose` for full documentation. 
+  &quot;&quot;&quot;</span>
+  <span class="s4">if not </span><span class="s1">args:</span>
+    <span class="s1">axis = </span><span class="s4">None</span>
+  <span class="s4">elif </span><span class="s1">len(args) == </span><span class="s5">1</span><span class="s1">:</span>
+    <span class="s1">axis = args[</span><span class="s5">0</span><span class="s1">] </span><span class="s4">if </span><span class="s1">args[</span><span class="s5">0</span><span class="s1">] </span><span class="s4">is None else </span><span class="s1">_ensure_index_tuple(args[</span><span class="s5">0</span><span class="s1">])</span>
+  <span class="s4">else</span><span class="s1">:</span>
+    <span class="s1">axis = _ensure_index_tuple(args)</span>
+  <span class="s4">return </span><span class="s1">lax_numpy.transpose(a</span><span class="s4">, </span><span class="s1">axis)</span>
+
+
+<span class="s4">def </span><span class="s1">_compute_newshape(a: ArrayLike</span><span class="s4">, </span><span class="s1">newshape: Union[DimSize</span><span class="s4">, </span><span class="s1">Shape]) -&gt; Shape:</span>
+  <span class="s2">&quot;&quot;&quot;Fixes a -1 value in newshape, if present.&quot;&quot;&quot;</span>
+  <span class="s0"># other errors, like having more than one -1, are caught downstream, in</span>
+  <span class="s0"># reshape_shape_rule.</span>
+  <span class="s4">try</span><span class="s1">:</span>
+    <span class="s1">iter(newshape)  </span><span class="s0"># type: ignore[arg-type]</span>
+  <span class="s4">except</span><span class="s1">:</span>
+    <span class="s1">iterable = </span><span class="s4">False</span>
+  <span class="s4">else</span><span class="s1">:</span>
+    <span class="s1">iterable = </span><span class="s4">True</span>
+  <span class="s1">newshape = core.canonicalize_shape(newshape </span><span class="s4">if </span><span class="s1">iterable </span><span class="s4">else </span><span class="s1">[newshape])  </span><span class="s0"># type: ignore[arg-type]</span>
+  <span class="s4">return </span><span class="s1">tuple(- core.divide_shape_sizes(np.shape(a)</span><span class="s4">, </span><span class="s1">newshape)</span>
+               <span class="s4">if </span><span class="s1">core.symbolic_equal_dim(d</span><span class="s4">, </span><span class="s1">-</span><span class="s5">1</span><span class="s1">) </span><span class="s4">else </span><span class="s1">d</span>
+               <span class="s4">for </span><span class="s1">d </span><span class="s4">in </span><span class="s1">newshape)</span>
+
+
+<span class="s4">def </span><span class="s1">_reshape(a: Array</span><span class="s4">, </span><span class="s1">*args: Any</span><span class="s4">, </span><span class="s1">order: str = </span><span class="s3">&quot;C&quot;</span><span class="s1">) -&gt; Array:</span>
+  <span class="s2">&quot;&quot;&quot;Returns an array containing the same data with a new shape. 
+ 
+  Refer to :func:`jax.numpy.reshape` for full documentation. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">newshape = _compute_newshape(a</span><span class="s4">, </span><span class="s1">args[</span><span class="s5">0</span><span class="s1">] </span><span class="s4">if </span><span class="s1">len(args) == </span><span class="s5">1 </span><span class="s4">else </span><span class="s1">args)</span>
+  <span class="s4">if </span><span class="s1">order == </span><span class="s3">&quot;C&quot;</span><span class="s1">:</span>
+    <span class="s4">return </span><span class="s1">lax.reshape(a</span><span class="s4">, </span><span class="s1">newshape</span><span class="s4">, None</span><span class="s1">)</span>
+  <span class="s4">elif </span><span class="s1">order == </span><span class="s3">&quot;F&quot;</span><span class="s1">:</span>
+    <span class="s1">dims = list(range(a.ndim)[::-</span><span class="s5">1</span><span class="s1">])</span>
+    <span class="s4">return </span><span class="s1">lax.reshape(a</span><span class="s4">, </span><span class="s1">newshape[::-</span><span class="s5">1</span><span class="s1">]</span><span class="s4">, </span><span class="s1">dims).T</span>
+  <span class="s4">elif </span><span class="s1">order == </span><span class="s3">&quot;A&quot;</span><span class="s1">:</span>
+    <span class="s4">raise </span><span class="s1">NotImplementedError(</span><span class="s3">&quot;np.reshape order=A is not implemented.&quot;</span><span class="s1">)</span>
+  <span class="s4">else</span><span class="s1">:</span>
+    <span class="s4">raise </span><span class="s1">ValueError(</span><span class="s3">f&quot;Unexpected value for 'order' argument: </span><span class="s4">{</span><span class="s1">order</span><span class="s4">}</span><span class="s3">.&quot;</span><span class="s1">)</span>
+
+
+<span class="s4">def </span><span class="s1">_view(arr: Array</span><span class="s4">, </span><span class="s1">dtype: DTypeLike = </span><span class="s4">None, </span><span class="s1">type: </span><span class="s4">None </span><span class="s1">= </span><span class="s4">None</span><span class="s1">) -&gt; Array:</span>
+  <span class="s2">&quot;&quot;&quot;Return a bitwise copy of the array, viewed as a new dtype. 
+ 
+  This is fuller-featured wrapper around :func:`jax.lax.bitcast_convert_type`. 
+ 
+  If the source and target dtype have the same bitwidth, the result has the same 
+  shape as the input array. If the bitwidth of the target dtype is different 
+  from the source, the size of the last axis of the result is adjusted 
+  accordingly. 
+ 
+  &gt;&gt;&gt; jnp.zeros([1,2,3], dtype=jnp.int16).view(jnp.int8).shape 
+  (1, 2, 6) 
+  &gt;&gt;&gt; jnp.zeros([1,2,4], dtype=jnp.int8).view(jnp.int16).shape 
+  (1, 2, 2) 
+ 
+  Conversions involving booleans are not well-defined in all situations. With 
+  regards to the shape of result as explained above, booleans are treated as 
+  having a bitwidth of 8. However, when converting to a boolean array, the input 
+  should only contain 0 or 1 bytes. Otherwise, results may be unpredictable or 
+  may change depending on how the result is used. 
+ 
+  This conversion is guaranteed and safe: 
+  &gt;&gt;&gt; jnp.array([1, 0, 1], dtype=jnp.int8).view(jnp.bool_) 
+  Array([ True, False,  True], dtype=bool) 
+ 
+  However, there are no guarantees about the results of any expression involving 
+  a view such as this: `jnp.array([1, 2, 3], dtype=jnp.int8).view(jnp.bool_)`. 
+  In particular, the results may change between JAX releases and depending on 
+  the platform. To safely convert such an array to a boolean array, compare it 
+  with `0`: 
+ 
+  &gt;&gt;&gt; jnp.array([1, 2, 0], dtype=jnp.int8) != 0 
+  Array([ True,  True, False], dtype=bool) 
+  &quot;&quot;&quot;</span>
+  <span class="s4">if </span><span class="s1">type </span><span class="s4">is not None</span><span class="s1">:</span>
+    <span class="s4">raise </span><span class="s1">NotImplementedError(</span><span class="s3">&quot;`type` argument of array.view() is not supported.&quot;</span><span class="s1">)</span>
+
+  <span class="s1">util.check_arraylike(</span><span class="s3">&quot;view&quot;</span><span class="s4">, </span><span class="s1">arr)</span>
+  <span class="s1">arr = lax_numpy.asarray(arr)</span>
+
+  <span class="s1">dtypes.check_user_dtype_supported(dtype</span><span class="s4">, </span><span class="s3">&quot;view&quot;</span><span class="s1">)</span>
+  <span class="s1">dtype = dtypes.canonicalize_dtype(dtype)</span>
+
+  <span class="s4">if </span><span class="s1">arr.ndim == </span><span class="s5">0</span><span class="s1">:</span>
+    <span class="s4">if </span><span class="s1">arr.dtype.itemsize != dtype.itemsize:</span>
+      <span class="s4">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;view() of a 0d array is only supported if the itemsize is unchanged.&quot;</span><span class="s1">)</span>
+    <span class="s4">return </span><span class="s1">_view(lax.expand_dims(arr</span><span class="s4">, </span><span class="s1">(</span><span class="s5">0</span><span class="s4">,</span><span class="s1">))</span><span class="s4">, </span><span class="s1">dtype).squeeze()</span>
+
+  <span class="s4">if </span><span class="s1">(arr.shape[-</span><span class="s5">1</span><span class="s1">] * arr.dtype.itemsize) % dtype.itemsize != </span><span class="s5">0</span><span class="s1">:</span>
+    <span class="s4">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;When changing to a larger dtype, its size must be a divisor &quot;</span>
+                     <span class="s3">&quot;of the total size in bytes of the last axis of the array.&quot;</span><span class="s1">)</span>
+
+  <span class="s4">if </span><span class="s1">arr.dtype == dtype:</span>
+    <span class="s4">return </span><span class="s1">arr</span>
+
+  <span class="s0"># lax.bitcast_convert_type does not support bool or complex; in these cases we</span>
+  <span class="s0"># cast to a compatible type and recursively call _view for simplicity.</span>
+  <span class="s4">if </span><span class="s1">arr.dtype == bool:</span>
+    <span class="s4">return </span><span class="s1">_view(arr.astype(</span><span class="s3">'uint8'</span><span class="s1">)</span><span class="s4">, </span><span class="s1">dtype)</span>
+
+  <span class="s4">if </span><span class="s1">lax_numpy.issubdtype(arr.dtype</span><span class="s4">, </span><span class="s1">np.complexfloating):</span>
+    <span class="s1">new_shape = (*arr.shape[:-</span><span class="s5">1</span><span class="s1">]</span><span class="s4">, </span><span class="s1">arr.shape[-</span><span class="s5">1</span><span class="s1">] * </span><span class="s5">2</span><span class="s1">)</span>
+    <span class="s1">new_dtype = lax_numpy.finfo(arr.dtype).dtype</span>
+    <span class="s1">arr = (lax_numpy.zeros(new_shape</span><span class="s4">, </span><span class="s1">new_dtype)</span>
+             <span class="s1">.at[...</span><span class="s4">, </span><span class="s5">0</span><span class="s1">::</span><span class="s5">2</span><span class="s1">].set(arr.real)</span>
+             <span class="s1">.at[...</span><span class="s4">, </span><span class="s5">1</span><span class="s1">::</span><span class="s5">2</span><span class="s1">].set(arr.imag))</span>
+    <span class="s4">return </span><span class="s1">_view(arr</span><span class="s4">, </span><span class="s1">dtype)</span>
+
+  <span class="s4">if </span><span class="s1">dtype == bool:</span>
+    <span class="s4">return </span><span class="s1">_view(arr</span><span class="s4">, </span><span class="s1">np.uint8).astype(bool)</span>
+
+  <span class="s4">if </span><span class="s1">lax_numpy.issubdtype(dtype</span><span class="s4">, </span><span class="s1">np.complexfloating):</span>
+    <span class="s1">out = _view(arr</span><span class="s4">, </span><span class="s1">lax_numpy.finfo(dtype).dtype).astype(dtype)</span>
+    <span class="s4">return </span><span class="s1">out[...</span><span class="s4">, </span><span class="s5">0</span><span class="s1">::</span><span class="s5">2</span><span class="s1">] + </span><span class="s5">1j </span><span class="s1">* out[...</span><span class="s4">, </span><span class="s5">1</span><span class="s1">::</span><span class="s5">2</span><span class="s1">]</span>
+
+  <span class="s0"># lax.bitcast_convert_type adds or subtracts dimensions depending on the</span>
+  <span class="s0"># relative bitwidths of the dtypes; we account for that with reshapes.</span>
+  <span class="s4">if </span><span class="s1">arr.dtype.itemsize &lt; dtype.itemsize:</span>
+    <span class="s1">factor = dtype.itemsize // arr.dtype.itemsize</span>
+    <span class="s1">arr = arr.reshape(*arr.shape[:-</span><span class="s5">1</span><span class="s1">]</span><span class="s4">, </span><span class="s1">arr.shape[-</span><span class="s5">1</span><span class="s1">] // factor</span><span class="s4">, </span><span class="s1">factor)</span>
+    <span class="s4">return </span><span class="s1">lax.bitcast_convert_type(arr</span><span class="s4">, </span><span class="s1">dtype)</span>
+
+  <span class="s4">if </span><span class="s1">arr.dtype.itemsize &gt; dtype.itemsize:</span>
+    <span class="s1">out = lax.bitcast_convert_type(arr</span><span class="s4">, </span><span class="s1">dtype)</span>
+    <span class="s4">return </span><span class="s1">out.reshape(*out.shape[:-</span><span class="s5">2</span><span class="s1">]</span><span class="s4">, </span><span class="s1">out.shape[-</span><span class="s5">2</span><span class="s1">] * out.shape[-</span><span class="s5">1</span><span class="s1">])</span>
+
+  <span class="s4">return </span><span class="s1">lax.bitcast_convert_type(arr</span><span class="s4">, </span><span class="s1">dtype)</span>
+
+
+<span class="s4">def </span><span class="s1">_notimplemented_flat(self):</span>
+  <span class="s4">raise </span><span class="s1">NotImplementedError(</span><span class="s3">&quot;JAX DeviceArrays do not implement the arr.flat property: &quot;</span>
+                            <span class="s3">&quot;consider arr.flatten() instead.&quot;</span><span class="s1">)</span>
+
+<span class="s1">_accepted_binop_types = (int</span><span class="s4">, </span><span class="s1">float</span><span class="s4">, </span><span class="s1">complex</span><span class="s4">, </span><span class="s1">np.generic</span><span class="s4">, </span><span class="s1">np.ndarray</span><span class="s4">, </span><span class="s1">Array)</span>
+<span class="s1">_rejected_binop_types = (list</span><span class="s4">, </span><span class="s1">tuple</span><span class="s4">, </span><span class="s1">set</span><span class="s4">, </span><span class="s1">dict)</span>
+
+<span class="s4">def </span><span class="s1">_defer_to_unrecognized_arg(opchar</span><span class="s4">, </span><span class="s1">binary_op</span><span class="s4">, </span><span class="s1">swap=</span><span class="s4">False</span><span class="s1">):</span>
+  <span class="s0"># Ensure that other array types have the chance to override arithmetic.</span>
+  <span class="s4">def </span><span class="s1">deferring_binary_op(self</span><span class="s4">, </span><span class="s1">other):</span>
+    <span class="s4">if </span><span class="s1">hasattr(other</span><span class="s4">, </span><span class="s3">'__jax_array__'</span><span class="s1">):</span>
+      <span class="s1">other = other.__jax_array__()</span>
+    <span class="s1">args = (other</span><span class="s4">, </span><span class="s1">self) </span><span class="s4">if </span><span class="s1">swap </span><span class="s4">else </span><span class="s1">(self</span><span class="s4">, </span><span class="s1">other)</span>
+    <span class="s4">if </span><span class="s1">isinstance(other</span><span class="s4">, </span><span class="s1">_accepted_binop_types):</span>
+      <span class="s4">return </span><span class="s1">binary_op(*args)</span>
+    <span class="s4">if </span><span class="s1">isinstance(other</span><span class="s4">, </span><span class="s1">_rejected_binop_types):</span>
+      <span class="s4">raise </span><span class="s1">TypeError(</span><span class="s3">f&quot;unsupported operand type(s) for </span><span class="s4">{</span><span class="s1">opchar</span><span class="s4">}</span><span class="s3">: &quot;</span>
+                      <span class="s3">f&quot;</span><span class="s4">{</span><span class="s1">type(args[</span><span class="s5">0</span><span class="s1">]).__name__</span><span class="s4">!r} </span><span class="s3">and </span><span class="s4">{</span><span class="s1">type(args[</span><span class="s5">1</span><span class="s1">]).__name__</span><span class="s4">!r}</span><span class="s3">&quot;</span><span class="s1">)</span>
+    <span class="s4">return </span><span class="s1">NotImplemented</span>
+  <span class="s4">return </span><span class="s1">deferring_binary_op</span>
+
+<span class="s4">def </span><span class="s1">_unimplemented_setitem(self</span><span class="s4">, </span><span class="s1">i</span><span class="s4">, </span><span class="s1">x):</span>
+  <span class="s1">msg = (</span><span class="s3">&quot;'{}' object does not support item assignment. JAX arrays are &quot;</span>
+         <span class="s3">&quot;immutable. Instead of ``x[idx] = y``, use ``x = x.at[idx].set(y)`` &quot;</span>
+         <span class="s3">&quot;or another .at[] method: &quot;</span>
+         <span class="s3">&quot;https://jax.readthedocs.io/en/latest/_autosummary/jax.numpy.ndarray.at.html&quot;</span><span class="s1">)</span>
+  <span class="s4">raise </span><span class="s1">TypeError(msg.format(type(self)))</span>
+
+<span class="s4">def </span><span class="s1">_operator_round(number: ArrayLike</span><span class="s4">, </span><span class="s1">ndigits: Optional[int] = </span><span class="s4">None</span><span class="s1">) -&gt; Array:</span>
+  <span class="s1">out = lax_numpy.round(number</span><span class="s4">, </span><span class="s1">decimals=ndigits </span><span class="s4">or </span><span class="s5">0</span><span class="s1">)</span>
+  <span class="s0"># If `ndigits` is None, for a builtin float round(7.5) returns an integer.</span>
+  <span class="s4">return </span><span class="s1">out.astype(int) </span><span class="s4">if </span><span class="s1">ndigits </span><span class="s4">is None else </span><span class="s1">out</span>
+
+<span class="s4">def </span><span class="s1">_copy(self: Array) -&gt; Array:</span>
+  <span class="s4">return </span><span class="s1">self.copy()</span>
+
+<span class="s4">def </span><span class="s1">_deepcopy(self: Array</span><span class="s4">, </span><span class="s1">memo: Any) -&gt; Array:</span>
+  <span class="s4">del </span><span class="s1">memo  </span><span class="s0"># unused</span>
+  <span class="s4">return </span><span class="s1">self.copy()</span>
+
+
+<span class="s0"># Experimental support for NumPy's module dispatch with NEP-37.</span>
+<span class="s0"># Currently requires https://github.com/seberg/numpy-dispatch</span>
+<span class="s1">_JAX_ARRAY_TYPES = (device_array.DeviceArray</span><span class="s4">, </span><span class="s1">core.Tracer</span><span class="s4">, </span><span class="s1">ArrayImpl)</span>
+<span class="s1">_HANDLED_ARRAY_TYPES = _JAX_ARRAY_TYPES + (np.ndarray</span><span class="s4">,</span><span class="s1">)</span>
+
+<span class="s4">def </span><span class="s1">__array_module__(self</span><span class="s4">, </span><span class="s1">types):</span>
+  <span class="s4">if </span><span class="s1">all(issubclass(t</span><span class="s4">, </span><span class="s1">_HANDLED_ARRAY_TYPES) </span><span class="s4">for </span><span class="s1">t </span><span class="s4">in </span><span class="s1">types):</span>
+    <span class="s4">return </span><span class="s1">jax.numpy</span>
+  <span class="s4">else</span><span class="s1">:</span>
+    <span class="s4">return </span><span class="s1">NotImplemented</span>
+
+
+<span class="s4">def </span><span class="s1">_compress_method(a: ArrayLike</span><span class="s4">, </span><span class="s1">condition: ArrayLike</span><span class="s4">,</span>
+                     <span class="s1">axis: Optional[int] = </span><span class="s4">None, </span><span class="s1">out: </span><span class="s4">None </span><span class="s1">= </span><span class="s4">None</span><span class="s1">) -&gt; Array:</span>
+  <span class="s2">&quot;&quot;&quot;Return selected slices of this array along given axis. 
+ 
+  Refer to :func:`jax.numpy.compress` for full documentation.&quot;&quot;&quot;</span>
+  <span class="s4">return </span><span class="s1">lax_numpy.jaxcompress(condition</span><span class="s4">, </span><span class="s1">a</span><span class="s4">, </span><span class="s1">axis</span><span class="s4">, </span><span class="s1">out)</span>
+
+
+<span class="s1">@util._wraps(lax.broadcast</span><span class="s4">, </span><span class="s1">lax_description=</span><span class="s3">&quot;&quot;&quot; 
+Deprecated. Use :func:`jax.lax.broadcast` instead. 
+&quot;&quot;&quot;</span><span class="s1">)</span>
+<span class="s4">def </span><span class="s1">_deprecated_broadcast(*args</span><span class="s4">, </span><span class="s1">**kwargs):</span>
+  <span class="s1">warnings.warn(</span>
+    <span class="s3">&quot;The arr.broadcast() method is deprecated. Use jax.lax.broadcast instead.&quot;</span><span class="s4">,</span>
+    <span class="s1">category=FutureWarning)</span>
+  <span class="s4">return </span><span class="s1">lax.broadcast(*args</span><span class="s4">, </span><span class="s1">**kwargs)</span>
+
+
+<span class="s1">@util._wraps(lax.broadcast</span><span class="s4">, </span><span class="s1">lax_description=</span><span class="s3">&quot;&quot;&quot; 
+Deprecated. Use :func:`jax.lax.broadcast_in_dim` instead. 
+&quot;&quot;&quot;</span><span class="s1">)</span>
+<span class="s4">def </span><span class="s1">_deprecated_broadcast_in_dim(*args</span><span class="s4">, </span><span class="s1">**kwargs):</span>
+  <span class="s1">warnings.warn(</span>
+    <span class="s3">&quot;The arr.broadcast_in_dim() method is deprecated. Use jax.lax.broadcast_in_dim instead.&quot;</span><span class="s4">,</span>
+    <span class="s1">category=FutureWarning)</span>
+  <span class="s4">return </span><span class="s1">lax.broadcast_in_dim(*args</span><span class="s4">, </span><span class="s1">**kwargs)</span>
+
+
+<span class="s1">@util._wraps(lax.broadcast</span><span class="s4">, </span><span class="s1">lax_description=</span><span class="s3">&quot;&quot;&quot; 
+Deprecated. Use :func:`jax.numpy.split` instead. 
+&quot;&quot;&quot;</span><span class="s1">)</span>
+<span class="s4">def </span><span class="s1">_deprecated_split(*args</span><span class="s4">, </span><span class="s1">**kwargs):</span>
+  <span class="s1">warnings.warn(</span>
+    <span class="s3">&quot;The arr.split() method is deprecated. Use jax.numpy.split instead.&quot;</span><span class="s4">,</span>
+    <span class="s1">category=FutureWarning)</span>
+  <span class="s4">return </span><span class="s1">lax_numpy.split(*args</span><span class="s4">, </span><span class="s1">**kwargs)</span>
+
+
+<span class="s1">@core.stash_axis_env()</span>
+<span class="s1">@partial(jax.jit</span><span class="s4">, </span><span class="s1">static_argnums=(</span><span class="s5">1</span><span class="s4">,</span><span class="s5">2</span><span class="s4">,</span><span class="s5">3</span><span class="s1">))</span>
+<span class="s4">def </span><span class="s1">_multi_slice(arr: ArrayLike</span><span class="s4">,</span>
+                 <span class="s1">start_indices: Tuple[Tuple[int</span><span class="s4">, </span><span class="s1">...]]</span><span class="s4">,</span>
+                 <span class="s1">limit_indices: Tuple[Tuple[int</span><span class="s4">, </span><span class="s1">...]]</span><span class="s4">,</span>
+                 <span class="s1">removed_dims: Tuple[Tuple[int</span><span class="s4">, </span><span class="s1">...]]) -&gt; List[Array]:</span>
+  <span class="s2">&quot;&quot;&quot;Extracts multiple slices from `arr`. 
+ 
+  This is used to shard DeviceArray arguments to pmap. It's implemented as a 
+  DeviceArray method here to avoid circular imports. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">results: List[Array] = []</span>
+  <span class="s4">for </span><span class="s1">starts</span><span class="s4">, </span><span class="s1">limits</span><span class="s4">, </span><span class="s1">removed </span><span class="s4">in </span><span class="s1">safe_zip(start_indices</span><span class="s4">, </span><span class="s1">limit_indices</span><span class="s4">, </span><span class="s1">removed_dims):</span>
+    <span class="s1">sliced = lax.slice(arr</span><span class="s4">, </span><span class="s1">starts</span><span class="s4">, </span><span class="s1">limits)</span>
+    <span class="s4">if </span><span class="s1">removed:</span>
+      <span class="s1">sliced = lax.squeeze(sliced</span><span class="s4">, </span><span class="s1">removed)</span>
+    <span class="s1">results.append(sliced)</span>
+  <span class="s4">return </span><span class="s1">results</span>
+
+<span class="s0"># The next two functions are related to iter(device_array), implemented here to</span>
+<span class="s0"># avoid circular imports.</span>
+<span class="s1">@jax.jit</span>
+<span class="s4">def </span><span class="s1">_unstack(x: Array) -&gt; List[Array]:</span>
+  <span class="s4">return </span><span class="s1">[lax.index_in_dim(x</span><span class="s4">, </span><span class="s1">i</span><span class="s4">, </span><span class="s1">keepdims=</span><span class="s4">False</span><span class="s1">) </span><span class="s4">for </span><span class="s1">i </span><span class="s4">in </span><span class="s1">range(x.shape[</span><span class="s5">0</span><span class="s1">])]</span>
+
+<span class="s4">def </span><span class="s1">_chunk_iter(x</span><span class="s4">, </span><span class="s1">size):</span>
+  <span class="s4">if </span><span class="s1">size &gt; x.shape[</span><span class="s5">0</span><span class="s1">]:</span>
+    <span class="s4">yield </span><span class="s1">x</span>
+  <span class="s4">else</span><span class="s1">:</span>
+    <span class="s1">num_chunks</span><span class="s4">, </span><span class="s1">tail = ufuncs.divmod(x.shape[</span><span class="s5">0</span><span class="s1">]</span><span class="s4">, </span><span class="s1">size)</span>
+    <span class="s4">for </span><span class="s1">i </span><span class="s4">in </span><span class="s1">range(num_chunks):</span>
+      <span class="s4">yield </span><span class="s1">lax.dynamic_slice_in_dim(x</span><span class="s4">, </span><span class="s1">i * size</span><span class="s4">, </span><span class="s1">size)</span>
+    <span class="s4">if </span><span class="s1">tail:</span>
+      <span class="s4">yield </span><span class="s1">lax.dynamic_slice_in_dim(x</span><span class="s4">, </span><span class="s1">num_chunks * size</span><span class="s4">, </span><span class="s1">tail)</span>
+
+<span class="s0"># Syntactic sugar for scatter operations.</span>
+<span class="s4">class </span><span class="s1">_IndexUpdateHelper:</span>
+  <span class="s0"># Note: this docstring will appear as the docstring for the `at` property.</span>
+  <span class="s2">&quot;&quot;&quot;Helper property for index update functionality. 
+ 
+  The ``at`` property provides a functionally pure equivalent of in-place 
+  array modificatons. 
+ 
+  In particular: 
+ 
+  ==============================  ================================ 
+  Alternate syntax                Equivalent In-place expression 
+  ==============================  ================================ 
+  ``x = x.at[idx].set(y)``        ``x[idx] = y`` 
+  ``x = x.at[idx].add(y)``        ``x[idx] += y`` 
+  ``x = x.at[idx].multiply(y)``   ``x[idx] *= y`` 
+  ``x = x.at[idx].divide(y)``     ``x[idx] /= y`` 
+  ``x = x.at[idx].power(y)``      ``x[idx] **= y`` 
+  ``x = x.at[idx].min(y)``        ``x[idx] = minimum(x[idx], y)`` 
+  ``x = x.at[idx].max(y)``        ``x[idx] = maximum(x[idx], y)`` 
+  ``x = x.at[idx].apply(ufunc)``  ``ufunc.at(x, idx)`` 
+  ``x = x.at[idx].get()``         ``x = x[idx]`` 
+  ==============================  ================================ 
+ 
+  None of the ``x.at`` expressions modify the original ``x``; instead they return 
+  a modified copy of ``x``. However, inside a :py:func:`~jax.jit` compiled function, 
+  expressions like :code:`x = x.at[idx].set(y)` are guaranteed to be applied in-place. 
+ 
+  Unlike NumPy in-place operations such as :code:`x[idx] += y`, if multiple 
+  indices refer to the same location, all updates will be applied (NumPy would 
+  only apply the last update, rather than applying all updates.) The order 
+  in which conflicting updates are applied is implementation-defined and may be 
+  nondeterministic (e.g., due to concurrency on some hardware platforms). 
+ 
+  By default, JAX assumes that all indices are in-bounds. Alternative out-of-bound 
+  index semantics can be specified via the ``mode`` parameter (see below). 
+ 
+  Arguments 
+  --------- 
+  mode : str 
+      Specify out-of-bound indexing mode. Options are: 
+ 
+      - ``&quot;promise_in_bounds&quot;``: (default) The user promises that indices are in bounds. 
+        No additional checking will be performed. In practice, this means that 
+        out-of-bounds indices in ``get()`` will be clipped, and out-of-bounds indices 
+        in ``set()``, ``add()``, etc. will be dropped. 
+      - ``&quot;clip&quot;``: clamp out of bounds indices into valid range. 
+      - ``&quot;drop&quot;``: ignore out-of-bound indices. 
+      - ``&quot;fill&quot;``: alias for ``&quot;drop&quot;``.  For `get()`, the optional ``fill_value`` 
+        argument specifies the value that will be returned. 
+ 
+        See :class:`jax.lax.GatherScatterMode` for more details. 
+ 
+  indices_are_sorted : bool 
+      If True, the implementation will assume that the indices passed to ``at[]`` 
+      are sorted in ascending order, which can lead to more efficient execution 
+      on some backends. 
+  unique_indices : bool 
+      If True, the implementation will assume that the indices passed to ``at[]`` 
+      are unique, which can result in more efficient execution on some backends. 
+  fill_value : Any 
+      Only applies to the ``get()`` method: the fill value to return for out-of-bounds 
+      slices when `mode` is ``'fill'``. Ignored otherwise. Defaults to ``NaN`` for 
+      inexact types, the largest negative value for signed types, the largest positive 
+      value for unsigned types, and ``True`` for booleans. 
+ 
+  Examples 
+  -------- 
+  &gt;&gt;&gt; x = jnp.arange(5.0) 
+  &gt;&gt;&gt; x 
+  Array([0., 1., 2., 3., 4.], dtype=float32) 
+  &gt;&gt;&gt; x.at[2].add(10) 
+  Array([ 0.,  1., 12.,  3.,  4.], dtype=float32) 
+  &gt;&gt;&gt; x.at[10].add(10)  # out-of-bounds indices are ignored 
+  Array([0., 1., 2., 3., 4.], dtype=float32) 
+  &gt;&gt;&gt; x.at[20].add(10, mode='clip') 
+  Array([ 0.,  1.,  2.,  3., 14.], dtype=float32) 
+  &gt;&gt;&gt; x.at[2].get() 
+  Array(2., dtype=float32) 
+  &gt;&gt;&gt; x.at[20].get()  # out-of-bounds indices clipped 
+  Array(4., dtype=float32) 
+  &gt;&gt;&gt; x.at[20].get(mode='fill')  # out-of-bounds indices filled with NaN 
+  Array(nan, dtype=float32) 
+  &gt;&gt;&gt; x.at[20].get(mode='fill', fill_value=-1)  # custom fill value 
+  Array(-1., dtype=float32) 
+  &quot;&quot;&quot;</span>
+  <span class="s1">__slots__ = (</span><span class="s3">&quot;array&quot;</span><span class="s4">,</span><span class="s1">)</span>
+
+  <span class="s4">def </span><span class="s1">__init__(self</span><span class="s4">, </span><span class="s1">array):</span>
+    <span class="s1">self.array = array</span>
+
+  <span class="s4">def </span><span class="s1">__getitem__(self</span><span class="s4">, </span><span class="s1">index):</span>
+    <span class="s4">return </span><span class="s1">_IndexUpdateRef(self.array</span><span class="s4">, </span><span class="s1">index)</span>
+
+  <span class="s4">def </span><span class="s1">__repr__(self):</span>
+    <span class="s4">return </span><span class="s3">f&quot;_IndexUpdateHelper(</span><span class="s4">{</span><span class="s1">repr(self.array)</span><span class="s4">}</span><span class="s3">)&quot;</span>
+
+
+<span class="s0"># TODO(jakevdp): remove these deprecation warnings after June 2023</span>
+<span class="s4">def </span><span class="s1">allow_pass_by_position_with_warning(f):</span>
+  <span class="s1">@wraps(f)</span>
+  <span class="s4">def </span><span class="s1">wrapped(*args</span><span class="s4">, </span><span class="s1">**kwargs):</span>
+    <span class="s1">sig = inspect.signature(f)</span>
+    <span class="s4">try</span><span class="s1">:</span>
+      <span class="s1">sig.bind(*args</span><span class="s4">, </span><span class="s1">**kwargs)</span>
+    <span class="s4">except </span><span class="s1">TypeError:</span>
+      <span class="s1">argspec = inspect.getfullargspec(f)</span>
+      <span class="s1">n_positional = len(argspec.args)</span>
+      <span class="s1">keywords = argspec.kwonlyargs[:len(args) - n_positional]</span>
+      <span class="s1">warnings.warn(</span>
+          <span class="s3">f&quot;jnp.ndarray.at[...].</span><span class="s4">{</span><span class="s1">f.__name__</span><span class="s4">}</span><span class="s3">: Passing '</span><span class="s4">{</span><span class="s1">keywords[</span><span class="s5">0</span><span class="s1">]</span><span class="s4">}</span><span class="s3">' by position is deprecated. &quot;</span>
+          <span class="s3">f&quot;Pass by keyword instead&quot;</span><span class="s4">, </span><span class="s1">category=FutureWarning</span><span class="s4">, </span><span class="s1">stacklevel=</span><span class="s5">2</span><span class="s1">)</span>
+      <span class="s1">converted_kwargs = dict(zip(keywords</span><span class="s4">, </span><span class="s1">args[n_positional:]))</span>
+      <span class="s4">return </span><span class="s1">f(*args[:n_positional]</span><span class="s4">, </span><span class="s1">**converted_kwargs</span><span class="s4">, </span><span class="s1">**kwargs)</span>
+    <span class="s4">else</span><span class="s1">:</span>
+      <span class="s4">return </span><span class="s1">f(*args</span><span class="s4">, </span><span class="s1">**kwargs)</span>
+  <span class="s4">return </span><span class="s1">wrapped</span>
+
+
+<span class="s4">class </span><span class="s1">_IndexUpdateRef:</span>
+  <span class="s2">&quot;&quot;&quot;Helper object to call indexed update functions for an (advanced) index. 
+ 
+  This object references a source array and a specific indexer into that array. 
+  Methods on this object return copies of the source array that have been 
+  modified at the positions specified by the indexer. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">__slots__ = (</span><span class="s3">&quot;array&quot;</span><span class="s4">, </span><span class="s3">&quot;index&quot;</span><span class="s1">)</span>
+
+  <span class="s4">def </span><span class="s1">__init__(self</span><span class="s4">, </span><span class="s1">array</span><span class="s4">, </span><span class="s1">index):</span>
+    <span class="s1">self.array = array</span>
+    <span class="s1">self.index = index</span>
+
+  <span class="s4">def </span><span class="s1">__repr__(self):</span>
+    <span class="s4">return </span><span class="s3">f&quot;_IndexUpdateRef(</span><span class="s4">{</span><span class="s1">repr(self.array)</span><span class="s4">}</span><span class="s3">, </span><span class="s4">{</span><span class="s1">repr(self.index)</span><span class="s4">}</span><span class="s3">)&quot;</span>
+
+  <span class="s1">@allow_pass_by_position_with_warning</span>
+  <span class="s4">def </span><span class="s1">get(self</span><span class="s4">, </span><span class="s1">*</span><span class="s4">, </span><span class="s1">indices_are_sorted=</span><span class="s4">False, </span><span class="s1">unique_indices=</span><span class="s4">False,</span>
+          <span class="s1">mode=</span><span class="s4">None, </span><span class="s1">fill_value=</span><span class="s4">None</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot;Equivalent to ``x[idx]``. 
+ 
+    Returns the value of ``x`` that would result from the NumPy-style 
+    :mod:indexing &lt;numpy.doc.indexing&gt;` ``x[idx]``. This function differs from 
+    the usual array indexing syntax in that it allows additional keyword 
+    arguments ``indices_are_sorted`` and ``unique_indices`` to be passed. 
+ 
+    See :mod:`jax.ops` for details. 
+    &quot;&quot;&quot;</span>
+    <span class="s4">return </span><span class="s1">lax_numpy._rewriting_take(self.array</span><span class="s4">, </span><span class="s1">self.index</span><span class="s4">,</span>
+                                     <span class="s1">indices_are_sorted=indices_are_sorted</span><span class="s4">,</span>
+                                     <span class="s1">unique_indices=unique_indices</span><span class="s4">, </span><span class="s1">mode=mode</span><span class="s4">,</span>
+                                     <span class="s1">fill_value=fill_value)</span>
+
+  <span class="s1">@allow_pass_by_position_with_warning</span>
+  <span class="s4">def </span><span class="s1">set(self</span><span class="s4">, </span><span class="s1">values</span><span class="s4">, </span><span class="s1">*</span><span class="s4">, </span><span class="s1">indices_are_sorted=</span><span class="s4">False, </span><span class="s1">unique_indices=</span><span class="s4">False,</span>
+          <span class="s1">mode=</span><span class="s4">None</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot;Pure equivalent of ``x[idx] = y``. 
+ 
+    Returns the value of ``x`` that would result from the NumPy-style 
+    :mod:`indexed assignment &lt;numpy.doc.indexing&gt;` ``x[idx] = y``. 
+ 
+    See :mod:`jax.ops` for details. 
+    &quot;&quot;&quot;</span>
+    <span class="s4">return </span><span class="s1">scatter._scatter_update(self.array</span><span class="s4">, </span><span class="s1">self.index</span><span class="s4">, </span><span class="s1">values</span><span class="s4">, </span><span class="s1">lax.scatter</span><span class="s4">,</span>
+                                   <span class="s1">indices_are_sorted=indices_are_sorted</span><span class="s4">,</span>
+                                   <span class="s1">unique_indices=unique_indices</span><span class="s4">, </span><span class="s1">mode=mode)</span>
+
+  <span class="s1">@allow_pass_by_position_with_warning</span>
+  <span class="s4">def </span><span class="s1">apply(self</span><span class="s4">, </span><span class="s1">func</span><span class="s4">, </span><span class="s1">*</span><span class="s4">, </span><span class="s1">indices_are_sorted=</span><span class="s4">False, </span><span class="s1">unique_indices=</span><span class="s4">False,</span>
+            <span class="s1">mode=</span><span class="s4">None</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot;Pure equivalent of ``func.at(x, idx)`` for a unary ufunc ``func``. 
+ 
+    Returns the value of ``x`` that would result from applying the unary 
+    function ``func`` to ``x`` at the given indices. This is similar to 
+    ``x.at[idx].set(func(x[idx]))``, but differs in the case of repeated indices: 
+    in ``x.at[idx].apply(func)``, repeated indices result in the function being 
+    applied multiple times. 
+ 
+    Note that in the current implementation, ``scatter_apply`` is not compatible 
+    with automatic differentiation. 
+ 
+    See :mod:`jax.ops` for details. 
+    &quot;&quot;&quot;</span>
+    <span class="s4">def </span><span class="s1">_scatter_apply(x</span><span class="s4">, </span><span class="s1">indices</span><span class="s4">, </span><span class="s1">_</span><span class="s4">, </span><span class="s1">dims</span><span class="s4">, </span><span class="s1">**kwargs):</span>
+      <span class="s4">return </span><span class="s1">lax.scatter_apply(x</span><span class="s4">, </span><span class="s1">indices</span><span class="s4">, </span><span class="s1">func</span><span class="s4">, </span><span class="s1">dims</span><span class="s4">, </span><span class="s1">**kwargs)</span>
+    <span class="s4">return </span><span class="s1">scatter._scatter_update(self.array</span><span class="s4">, </span><span class="s1">self.index</span><span class="s4">,</span>
+                                   <span class="s1">lax_internal._zero(self.array.dtype)</span><span class="s4">,</span>
+                                   <span class="s1">_scatter_apply</span><span class="s4">,</span>
+                                   <span class="s1">indices_are_sorted=indices_are_sorted</span><span class="s4">,</span>
+                                   <span class="s1">unique_indices=unique_indices</span><span class="s4">, </span><span class="s1">mode=mode)</span>
+
+  <span class="s1">@allow_pass_by_position_with_warning</span>
+  <span class="s4">def </span><span class="s1">add(self</span><span class="s4">, </span><span class="s1">values</span><span class="s4">, </span><span class="s1">*</span><span class="s4">, </span><span class="s1">indices_are_sorted=</span><span class="s4">False, </span><span class="s1">unique_indices=</span><span class="s4">False,</span>
+          <span class="s1">mode=</span><span class="s4">None</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot;Pure equivalent of ``x[idx] += y``. 
+ 
+    Returns the value of ``x`` that would result from the NumPy-style 
+    :mod:indexed assignment &lt;numpy.doc.indexing&gt;` ``x[idx] += y``. 
+ 
+    See :mod:`jax.ops` for details. 
+    &quot;&quot;&quot;</span>
+    <span class="s4">return </span><span class="s1">scatter._scatter_update(self.array</span><span class="s4">, </span><span class="s1">self.index</span><span class="s4">, </span><span class="s1">values</span><span class="s4">,</span>
+                                   <span class="s1">lax.scatter_add</span><span class="s4">,</span>
+                                   <span class="s1">indices_are_sorted=indices_are_sorted</span><span class="s4">,</span>
+                                   <span class="s1">unique_indices=unique_indices</span><span class="s4">, </span><span class="s1">mode=mode)</span>
+
+  <span class="s1">@allow_pass_by_position_with_warning</span>
+  <span class="s4">def </span><span class="s1">multiply(self</span><span class="s4">, </span><span class="s1">values</span><span class="s4">, </span><span class="s1">*</span><span class="s4">, </span><span class="s1">indices_are_sorted=</span><span class="s4">False, </span><span class="s1">unique_indices=</span><span class="s4">False,</span>
+               <span class="s1">mode=</span><span class="s4">None</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot;Pure equivalent of ``x[idx] *= y``. 
+ 
+    Returns the value of ``x`` that would result from the NumPy-style 
+    :mod:indexed assignment &lt;numpy.doc.indexing&gt;` ``x[idx] *= y``. 
+ 
+    See :mod:`jax.ops` for details. 
+    &quot;&quot;&quot;</span>
+    <span class="s4">return </span><span class="s1">scatter._scatter_update(self.array</span><span class="s4">, </span><span class="s1">self.index</span><span class="s4">, </span><span class="s1">values</span><span class="s4">,</span>
+                                   <span class="s1">lax.scatter_mul</span><span class="s4">,</span>
+                                   <span class="s1">indices_are_sorted=indices_are_sorted</span><span class="s4">,</span>
+                                   <span class="s1">unique_indices=unique_indices</span><span class="s4">,</span>
+                                   <span class="s1">mode=mode)</span>
+  <span class="s1">mul = multiply</span>
+
+  <span class="s1">@allow_pass_by_position_with_warning</span>
+  <span class="s4">def </span><span class="s1">divide(self</span><span class="s4">, </span><span class="s1">values</span><span class="s4">, </span><span class="s1">*</span><span class="s4">, </span><span class="s1">indices_are_sorted=</span><span class="s4">False, </span><span class="s1">unique_indices=</span><span class="s4">False,</span>
+             <span class="s1">mode=</span><span class="s4">None</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot;Pure equivalent of ``x[idx] /= y``. 
+ 
+    Returns the value of ``x`` that would result from the NumPy-style 
+    :mod:indexed assignment &lt;numpy.doc.indexing&gt;` ``x[idx] /= y``. 
+ 
+    See :mod:`jax.ops` for details. 
+    &quot;&quot;&quot;</span>
+    <span class="s4">return </span><span class="s1">ufuncs.divide(</span>
+      <span class="s1">self.array</span><span class="s4">,</span>
+      <span class="s1">scatter._scatter_update(lax_numpy.ones_like(self.array)</span><span class="s4">, </span><span class="s1">self.index</span><span class="s4">, </span><span class="s1">values</span><span class="s4">,</span>
+                              <span class="s1">lax.scatter_mul</span><span class="s4">,</span>
+                              <span class="s1">indices_are_sorted=indices_are_sorted</span><span class="s4">,</span>
+                              <span class="s1">unique_indices=unique_indices</span><span class="s4">, </span><span class="s1">mode=mode))</span>
+
+  <span class="s1">@allow_pass_by_position_with_warning</span>
+  <span class="s4">def </span><span class="s1">power(self</span><span class="s4">, </span><span class="s1">values</span><span class="s4">, </span><span class="s1">*</span><span class="s4">, </span><span class="s1">indices_are_sorted=</span><span class="s4">False, </span><span class="s1">unique_indices=</span><span class="s4">False,</span>
+            <span class="s1">mode=</span><span class="s4">None</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot;Pure equivalent of ``x[idx] **= y``. 
+ 
+    Returns the value of ``x`` that would result from the NumPy-style 
+    :mod:indexed assignment &lt;numpy.doc.indexing&gt;` ``x[idx] **= y``. 
+ 
+    See :mod:`jax.ops` for details. 
+    &quot;&quot;&quot;</span>
+    <span class="s4">return </span><span class="s1">ufuncs.power(</span>
+      <span class="s1">self.array</span><span class="s4">,</span>
+      <span class="s1">scatter._scatter_update(lax_numpy.ones_like(self.array)</span><span class="s4">, </span><span class="s1">self.index</span><span class="s4">, </span><span class="s1">values</span><span class="s4">,</span>
+                              <span class="s1">lax.scatter_mul</span><span class="s4">,</span>
+                              <span class="s1">indices_are_sorted=indices_are_sorted</span><span class="s4">,</span>
+                              <span class="s1">unique_indices=unique_indices</span><span class="s4">, </span><span class="s1">mode=mode))</span>
+
+  <span class="s1">@allow_pass_by_position_with_warning</span>
+  <span class="s4">def </span><span class="s1">min(self</span><span class="s4">, </span><span class="s1">values</span><span class="s4">, </span><span class="s1">*</span><span class="s4">, </span><span class="s1">indices_are_sorted=</span><span class="s4">False, </span><span class="s1">unique_indices=</span><span class="s4">False,</span>
+          <span class="s1">mode=</span><span class="s4">None</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot;Pure equivalent of ``x[idx] = minimum(x[idx], y)``. 
+ 
+    Returns the value of ``x`` that would result from the NumPy-style 
+    :mod:indexed assignment &lt;numpy.doc.indexing&gt;` 
+    ``x[idx] = minimum(x[idx], y)``. 
+ 
+    See :mod:`jax.ops` for details. 
+    &quot;&quot;&quot;</span>
+    <span class="s4">return </span><span class="s1">scatter._scatter_update(self.array</span><span class="s4">, </span><span class="s1">self.index</span><span class="s4">, </span><span class="s1">values</span><span class="s4">,</span>
+                                   <span class="s1">lax.scatter_min</span><span class="s4">,</span>
+                                   <span class="s1">indices_are_sorted=indices_are_sorted</span><span class="s4">,</span>
+                                   <span class="s1">unique_indices=unique_indices</span><span class="s4">, </span><span class="s1">mode=mode)</span>
+
+  <span class="s1">@allow_pass_by_position_with_warning</span>
+  <span class="s4">def </span><span class="s1">max(self</span><span class="s4">, </span><span class="s1">values</span><span class="s4">, </span><span class="s1">*</span><span class="s4">, </span><span class="s1">indices_are_sorted=</span><span class="s4">False, </span><span class="s1">unique_indices=</span><span class="s4">False,</span>
+          <span class="s1">mode=</span><span class="s4">None</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot;Pure equivalent of ``x[idx] = maximum(x[idx], y)``. 
+ 
+    Returns the value of ``x`` that would result from the NumPy-style 
+    :mod:indexed assignment &lt;numpy.doc.indexing&gt;` 
+    ``x[idx] = maximum(x[idx], y)``. 
+ 
+    See :mod:`jax.ops` for details. 
+    &quot;&quot;&quot;</span>
+    <span class="s4">return </span><span class="s1">scatter._scatter_update(self.array</span><span class="s4">, </span><span class="s1">self.index</span><span class="s4">, </span><span class="s1">values</span><span class="s4">,</span>
+                                   <span class="s1">lax.scatter_max</span><span class="s4">,</span>
+                                   <span class="s1">indices_are_sorted=indices_are_sorted</span><span class="s4">,</span>
+                                   <span class="s1">unique_indices=unique_indices</span><span class="s4">, </span><span class="s1">mode=mode)</span>
+
+<span class="s1">_array_operators = {</span>
+  <span class="s3">&quot;getitem&quot;</span><span class="s1">: lax_numpy._rewriting_take</span><span class="s4">,</span>
+  <span class="s3">&quot;setitem&quot;</span><span class="s1">: _unimplemented_setitem</span><span class="s4">,</span>
+  <span class="s3">&quot;copy&quot;</span><span class="s1">: _copy</span><span class="s4">,</span>
+  <span class="s3">&quot;deepcopy&quot;</span><span class="s1">: _deepcopy</span><span class="s4">,</span>
+  <span class="s3">&quot;neg&quot;</span><span class="s1">: ufuncs.negative</span><span class="s4">,</span>
+  <span class="s3">&quot;pos&quot;</span><span class="s1">: ufuncs.positive</span><span class="s4">,</span>
+  <span class="s3">&quot;eq&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;==&quot;</span><span class="s4">, </span><span class="s1">ufuncs.equal)</span><span class="s4">,</span>
+  <span class="s3">&quot;ne&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;!=&quot;</span><span class="s4">, </span><span class="s1">ufuncs.not_equal)</span><span class="s4">,</span>
+  <span class="s3">&quot;lt&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;&lt;&quot;</span><span class="s4">, </span><span class="s1">ufuncs.less)</span><span class="s4">,</span>
+  <span class="s3">&quot;le&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;&lt;=&quot;</span><span class="s4">, </span><span class="s1">ufuncs.less_equal)</span><span class="s4">,</span>
+  <span class="s3">&quot;gt&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;&gt;&quot;</span><span class="s4">, </span><span class="s1">ufuncs.greater)</span><span class="s4">,</span>
+  <span class="s3">&quot;ge&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;&gt;=&quot;</span><span class="s4">, </span><span class="s1">ufuncs.greater_equal)</span><span class="s4">,</span>
+  <span class="s3">&quot;abs&quot;</span><span class="s1">: ufuncs.abs</span><span class="s4">,</span>
+  <span class="s3">&quot;add&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;+&quot;</span><span class="s4">, </span><span class="s1">ufuncs.add)</span><span class="s4">,</span>
+  <span class="s3">&quot;radd&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;+&quot;</span><span class="s4">, </span><span class="s1">ufuncs.add</span><span class="s4">, </span><span class="s1">swap=</span><span class="s4">True</span><span class="s1">)</span><span class="s4">,</span>
+  <span class="s3">&quot;sub&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;-&quot;</span><span class="s4">, </span><span class="s1">ufuncs.subtract)</span><span class="s4">,</span>
+  <span class="s3">&quot;rsub&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;-&quot;</span><span class="s4">, </span><span class="s1">ufuncs.subtract</span><span class="s4">, </span><span class="s1">swap=</span><span class="s4">True</span><span class="s1">)</span><span class="s4">,</span>
+  <span class="s3">&quot;mul&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;*&quot;</span><span class="s4">, </span><span class="s1">ufuncs.multiply)</span><span class="s4">,</span>
+  <span class="s3">&quot;rmul&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;*&quot;</span><span class="s4">, </span><span class="s1">ufuncs.multiply</span><span class="s4">, </span><span class="s1">swap=</span><span class="s4">True</span><span class="s1">)</span><span class="s4">,</span>
+  <span class="s3">&quot;div&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;/&quot;</span><span class="s4">, </span><span class="s1">ufuncs.divide)</span><span class="s4">,</span>
+  <span class="s3">&quot;rdiv&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;/&quot;</span><span class="s4">, </span><span class="s1">ufuncs.divide</span><span class="s4">, </span><span class="s1">swap=</span><span class="s4">True</span><span class="s1">)</span><span class="s4">,</span>
+  <span class="s3">&quot;truediv&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;/&quot;</span><span class="s4">, </span><span class="s1">ufuncs.true_divide)</span><span class="s4">,</span>
+  <span class="s3">&quot;rtruediv&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;/&quot;</span><span class="s4">, </span><span class="s1">ufuncs.true_divide</span><span class="s4">, </span><span class="s1">swap=</span><span class="s4">True</span><span class="s1">)</span><span class="s4">,</span>
+  <span class="s3">&quot;floordiv&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;//&quot;</span><span class="s4">, </span><span class="s1">ufuncs.floor_divide)</span><span class="s4">,</span>
+  <span class="s3">&quot;rfloordiv&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;//&quot;</span><span class="s4">, </span><span class="s1">ufuncs.floor_divide</span><span class="s4">, </span><span class="s1">swap=</span><span class="s4">True</span><span class="s1">)</span><span class="s4">,</span>
+  <span class="s3">&quot;divmod&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;divmod&quot;</span><span class="s4">, </span><span class="s1">ufuncs.divmod)</span><span class="s4">,</span>
+  <span class="s3">&quot;rdivmod&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;divmod&quot;</span><span class="s4">, </span><span class="s1">ufuncs.divmod</span><span class="s4">, </span><span class="s1">swap=</span><span class="s4">True</span><span class="s1">)</span><span class="s4">,</span>
+  <span class="s3">&quot;mod&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;%&quot;</span><span class="s4">, </span><span class="s1">ufuncs.mod)</span><span class="s4">,</span>
+  <span class="s3">&quot;rmod&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;%&quot;</span><span class="s4">, </span><span class="s1">ufuncs.mod</span><span class="s4">, </span><span class="s1">swap=</span><span class="s4">True</span><span class="s1">)</span><span class="s4">,</span>
+  <span class="s3">&quot;pow&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;**&quot;</span><span class="s4">, </span><span class="s1">ufuncs.power)</span><span class="s4">,</span>
+  <span class="s3">&quot;rpow&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;**&quot;</span><span class="s4">, </span><span class="s1">ufuncs.power</span><span class="s4">, </span><span class="s1">swap=</span><span class="s4">True</span><span class="s1">)</span><span class="s4">,</span>
+  <span class="s3">&quot;matmul&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;@&quot;</span><span class="s4">, </span><span class="s1">lax_numpy.matmul)</span><span class="s4">,</span>
+  <span class="s3">&quot;rmatmul&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;@&quot;</span><span class="s4">, </span><span class="s1">lax_numpy.matmul</span><span class="s4">, </span><span class="s1">swap=</span><span class="s4">True</span><span class="s1">)</span><span class="s4">,</span>
+  <span class="s3">&quot;and&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;&amp;&quot;</span><span class="s4">, </span><span class="s1">ufuncs.bitwise_and)</span><span class="s4">,</span>
+  <span class="s3">&quot;rand&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;&amp;&quot;</span><span class="s4">, </span><span class="s1">ufuncs.bitwise_and</span><span class="s4">, </span><span class="s1">swap=</span><span class="s4">True</span><span class="s1">)</span><span class="s4">,</span>
+  <span class="s3">&quot;or&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;|&quot;</span><span class="s4">, </span><span class="s1">ufuncs.bitwise_or)</span><span class="s4">,</span>
+  <span class="s3">&quot;ror&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;|&quot;</span><span class="s4">, </span><span class="s1">ufuncs.bitwise_or</span><span class="s4">, </span><span class="s1">swap=</span><span class="s4">True</span><span class="s1">)</span><span class="s4">,</span>
+  <span class="s3">&quot;xor&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;^&quot;</span><span class="s4">, </span><span class="s1">ufuncs.bitwise_xor)</span><span class="s4">,</span>
+  <span class="s3">&quot;rxor&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;^&quot;</span><span class="s4">, </span><span class="s1">ufuncs.bitwise_xor</span><span class="s4">, </span><span class="s1">swap=</span><span class="s4">True</span><span class="s1">)</span><span class="s4">,</span>
+  <span class="s3">&quot;invert&quot;</span><span class="s1">: ufuncs.bitwise_not</span><span class="s4">,</span>
+  <span class="s3">&quot;lshift&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;&lt;&lt;&quot;</span><span class="s4">, </span><span class="s1">ufuncs.left_shift)</span><span class="s4">,</span>
+  <span class="s3">&quot;rshift&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;&gt;&gt;&quot;</span><span class="s4">, </span><span class="s1">ufuncs.right_shift)</span><span class="s4">,</span>
+  <span class="s3">&quot;rlshift&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;&lt;&lt;&quot;</span><span class="s4">, </span><span class="s1">ufuncs.left_shift</span><span class="s4">, </span><span class="s1">swap=</span><span class="s4">True</span><span class="s1">)</span><span class="s4">,</span>
+  <span class="s3">&quot;rrshift&quot;</span><span class="s1">: _defer_to_unrecognized_arg(</span><span class="s3">&quot;&gt;&gt;&quot;</span><span class="s4">, </span><span class="s1">ufuncs.right_shift</span><span class="s4">, </span><span class="s1">swap=</span><span class="s4">True</span><span class="s1">)</span><span class="s4">,</span>
+  <span class="s3">&quot;round&quot;</span><span class="s1">: _operator_round</span><span class="s4">,</span>
+<span class="s1">}</span>
+
+<span class="s1">_array_methods = {</span>
+  <span class="s3">&quot;all&quot;</span><span class="s1">: reductions.all</span><span class="s4">,</span>
+  <span class="s3">&quot;any&quot;</span><span class="s1">: reductions.any</span><span class="s4">,</span>
+  <span class="s3">&quot;argmax&quot;</span><span class="s1">: lax_numpy.argmax</span><span class="s4">,</span>
+  <span class="s3">&quot;argmin&quot;</span><span class="s1">: lax_numpy.argmin</span><span class="s4">,</span>
+  <span class="s3">&quot;argpartition&quot;</span><span class="s1">: lax_numpy.argpartition</span><span class="s4">,</span>
+  <span class="s3">&quot;argsort&quot;</span><span class="s1">: lax_numpy.argsort</span><span class="s4">,</span>
+  <span class="s3">&quot;astype&quot;</span><span class="s1">: _astype</span><span class="s4">,</span>
+  <span class="s3">&quot;choose&quot;</span><span class="s1">: lax_numpy.choose</span><span class="s4">,</span>
+  <span class="s3">&quot;clip&quot;</span><span class="s1">: _clip</span><span class="s4">,</span>
+  <span class="s3">&quot;conj&quot;</span><span class="s1">: ufuncs.conj</span><span class="s4">,</span>
+  <span class="s3">&quot;conjugate&quot;</span><span class="s1">: ufuncs.conjugate</span><span class="s4">,</span>
+  <span class="s3">&quot;compress&quot;</span><span class="s1">: _compress_method</span><span class="s4">,</span>
+  <span class="s3">&quot;copy&quot;</span><span class="s1">: lax_numpy.copy</span><span class="s4">,</span>
+  <span class="s3">&quot;cumprod&quot;</span><span class="s1">: reductions.cumprod</span><span class="s4">,</span>
+  <span class="s3">&quot;cumsum&quot;</span><span class="s1">: reductions.cumsum</span><span class="s4">,</span>
+  <span class="s3">&quot;diagonal&quot;</span><span class="s1">: lax_numpy.diagonal</span><span class="s4">,</span>
+  <span class="s3">&quot;dot&quot;</span><span class="s1">: lax_numpy.dot</span><span class="s4">,</span>
+  <span class="s3">&quot;flatten&quot;</span><span class="s1">: lax_numpy.ravel</span><span class="s4">,</span>
+  <span class="s3">&quot;item&quot;</span><span class="s1">: _item</span><span class="s4">,</span>
+  <span class="s3">&quot;max&quot;</span><span class="s1">: reductions.max</span><span class="s4">,</span>
+  <span class="s3">&quot;mean&quot;</span><span class="s1">: reductions.mean</span><span class="s4">,</span>
+  <span class="s3">&quot;min&quot;</span><span class="s1">: reductions.min</span><span class="s4">,</span>
+  <span class="s3">&quot;nonzero&quot;</span><span class="s1">: lax_numpy.nonzero</span><span class="s4">,</span>
+  <span class="s3">&quot;prod&quot;</span><span class="s1">: reductions.prod</span><span class="s4">,</span>
+  <span class="s3">&quot;ptp&quot;</span><span class="s1">: reductions.ptp</span><span class="s4">,</span>
+  <span class="s3">&quot;ravel&quot;</span><span class="s1">: lax_numpy.ravel</span><span class="s4">,</span>
+  <span class="s3">&quot;repeat&quot;</span><span class="s1">: lax_numpy.repeat</span><span class="s4">,</span>
+  <span class="s3">&quot;reshape&quot;</span><span class="s1">: _reshape</span><span class="s4">,</span>
+  <span class="s3">&quot;round&quot;</span><span class="s1">: lax_numpy.round</span><span class="s4">,</span>
+  <span class="s3">&quot;searchsorted&quot;</span><span class="s1">: lax_numpy.searchsorted</span><span class="s4">,</span>
+  <span class="s3">&quot;sort&quot;</span><span class="s1">: lax_numpy.sort</span><span class="s4">,</span>
+  <span class="s3">&quot;squeeze&quot;</span><span class="s1">: lax_numpy.squeeze</span><span class="s4">,</span>
+  <span class="s3">&quot;std&quot;</span><span class="s1">: reductions.std</span><span class="s4">,</span>
+  <span class="s3">&quot;sum&quot;</span><span class="s1">: reductions.sum</span><span class="s4">,</span>
+  <span class="s3">&quot;swapaxes&quot;</span><span class="s1">: lax_numpy.swapaxes</span><span class="s4">,</span>
+  <span class="s3">&quot;take&quot;</span><span class="s1">: lax_numpy.take</span><span class="s4">,</span>
+  <span class="s3">&quot;trace&quot;</span><span class="s1">: lax_numpy.trace</span><span class="s4">,</span>
+  <span class="s3">&quot;transpose&quot;</span><span class="s1">: _transpose</span><span class="s4">,</span>
+  <span class="s3">&quot;var&quot;</span><span class="s1">: reductions.var</span><span class="s4">,</span>
+  <span class="s3">&quot;view&quot;</span><span class="s1">: _view</span><span class="s4">,</span>
+
+  <span class="s0"># Methods exposed in order to avoid circular imports</span>
+  <span class="s3">&quot;_split&quot;</span><span class="s1">: lax_numpy.split</span><span class="s4">,  </span><span class="s0"># used in jacfwd/jacrev</span>
+  <span class="s3">&quot;_multi_slice&quot;</span><span class="s1">: _multi_slice</span><span class="s4">,  </span><span class="s0"># used in pxla for sharding</span>
+
+  <span class="s0"># Deprecated methods.</span>
+  <span class="s0"># TODO(jakevdp): remove these after June 2023</span>
+  <span class="s3">&quot;broadcast&quot;</span><span class="s1">: _deprecated_broadcast</span><span class="s4">,</span>
+  <span class="s3">&quot;broadcast_in_dim&quot;</span><span class="s1">: _deprecated_broadcast_in_dim</span><span class="s4">,</span>
+  <span class="s3">&quot;split&quot;</span><span class="s1">: _deprecated_split</span><span class="s4">,</span>
+<span class="s1">}</span>
+
+<span class="s1">_impl_only_array_methods = {</span>
+  <span class="s3">&quot;_chunk_iter&quot;</span><span class="s1">: _chunk_iter</span><span class="s4">,</span>
+  <span class="s3">&quot;_unstack&quot;</span><span class="s1">: _unstack</span><span class="s4">,</span>
+<span class="s1">}</span>
+
+<span class="s1">_array_properties = {</span>
+  <span class="s3">&quot;flat&quot;</span><span class="s1">: _notimplemented_flat</span><span class="s4">,</span>
+  <span class="s3">&quot;T&quot;</span><span class="s1">: lax_numpy.transpose</span><span class="s4">,</span>
+  <span class="s3">&quot;real&quot;</span><span class="s1">: ufuncs.real</span><span class="s4">,</span>
+  <span class="s3">&quot;imag&quot;</span><span class="s1">: ufuncs.imag</span><span class="s4">,</span>
+  <span class="s3">&quot;nbytes&quot;</span><span class="s1">: _nbytes</span><span class="s4">,</span>
+  <span class="s3">&quot;itemsize&quot;</span><span class="s1">: _itemsize</span><span class="s4">,</span>
+  <span class="s3">&quot;at&quot;</span><span class="s1">: _IndexUpdateHelper</span><span class="s4">,</span>
+<span class="s1">}</span>
+
+<span class="s4">def </span><span class="s1">_set_shaped_array_attributes(shaped_array):</span>
+  <span class="s0"># Set up operator, method, and property forwarding on Tracer instances</span>
+  <span class="s0"># containing</span>
+  <span class="s0"># ShapedArray avals by following the forwarding conventions for Tracer.</span>
+  <span class="s0"># Forward operators using a single-underscore-prefix naming convention:</span>
+  <span class="s4">for </span><span class="s1">operator_name</span><span class="s4">, </span><span class="s1">function </span><span class="s4">in </span><span class="s1">_array_operators.items():</span>
+    <span class="s1">setattr(shaped_array</span><span class="s4">, </span><span class="s3">f&quot;_</span><span class="s4">{</span><span class="s1">operator_name</span><span class="s4">}</span><span class="s3">&quot;</span><span class="s4">, </span><span class="s1">staticmethod(function))</span>
+  <span class="s0"># Forward methods and properties using core.{aval_method, aval_property}:</span>
+  <span class="s4">for </span><span class="s1">method_name</span><span class="s4">, </span><span class="s1">method </span><span class="s4">in </span><span class="s1">_array_methods.items():</span>
+    <span class="s1">setattr(shaped_array</span><span class="s4">, </span><span class="s1">method_name</span><span class="s4">, </span><span class="s1">core.aval_method(method))</span>
+  <span class="s4">for </span><span class="s1">prop_name</span><span class="s4">, </span><span class="s1">prop </span><span class="s4">in </span><span class="s1">_array_properties.items():</span>
+    <span class="s1">setattr(shaped_array</span><span class="s4">, </span><span class="s1">prop_name</span><span class="s4">, </span><span class="s1">core.aval_property(prop))</span>
+  <span class="s1">setattr(shaped_array</span><span class="s4">, </span><span class="s3">&quot;_array_module&quot;</span><span class="s4">, </span><span class="s1">staticmethod(__array_module__))</span>
+
+
+<span class="s4">def </span><span class="s1">_set_device_array_base_attributes(device_array</span><span class="s4">, </span><span class="s1">include=</span><span class="s4">None, </span><span class="s1">exclude=</span><span class="s4">None</span><span class="s1">):</span>
+  <span class="s0"># Forward operators, methods, and properties on DeviceArray to lax_numpy</span>
+  <span class="s0"># functions (with no Tracers involved; this forwarding is direct)</span>
+  <span class="s4">def </span><span class="s1">maybe_setattr(attr_name</span><span class="s4">, </span><span class="s1">target):</span>
+    <span class="s4">if </span><span class="s1">exclude </span><span class="s4">is not None and </span><span class="s1">attr_name </span><span class="s4">in </span><span class="s1">exclude:</span>
+      <span class="s4">return</span>
+    <span class="s4">if not </span><span class="s1">include </span><span class="s4">or </span><span class="s1">attr_name </span><span class="s4">in </span><span class="s1">include:</span>
+      <span class="s1">setattr(device_array</span><span class="s4">, </span><span class="s1">attr_name</span><span class="s4">, </span><span class="s1">target)</span>
+
+  <span class="s4">for </span><span class="s1">operator_name</span><span class="s4">, </span><span class="s1">function </span><span class="s4">in </span><span class="s1">_array_operators.items():</span>
+    <span class="s1">maybe_setattr(</span><span class="s3">f&quot;__</span><span class="s4">{</span><span class="s1">operator_name</span><span class="s4">}</span><span class="s3">__&quot;</span><span class="s4">, </span><span class="s1">function)</span>
+  <span class="s4">for </span><span class="s1">method_name</span><span class="s4">, </span><span class="s1">method </span><span class="s4">in </span><span class="s1">_array_methods.items():</span>
+    <span class="s1">maybe_setattr(method_name</span><span class="s4">, </span><span class="s1">method)</span>
+  <span class="s4">for </span><span class="s1">prop_name</span><span class="s4">, </span><span class="s1">prop </span><span class="s4">in </span><span class="s1">_array_properties.items():</span>
+    <span class="s1">maybe_setattr(prop_name</span><span class="s4">, </span><span class="s1">property(prop))</span>
+
+  <span class="s4">for </span><span class="s1">name</span><span class="s4">, </span><span class="s1">func </span><span class="s4">in </span><span class="s1">_impl_only_array_methods.items():</span>
+    <span class="s1">setattr(device_array</span><span class="s4">, </span><span class="s1">name</span><span class="s4">, </span><span class="s1">func)</span>
+
+<span class="s4">def </span><span class="s1">_set_device_array_attributes(device_array):</span>
+  <span class="s1">setattr(device_array</span><span class="s4">, </span><span class="s3">&quot;__array_module__&quot;</span><span class="s4">, </span><span class="s1">__array_module__)</span>
+
+
+<span class="s4">def </span><span class="s1">register_jax_array_methods():</span>
+  <span class="s2">&quot;&quot;&quot;Call this function once to register methods of JAX arrays&quot;&quot;&quot;</span>
+  <span class="s1">_set_shaped_array_attributes(core.ShapedArray)</span>
+  <span class="s1">_set_shaped_array_attributes(core.DShapedArray)</span>
+
+  <span class="s1">_set_device_array_base_attributes(device_array.DeviceArray)</span>
+  <span class="s1">_set_device_array_base_attributes(ArrayImpl</span><span class="s4">, </span><span class="s1">exclude={</span><span class="s3">'__getitem__'</span><span class="s1">})</span>
+
+  <span class="s4">for </span><span class="s1">t </span><span class="s4">in </span><span class="s1">device_array.device_array_types:</span>
+    <span class="s1">_set_device_array_attributes(t)</span>
+    <span class="s1">_set_device_array_attributes(ArrayImpl)</span>
+
+  <span class="s1">Array.at.__doc__ = _IndexUpdateHelper.__doc__</span>
+</pre>
+</body>
+</html>

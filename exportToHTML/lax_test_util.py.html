@@ -1,0 +1,398 @@
+<html>
+<head>
+<title>lax_test_util.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6897bb;}
+.s4 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+lax_test_util.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2018 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+
+<span class="s0"># This submodule includes lax-specific private test utilities that are not</span>
+<span class="s0"># exported to jax.test_util. Functionality appearing here is for internal use</span>
+<span class="s0"># only, and may be changed or removed at any time and without any deprecation</span>
+<span class="s0"># cycle.</span>
+
+<span class="s2">import </span><span class="s1">collections</span>
+<span class="s2">import </span><span class="s1">itertools</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Optional</span><span class="s2">, </span><span class="s1">cast</span>
+
+<span class="s2">from </span><span class="s1">jax </span><span class="s2">import </span><span class="s1">lax</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">dtypes</span>
+<span class="s2">from </span><span class="s1">jax._src </span><span class="s2">import </span><span class="s1">test_util</span>
+<span class="s2">from </span><span class="s1">jax._src.util </span><span class="s2">import </span><span class="s1">safe_map</span><span class="s2">, </span><span class="s1">safe_zip</span>
+
+<span class="s2">import </span><span class="s1">numpy </span><span class="s2">as </span><span class="s1">np</span>
+
+<span class="s2">from </span><span class="s1">jax.config </span><span class="s2">import </span><span class="s1">config</span>
+<span class="s1">config.parse_flags_with_absl()</span>
+
+<span class="s1">map</span><span class="s2">, </span><span class="s1">unsafe_map = safe_map</span><span class="s2">, </span><span class="s1">map</span>
+<span class="s1">zip</span><span class="s2">, </span><span class="s1">unsafe_zip = safe_zip</span><span class="s2">, </span><span class="s1">zip</span>
+
+
+<span class="s0"># For standard unops and binops, we can generate a large number of tests on</span>
+<span class="s0"># arguments of appropriate shapes and dtypes using the following table.</span>
+
+<span class="s1">float_dtypes = test_util.dtypes.all_floating</span>
+<span class="s1">complex_elem_dtypes = test_util.dtypes.floating</span>
+<span class="s1">complex_dtypes = test_util.dtypes.complex</span>
+<span class="s1">inexact_dtypes = test_util.dtypes.all_inexact</span>
+<span class="s1">int_dtypes = test_util.dtypes.all_integer</span>
+<span class="s1">uint_dtypes = test_util.dtypes.all_unsigned</span>
+<span class="s1">bool_dtypes = test_util.dtypes.boolean</span>
+
+<span class="s1">default_dtypes = float_dtypes + int_dtypes</span>
+<span class="s1">all_dtypes = (</span>
+    <span class="s1">float_dtypes + complex_dtypes + int_dtypes + uint_dtypes + bool_dtypes</span>
+<span class="s1">)</span>
+<span class="s1">python_scalar_types = [bool</span><span class="s2">, </span><span class="s1">int</span><span class="s2">, </span><span class="s1">float</span><span class="s2">, </span><span class="s1">complex]</span>
+
+<span class="s1">compatible_shapes = [[(</span><span class="s3">3</span><span class="s2">,</span><span class="s1">)]</span><span class="s2">, </span><span class="s1">[(</span><span class="s3">3</span><span class="s2">, </span><span class="s3">4</span><span class="s1">)</span><span class="s2">, </span><span class="s1">(</span><span class="s3">3</span><span class="s2">, </span><span class="s3">1</span><span class="s1">)</span><span class="s2">, </span><span class="s1">(</span><span class="s3">1</span><span class="s2">, </span><span class="s3">4</span><span class="s1">)]</span><span class="s2">, </span><span class="s1">[(</span><span class="s3">2</span><span class="s2">, </span><span class="s3">3</span><span class="s2">, </span><span class="s3">4</span><span class="s1">)</span><span class="s2">, </span><span class="s1">(</span><span class="s3">2</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s3">4</span><span class="s1">)]]</span>
+
+<span class="s1">OpRecord = collections.namedtuple(</span>
+    <span class="s4">&quot;OpRecord&quot;</span><span class="s2">, </span><span class="s1">[</span><span class="s4">&quot;op&quot;</span><span class="s2">, </span><span class="s4">&quot;nargs&quot;</span><span class="s2">, </span><span class="s4">&quot;dtypes&quot;</span><span class="s2">, </span><span class="s4">&quot;rng_factory&quot;</span><span class="s2">, </span><span class="s4">&quot;tol&quot;</span><span class="s1">]</span>
+<span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">op_record(op</span><span class="s2">, </span><span class="s1">nargs</span><span class="s2">, </span><span class="s1">dtypes</span><span class="s2">, </span><span class="s1">rng_factory</span><span class="s2">, </span><span class="s1">tol=</span><span class="s2">None</span><span class="s1">):</span>
+  <span class="s2">return </span><span class="s1">OpRecord(op</span><span class="s2">, </span><span class="s1">nargs</span><span class="s2">, </span><span class="s1">dtypes</span><span class="s2">, </span><span class="s1">rng_factory</span><span class="s2">, </span><span class="s1">tol)</span>
+
+
+<span class="s1">ReducerOpRecord = collections.namedtuple(</span>
+    <span class="s4">&quot;ReducerOpRecord&quot;</span><span class="s2">, </span><span class="s1">[</span><span class="s4">&quot;op&quot;</span><span class="s2">, </span><span class="s4">&quot;reference_op&quot;</span><span class="s2">, </span><span class="s4">&quot;init_val&quot;</span><span class="s2">, </span><span class="s4">&quot;dtypes&quot;</span><span class="s2">, </span><span class="s4">&quot;primitive&quot;</span><span class="s1">]</span>
+<span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">lax_reduce_ops():</span>
+  <span class="s2">return </span><span class="s1">[</span>
+      <span class="s1">ReducerOpRecord(lax.add</span><span class="s2">, </span><span class="s1">np.add</span><span class="s2">, </span><span class="s3">0</span><span class="s2">, </span><span class="s1">default_dtypes</span><span class="s2">, </span><span class="s1">lax.reduce_sum_p)</span><span class="s2">,</span>
+      <span class="s1">ReducerOpRecord(</span>
+          <span class="s1">lax.mul</span><span class="s2">, </span><span class="s1">np.multiply</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">default_dtypes</span><span class="s2">, </span><span class="s1">lax.reduce_prod_p</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">ReducerOpRecord(</span>
+          <span class="s1">lax.max</span><span class="s2">, </span><span class="s1">np.maximum</span><span class="s2">, </span><span class="s3">0</span><span class="s2">, </span><span class="s1">uint_dtypes + bool_dtypes</span><span class="s2">, </span><span class="s1">lax.reduce_max_p</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">ReducerOpRecord(</span>
+          <span class="s1">lax.max</span><span class="s2">, </span><span class="s1">np.maximum</span><span class="s2">, </span><span class="s1">-np.inf</span><span class="s2">, </span><span class="s1">float_dtypes</span><span class="s2">, </span><span class="s1">lax.reduce_max_p</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">ReducerOpRecord(</span>
+          <span class="s1">lax.max</span><span class="s2">,</span>
+          <span class="s1">np.maximum</span><span class="s2">,</span>
+          <span class="s1">dtypes.iinfo(np.int32).min</span><span class="s2">,</span>
+          <span class="s1">[np.int32]</span><span class="s2">,</span>
+          <span class="s1">lax.reduce_max_p</span><span class="s2">,</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">ReducerOpRecord(</span>
+          <span class="s1">lax.max</span><span class="s2">,</span>
+          <span class="s1">np.maximum</span><span class="s2">,</span>
+          <span class="s1">dtypes.iinfo(np.int64).min</span><span class="s2">,</span>
+          <span class="s1">[np.int64]</span><span class="s2">,</span>
+          <span class="s1">lax.reduce_max_p</span><span class="s2">,</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">ReducerOpRecord(</span>
+          <span class="s1">lax.min</span><span class="s2">, </span><span class="s1">np.minimum</span><span class="s2">, </span><span class="s1">np.inf</span><span class="s2">, </span><span class="s1">float_dtypes</span><span class="s2">, </span><span class="s1">lax.reduce_min_p</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">ReducerOpRecord(</span>
+          <span class="s1">lax.min</span><span class="s2">,</span>
+          <span class="s1">np.minimum</span><span class="s2">,</span>
+          <span class="s1">dtypes.iinfo(np.int32).max</span><span class="s2">,</span>
+          <span class="s1">[np.int32]</span><span class="s2">,</span>
+          <span class="s1">lax.reduce_min_p</span><span class="s2">,</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">ReducerOpRecord(</span>
+          <span class="s1">lax.min</span><span class="s2">,</span>
+          <span class="s1">np.minimum</span><span class="s2">,</span>
+          <span class="s1">dtypes.iinfo(np.int64).max</span><span class="s2">,</span>
+          <span class="s1">[np.int64]</span><span class="s2">,</span>
+          <span class="s1">lax.reduce_min_p</span><span class="s2">,</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">ReducerOpRecord(</span>
+          <span class="s1">lax.min</span><span class="s2">,</span>
+          <span class="s1">np.minimum</span><span class="s2">,</span>
+          <span class="s1">dtypes.iinfo(np.uint32).max</span><span class="s2">,</span>
+          <span class="s1">[np.uint32]</span><span class="s2">,</span>
+          <span class="s1">lax.reduce_min_p</span><span class="s2">,</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">ReducerOpRecord(</span>
+          <span class="s1">lax.min</span><span class="s2">,</span>
+          <span class="s1">np.minimum</span><span class="s2">,</span>
+          <span class="s1">dtypes.iinfo(np.uint64).max</span><span class="s2">,</span>
+          <span class="s1">[np.uint64]</span><span class="s2">,</span>
+          <span class="s1">lax.reduce_min_p</span><span class="s2">,</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">ReducerOpRecord(</span>
+          <span class="s1">lax.bitwise_and</span><span class="s2">,</span>
+          <span class="s1">np.bitwise_and</span><span class="s2">,</span>
+          <span class="s1">-</span><span class="s3">1</span><span class="s2">,</span>
+          <span class="s1">int_dtypes + uint_dtypes + bool_dtypes</span><span class="s2">,</span>
+          <span class="s1">lax.reduce_and_p</span><span class="s2">,</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">ReducerOpRecord(</span>
+          <span class="s1">lax.bitwise_or</span><span class="s2">,</span>
+          <span class="s1">np.bitwise_or</span><span class="s2">,</span>
+          <span class="s3">0</span><span class="s2">,</span>
+          <span class="s1">int_dtypes + uint_dtypes + bool_dtypes</span><span class="s2">,</span>
+          <span class="s1">lax.reduce_or_p</span><span class="s2">,</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">ReducerOpRecord(</span>
+          <span class="s1">lax.bitwise_xor</span><span class="s2">,</span>
+          <span class="s1">np.bitwise_xor</span><span class="s2">,</span>
+          <span class="s3">0</span><span class="s2">,</span>
+          <span class="s1">int_dtypes + uint_dtypes + bool_dtypes</span><span class="s2">,</span>
+          <span class="s1">lax.reduce_xor_p</span><span class="s2">,</span>
+      <span class="s1">)</span><span class="s2">,</span>
+  <span class="s1">]</span>
+
+
+<span class="s2">def </span><span class="s1">lax_ops():</span>
+  <span class="s2">return </span><span class="s1">[</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;neg&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">default_dtypes + complex_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_small</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;sign&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">default_dtypes + uint_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_small)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;floor&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">float_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_small)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;ceil&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">float_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_small)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;round&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">float_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_default)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;nextafter&quot;</span><span class="s2">,</span>
+          <span class="s3">2</span><span class="s2">,</span>
+          <span class="s1">[f </span><span class="s2">for </span><span class="s1">f </span><span class="s2">in </span><span class="s1">float_dtypes </span><span class="s2">if </span><span class="s1">f != dtypes.bfloat16]</span><span class="s2">,</span>
+          <span class="s1">test_util.rand_default</span><span class="s2">,</span>
+          <span class="s1">tol=</span><span class="s3">0</span><span class="s2">,</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;is_finite&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">float_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_small)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;exp&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">float_dtypes + complex_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_small)</span><span class="s2">,</span>
+      <span class="s0"># TODO(b/142975473): on CPU, expm1 for float64 is only accurate to ~float32</span>
+      <span class="s0"># precision.</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;expm1&quot;</span><span class="s2">,</span>
+          <span class="s3">1</span><span class="s2">,</span>
+          <span class="s1">float_dtypes + complex_dtypes</span><span class="s2">,</span>
+          <span class="s1">test_util.rand_small</span><span class="s2">,</span>
+          <span class="s1">{np.float64: </span><span class="s3">1e-8</span><span class="s1">}</span><span class="s2">,</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;log&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">float_dtypes + complex_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_positive</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;log1p&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">float_dtypes + complex_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_positive</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s0"># TODO(b/142975473): on CPU, tanh for complex128 is only accurate to</span>
+      <span class="s0"># ~float32 precision.</span>
+      <span class="s0"># TODO(b/143135720): on GPU, tanh has only ~float32 precision.</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;tanh&quot;</span><span class="s2">,</span>
+          <span class="s3">1</span><span class="s2">,</span>
+          <span class="s1">float_dtypes + complex_dtypes</span><span class="s2">,</span>
+          <span class="s1">test_util.rand_small</span><span class="s2">,</span>
+          <span class="s1">{np.float64: </span><span class="s3">1e-9</span><span class="s2">, </span><span class="s1">np.complex128: </span><span class="s3">1e-7</span><span class="s1">}</span><span class="s2">,</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;logistic&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">float_dtypes + complex_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_default</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;sin&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">float_dtypes + complex_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_default</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;cos&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">float_dtypes + complex_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_default</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;atan2&quot;</span><span class="s2">, </span><span class="s3">2</span><span class="s2">, </span><span class="s1">float_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_default)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;sqrt&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">float_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_positive)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;sqrt&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">complex_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_default)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;rsqrt&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">float_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_positive)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;rsqrt&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">complex_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_default)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;cbrt&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">float_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_default)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;square&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">float_dtypes + complex_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_default</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;reciprocal&quot;</span><span class="s2">,</span>
+          <span class="s3">1</span><span class="s2">,</span>
+          <span class="s1">float_dtypes + complex_dtypes</span><span class="s2">,</span>
+          <span class="s1">test_util.rand_positive</span><span class="s2">,</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;tan&quot;</span><span class="s2">,</span>
+          <span class="s3">1</span><span class="s2">,</span>
+          <span class="s1">float_dtypes + complex_dtypes</span><span class="s2">,</span>
+          <span class="s1">test_util.rand_default</span><span class="s2">,</span>
+          <span class="s1">{np.float32: </span><span class="s3">3e-5</span><span class="s1">}</span><span class="s2">,</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;asin&quot;</span><span class="s2">,</span>
+          <span class="s3">1</span><span class="s2">,</span>
+          <span class="s1">float_dtypes + complex_dtypes</span><span class="s2">,</span>
+          <span class="s1">test_util.rand_small</span><span class="s2">,</span>
+          <span class="s1">{np.complex128: </span><span class="s3">5e-12</span><span class="s1">}</span><span class="s2">,</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;acos&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">float_dtypes + complex_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_small)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;atan&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">float_dtypes + complex_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_small)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;asinh&quot;</span><span class="s2">,</span>
+          <span class="s3">1</span><span class="s2">,</span>
+          <span class="s1">float_dtypes + complex_dtypes</span><span class="s2">,</span>
+          <span class="s1">test_util.rand_default</span><span class="s2">,</span>
+          <span class="s1">tol={np.complex64: </span><span class="s3">1e-4</span><span class="s2">, </span><span class="s1">np.complex128: </span><span class="s3">1e-5</span><span class="s1">}</span><span class="s2">,</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;acosh&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">float_dtypes + complex_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_positive</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s0"># TODO(b/155331781): atanh has only ~float precision</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;atanh&quot;</span><span class="s2">,</span>
+          <span class="s3">1</span><span class="s2">,</span>
+          <span class="s1">float_dtypes + complex_dtypes</span><span class="s2">,</span>
+          <span class="s1">test_util.rand_small</span><span class="s2">,</span>
+          <span class="s1">{np.float64: </span><span class="s3">1e-9</span><span class="s1">}</span><span class="s2">,</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;sinh&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">float_dtypes + complex_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_default</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;cosh&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">float_dtypes + complex_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_default</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;lgamma&quot;</span><span class="s2">,</span>
+          <span class="s3">1</span><span class="s2">,</span>
+          <span class="s1">float_dtypes</span><span class="s2">,</span>
+          <span class="s1">test_util.rand_positive</span><span class="s2">,</span>
+          <span class="s1">{</span>
+              <span class="s1">np.float32: (</span>
+                  <span class="s3">1e-3 </span><span class="s2">if </span><span class="s1">test_util.device_under_test() == </span><span class="s4">&quot;tpu&quot; </span><span class="s2">else </span><span class="s3">1e-5</span>
+              <span class="s1">)</span><span class="s2">,</span>
+              <span class="s1">np.float64: </span><span class="s3">1e-14</span><span class="s2">,</span>
+          <span class="s1">}</span><span class="s2">,</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;digamma&quot;</span><span class="s2">,</span>
+          <span class="s3">1</span><span class="s2">,</span>
+          <span class="s1">float_dtypes</span><span class="s2">,</span>
+          <span class="s1">test_util.rand_positive</span><span class="s2">,</span>
+          <span class="s1">{np.float64: </span><span class="s3">1e-14</span><span class="s1">}</span><span class="s2">,</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;betainc&quot;</span><span class="s2">,</span>
+          <span class="s3">3</span><span class="s2">,</span>
+          <span class="s1">float_dtypes</span><span class="s2">,</span>
+          <span class="s1">test_util.rand_positive</span><span class="s2">,</span>
+          <span class="s1">{np.float64: </span><span class="s3">1e-14</span><span class="s1">}</span><span class="s2">,</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;igamma&quot;</span><span class="s2">,</span>
+          <span class="s3">2</span><span class="s2">,</span>
+          <span class="s1">[f </span><span class="s2">for </span><span class="s1">f </span><span class="s2">in </span><span class="s1">float_dtypes </span><span class="s2">if </span><span class="s1">f </span><span class="s2">not in </span><span class="s1">[dtypes.bfloat16</span><span class="s2">, </span><span class="s1">np.float16]]</span><span class="s2">,</span>
+          <span class="s1">test_util.rand_positive</span><span class="s2">,</span>
+          <span class="s1">{np.float64: </span><span class="s3">1e-14</span><span class="s1">}</span><span class="s2">,</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;igammac&quot;</span><span class="s2">,</span>
+          <span class="s3">2</span><span class="s2">,</span>
+          <span class="s1">[f </span><span class="s2">for </span><span class="s1">f </span><span class="s2">in </span><span class="s1">float_dtypes </span><span class="s2">if </span><span class="s1">f </span><span class="s2">not in </span><span class="s1">[dtypes.bfloat16</span><span class="s2">, </span><span class="s1">np.float16]]</span><span class="s2">,</span>
+          <span class="s1">test_util.rand_positive</span><span class="s2">,</span>
+          <span class="s1">{np.float64: </span><span class="s3">1e-14</span><span class="s1">}</span><span class="s2">,</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;erf&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">float_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_small)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;erfc&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">float_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_small)</span><span class="s2">,</span>
+      <span class="s0"># TODO(b/142976030): the approximation of erfinf used by XLA is only</span>
+      <span class="s0"># accurate to float32 precision.</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;erf_inv&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">float_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_small</span><span class="s2">, </span><span class="s1">{np.float64: </span><span class="s3">1e-9</span><span class="s1">}</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;bessel_i0e&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">float_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_default)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;bessel_i1e&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">float_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_default)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;real&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">complex_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_default)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;imag&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">complex_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_default)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;complex&quot;</span><span class="s2">, </span><span class="s3">2</span><span class="s2">, </span><span class="s1">complex_elem_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_default)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;conj&quot;</span><span class="s2">,</span>
+          <span class="s3">1</span><span class="s2">,</span>
+          <span class="s1">complex_elem_dtypes + complex_dtypes</span><span class="s2">,</span>
+          <span class="s1">test_util.rand_default</span><span class="s2">,</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;abs&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">default_dtypes + complex_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_default</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;pow&quot;</span><span class="s2">, </span><span class="s3">2</span><span class="s2">, </span><span class="s1">float_dtypes + complex_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_positive</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;bitwise_and&quot;</span><span class="s2">, </span><span class="s3">2</span><span class="s2">, </span><span class="s1">bool_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_small)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;bitwise_not&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">bool_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_small)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;bitwise_or&quot;</span><span class="s2">, </span><span class="s3">2</span><span class="s2">, </span><span class="s1">bool_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_small)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;bitwise_xor&quot;</span><span class="s2">, </span><span class="s3">2</span><span class="s2">, </span><span class="s1">bool_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_small)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;population_count&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">int_dtypes + uint_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_int</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;clz&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">int_dtypes + uint_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_int)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;add&quot;</span><span class="s2">, </span><span class="s3">2</span><span class="s2">, </span><span class="s1">default_dtypes + complex_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_small</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;sub&quot;</span><span class="s2">, </span><span class="s3">2</span><span class="s2">, </span><span class="s1">default_dtypes + complex_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_small</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;mul&quot;</span><span class="s2">, </span><span class="s3">2</span><span class="s2">, </span><span class="s1">default_dtypes + complex_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_small</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span>
+          <span class="s4">&quot;div&quot;</span><span class="s2">, </span><span class="s3">2</span><span class="s2">, </span><span class="s1">default_dtypes + complex_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_nonzero</span>
+      <span class="s1">)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;rem&quot;</span><span class="s2">, </span><span class="s3">2</span><span class="s2">, </span><span class="s1">default_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_nonzero)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;max&quot;</span><span class="s2">, </span><span class="s3">2</span><span class="s2">, </span><span class="s1">all_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_small)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;min&quot;</span><span class="s2">, </span><span class="s3">2</span><span class="s2">, </span><span class="s1">all_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_small)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;eq&quot;</span><span class="s2">, </span><span class="s3">2</span><span class="s2">, </span><span class="s1">all_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_some_equal)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;ne&quot;</span><span class="s2">, </span><span class="s3">2</span><span class="s2">, </span><span class="s1">all_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_small)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;ge&quot;</span><span class="s2">, </span><span class="s3">2</span><span class="s2">, </span><span class="s1">default_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_small)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;gt&quot;</span><span class="s2">, </span><span class="s3">2</span><span class="s2">, </span><span class="s1">default_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_small)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;le&quot;</span><span class="s2">, </span><span class="s3">2</span><span class="s2">, </span><span class="s1">default_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_small)</span><span class="s2">,</span>
+      <span class="s1">op_record(</span><span class="s4">&quot;lt&quot;</span><span class="s2">, </span><span class="s3">2</span><span class="s2">, </span><span class="s1">default_dtypes</span><span class="s2">, </span><span class="s1">test_util.rand_small)</span><span class="s2">,</span>
+  <span class="s1">]</span>
+
+
+<span class="s2">def </span><span class="s1">all_bdims(*shapes):</span>
+  <span class="s1">bdims = (itertools.chain([cast(Optional[int]</span><span class="s2">, None</span><span class="s1">)]</span><span class="s2">,</span>
+                           <span class="s1">range(len(shape) + </span><span class="s3">1</span><span class="s1">)) </span><span class="s2">for </span><span class="s1">shape </span><span class="s2">in </span><span class="s1">shapes)</span>
+  <span class="s2">return </span><span class="s1">(t </span><span class="s2">for </span><span class="s1">t </span><span class="s2">in </span><span class="s1">itertools.product(*bdims) </span><span class="s2">if not </span><span class="s1">all(e </span><span class="s2">is None for </span><span class="s1">e </span><span class="s2">in </span><span class="s1">t))</span>
+
+
+<span class="s2">def </span><span class="s1">add_bdim(bdim_size</span><span class="s2">, </span><span class="s1">bdim</span><span class="s2">, </span><span class="s1">shape):</span>
+  <span class="s1">shape = list(shape)</span>
+  <span class="s2">if </span><span class="s1">bdim </span><span class="s2">is not None</span><span class="s1">:</span>
+    <span class="s1">shape.insert(bdim</span><span class="s2">, </span><span class="s1">bdim_size)</span>
+  <span class="s2">return </span><span class="s1">tuple(shape)</span>
+
+
+<span class="s2">def </span><span class="s1">slicer(x</span><span class="s2">, </span><span class="s1">bdim):</span>
+  <span class="s2">if </span><span class="s1">bdim </span><span class="s2">is None</span><span class="s1">:</span>
+    <span class="s2">return lambda </span><span class="s1">_: x</span>
+  <span class="s2">else</span><span class="s1">:</span>
+    <span class="s2">return lambda </span><span class="s1">i: lax.index_in_dim(x</span><span class="s2">, </span><span class="s1">i</span><span class="s2">, </span><span class="s1">bdim</span><span class="s2">, </span><span class="s1">keepdims=</span><span class="s2">False</span><span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">args_slicer(args</span><span class="s2">, </span><span class="s1">bdims):</span>
+  <span class="s1">slicers = map(slicer</span><span class="s2">, </span><span class="s1">args</span><span class="s2">, </span><span class="s1">bdims)</span>
+  <span class="s2">return lambda </span><span class="s1">i: [sl(i) </span><span class="s2">for </span><span class="s1">sl </span><span class="s2">in </span><span class="s1">slicers]</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,327 @@
+<html>
+<head>
+<title>control_flow_ops_test.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+control_flow_ops_test.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2020 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+<span class="s2">&quot;&quot;&quot;Tests for the jax2tf conversion for control-flow primitives.&quot;&quot;&quot;</span>
+
+<span class="s3">from </span><span class="s1">absl.testing </span><span class="s3">import </span><span class="s1">absltest</span>
+
+<span class="s3">import </span><span class="s1">jax</span>
+<span class="s3">import </span><span class="s1">jax.lax </span><span class="s3">as </span><span class="s1">lax</span>
+<span class="s3">import </span><span class="s1">jax.numpy </span><span class="s3">as </span><span class="s1">jnp</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">test_util </span><span class="s3">as </span><span class="s1">jtu</span>
+<span class="s3">import </span><span class="s1">numpy </span><span class="s3">as </span><span class="s1">np</span>
+
+<span class="s3">from </span><span class="s1">jax.experimental.jax2tf.tests </span><span class="s3">import </span><span class="s1">tf_test_util</span>
+
+<span class="s3">from </span><span class="s1">jax.config </span><span class="s3">import </span><span class="s1">config</span>
+<span class="s1">config.parse_flags_with_absl()</span>
+
+
+<span class="s3">class </span><span class="s1">ControlFlowOpsTest(tf_test_util.JaxToTfTestCase):</span>
+
+  <span class="s1">@jtu.ignore_warning(category=UserWarning</span><span class="s3">,</span>
+                      <span class="s1">message=</span><span class="s4">&quot;Explicitly requested dtype .* requested in array is not available&quot;</span><span class="s1">)</span>
+  <span class="s3">def </span><span class="s1">test_cond(self):</span>
+    <span class="s3">def </span><span class="s1">f_jax(pred</span><span class="s3">, </span><span class="s1">x):</span>
+      <span class="s3">return </span><span class="s1">lax.cond(pred</span><span class="s3">, lambda </span><span class="s1">t: t + </span><span class="s5">1.</span><span class="s3">, lambda </span><span class="s1">f: f</span><span class="s3">, </span><span class="s1">x)</span>
+
+    <span class="s1">self.ConvertAndCompare(f_jax</span><span class="s3">, </span><span class="s1">jnp.bool_(</span><span class="s3">True</span><span class="s1">)</span><span class="s3">, </span><span class="s5">1.</span><span class="s1">)</span>
+    <span class="s1">self.ConvertAndCompare(f_jax</span><span class="s3">, </span><span class="s1">jnp.bool_(</span><span class="s3">False</span><span class="s1">)</span><span class="s3">, </span><span class="s5">1.</span><span class="s1">)</span>
+
+  <span class="s1">@jtu.ignore_warning(category=UserWarning</span><span class="s3">,</span>
+                      <span class="s1">message=</span><span class="s4">&quot;Explicitly requested dtype .* requested in array is not available&quot;</span><span class="s1">)</span>
+  <span class="s3">def </span><span class="s1">test_cond_multiple_results(self):</span>
+    <span class="s3">def </span><span class="s1">f_jax(pred</span><span class="s3">, </span><span class="s1">x):</span>
+      <span class="s3">return </span><span class="s1">lax.cond(pred</span><span class="s3">, lambda </span><span class="s1">t: (t + </span><span class="s5">1.</span><span class="s3">, </span><span class="s5">1.</span><span class="s1">)</span><span class="s3">, lambda </span><span class="s1">f: (f + </span><span class="s5">2.</span><span class="s3">, </span><span class="s5">2.</span><span class="s1">)</span><span class="s3">, </span><span class="s1">x)</span>
+
+    <span class="s1">self.ConvertAndCompare(f_jax</span><span class="s3">, </span><span class="s1">jnp.bool_(</span><span class="s3">True</span><span class="s1">)</span><span class="s3">, </span><span class="s5">1.</span><span class="s1">)</span>
+    <span class="s1">self.ConvertAndCompare(f_jax</span><span class="s3">, </span><span class="s1">jnp.bool_(</span><span class="s3">False</span><span class="s1">)</span><span class="s3">, </span><span class="s5">1.</span><span class="s1">)</span>
+
+  <span class="s1">@jtu.ignore_warning(category=UserWarning</span><span class="s3">,</span>
+                      <span class="s1">message=</span><span class="s4">&quot;Explicitly requested dtype .* requested in array is not available&quot;</span><span class="s1">)</span>
+  <span class="s3">def </span><span class="s1">test_cond_partial_eval(self):</span>
+    <span class="s3">def </span><span class="s1">f(x):</span>
+      <span class="s1">res = lax.cond(</span><span class="s3">True, lambda </span><span class="s1">op: op * x</span><span class="s3">, lambda </span><span class="s1">op: op + x</span><span class="s3">, </span><span class="s1">x)</span>
+      <span class="s3">return </span><span class="s1">res</span>
+    <span class="s1">self.ConvertAndCompare(jax.grad(f)</span><span class="s3">, </span><span class="s5">1.</span><span class="s1">)</span>
+
+  <span class="s1">@jtu.ignore_warning(category=UserWarning</span><span class="s3">,</span>
+                      <span class="s1">message=</span><span class="s4">&quot;Explicitly requested dtype .* requested in array is not available&quot;</span><span class="s1">)</span>
+  <span class="s3">def </span><span class="s1">test_cond_units(self):</span>
+    <span class="s3">def </span><span class="s1">g(x):</span>
+      <span class="s3">return </span><span class="s1">lax.cond(</span><span class="s3">True, lambda </span><span class="s1">x: x</span><span class="s3">, lambda </span><span class="s1">y: y</span><span class="s3">, </span><span class="s1">x)</span>
+
+    <span class="s1">self.ConvertAndCompare(g</span><span class="s3">, </span><span class="s5">0.7</span><span class="s1">)</span>
+    <span class="s1">self.ConvertAndCompare(jax.grad(g)</span><span class="s3">, </span><span class="s5">0.7</span><span class="s1">)</span>
+
+  <span class="s1">@jtu.ignore_warning(category=UserWarning</span><span class="s3">,</span>
+                      <span class="s1">message=</span><span class="s4">&quot;Explicitly requested dtype .* requested in array is not available&quot;</span><span class="s1">)</span>
+  <span class="s3">def </span><span class="s1">test_cond_custom_jvp(self):</span>
+    <span class="s2">&quot;&quot;&quot;Conversion of function with custom JVP, inside cond. 
+    This exercises the custom_jvp_call_jaxpr primitives.&quot;&quot;&quot;</span>
+    <span class="s1">@jax.custom_jvp</span>
+    <span class="s3">def </span><span class="s1">f(x):</span>
+      <span class="s3">return </span><span class="s1">x * x</span>
+
+    <span class="s1">@f.defjvp</span>
+    <span class="s3">def </span><span class="s1">f_jvp(primals</span><span class="s3">, </span><span class="s1">tangents):</span>
+      <span class="s1">x</span><span class="s3">, </span><span class="s1">= primals</span>
+      <span class="s1">x_dot</span><span class="s3">, </span><span class="s1">= tangents</span>
+      <span class="s1">primal_out = f(x)</span>
+      <span class="s1">tangent_out = </span><span class="s5">3. </span><span class="s1">* x * x_dot</span>
+      <span class="s3">return </span><span class="s1">primal_out</span><span class="s3">, </span><span class="s1">tangent_out</span>
+
+    <span class="s3">def </span><span class="s1">g(x):</span>
+      <span class="s3">return </span><span class="s1">lax.cond(</span><span class="s3">True, </span><span class="s1">f</span><span class="s3">, lambda </span><span class="s1">y: y</span><span class="s3">, </span><span class="s1">x)</span>
+
+    <span class="s1">arg = </span><span class="s5">0.7</span>
+    <span class="s1">self.TransformConvertAndCompare(g</span><span class="s3">, </span><span class="s1">arg</span><span class="s3">, None</span><span class="s1">)</span>
+    <span class="s1">self.TransformConvertAndCompare(g</span><span class="s3">, </span><span class="s1">arg</span><span class="s3">, </span><span class="s4">&quot;jvp&quot;</span><span class="s1">)</span>
+    <span class="s1">self.TransformConvertAndCompare(g</span><span class="s3">, </span><span class="s1">arg</span><span class="s3">, </span><span class="s4">&quot;vmap&quot;</span><span class="s1">)</span>
+    <span class="s1">self.TransformConvertAndCompare(g</span><span class="s3">, </span><span class="s1">arg</span><span class="s3">, </span><span class="s4">&quot;jvp_vmap&quot;</span><span class="s1">)</span>
+    <span class="s1">self.TransformConvertAndCompare(g</span><span class="s3">, </span><span class="s1">arg</span><span class="s3">, </span><span class="s4">&quot;grad&quot;</span><span class="s1">)</span>
+    <span class="s1">self.TransformConvertAndCompare(g</span><span class="s3">, </span><span class="s1">arg</span><span class="s3">, </span><span class="s4">&quot;grad_vmap&quot;</span><span class="s1">)</span>
+
+  <span class="s1">@jtu.ignore_warning(category=UserWarning</span><span class="s3">,</span>
+                      <span class="s1">message=</span><span class="s4">&quot;Explicitly requested dtype .* requested in array is not available&quot;</span><span class="s1">)</span>
+  <span class="s3">def </span><span class="s1">test_cond_custom_vjp(self):</span>
+    <span class="s2">&quot;&quot;&quot;Conversion of function with custom VJP, inside cond. 
+    This exercises the custom_vjp_call_jaxpr primitives.&quot;&quot;&quot;</span>
+    <span class="s1">@jax.custom_vjp</span>
+    <span class="s3">def </span><span class="s1">f(x):</span>
+      <span class="s3">return </span><span class="s1">x * x</span>
+
+    <span class="s0"># f_fwd: a -&gt; (b, residual)</span>
+    <span class="s3">def </span><span class="s1">f_fwd(x):</span>
+      <span class="s3">return </span><span class="s1">f(x)</span><span class="s3">, </span><span class="s5">3. </span><span class="s1">* x</span>
+    <span class="s0"># f_bwd: (residual, CT b) -&gt; [CT a]</span>
+    <span class="s3">def </span><span class="s1">f_bwd(residual</span><span class="s3">, </span><span class="s1">ct_b):</span>
+      <span class="s3">return </span><span class="s1">residual * ct_b</span><span class="s3">,</span>
+
+    <span class="s1">f.defvjp(f_fwd</span><span class="s3">, </span><span class="s1">f_bwd)</span>
+
+    <span class="s3">def </span><span class="s1">g(x):</span>
+      <span class="s3">return </span><span class="s1">lax.cond(</span><span class="s3">True, </span><span class="s1">f</span><span class="s3">, lambda </span><span class="s1">y: y</span><span class="s3">, </span><span class="s1">x)</span>
+
+    <span class="s1">arg = </span><span class="s5">0.7</span>
+    <span class="s1">self.TransformConvertAndCompare(g</span><span class="s3">, </span><span class="s1">arg</span><span class="s3">, None</span><span class="s1">)</span>
+    <span class="s1">self.TransformConvertAndCompare(g</span><span class="s3">, </span><span class="s1">arg</span><span class="s3">, </span><span class="s4">&quot;vmap&quot;</span><span class="s1">)</span>
+    <span class="s1">self.TransformConvertAndCompare(g</span><span class="s3">, </span><span class="s1">arg</span><span class="s3">, </span><span class="s4">&quot;grad_vmap&quot;</span><span class="s1">)</span>
+
+  <span class="s1">@jtu.ignore_warning(category=UserWarning</span><span class="s3">,</span>
+                      <span class="s1">message=</span><span class="s4">&quot;Explicitly requested dtype .* requested in array is not available&quot;</span><span class="s1">)</span>
+  <span class="s3">def </span><span class="s1">test_while_single_carry(self):</span>
+    <span class="s2">&quot;&quot;&quot;A while with a single carry&quot;&quot;&quot;</span>
+    <span class="s3">def </span><span class="s1">func(x):</span>
+      <span class="s0"># Equivalent to:</span>
+      <span class="s0">#      for(i=x; i &lt; 4; i++);</span>
+      <span class="s3">return </span><span class="s1">lax.while_loop(</span><span class="s3">lambda </span><span class="s1">c: c &lt; </span><span class="s5">4</span><span class="s3">, lambda </span><span class="s1">c: c + </span><span class="s5">1</span><span class="s3">, </span><span class="s1">x)</span>
+
+    <span class="s1">self.ConvertAndCompare(func</span><span class="s3">, </span><span class="s5">0</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">test_while(self):</span>
+    <span class="s0"># Some constants to capture in the conditional branches</span>
+    <span class="s1">cond_const = np.ones(</span><span class="s5">3</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s1">body_const1 = np.full_like(cond_const</span><span class="s3">, </span><span class="s5">1.</span><span class="s1">)</span>
+    <span class="s1">body_const2 = np.full_like(cond_const</span><span class="s3">, </span><span class="s5">2.</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">func(x):</span>
+      <span class="s0"># Equivalent to:</span>
+      <span class="s0">#      c = [1, 1, 1]</span>
+      <span class="s0">#      for(i=0; i &lt; 3; i++)</span>
+      <span class="s0">#        c += [1, 1, 1] + [2, 2, 2]</span>
+      <span class="s0">#</span>
+      <span class="s0"># The function is set-up so that it captures constants in the</span>
+      <span class="s0"># body of the functionals. This covers some cases in the representation</span>
+      <span class="s0"># of the lax.while primitive.</span>
+      <span class="s3">def </span><span class="s1">cond(idx_carry):</span>
+        <span class="s1">i</span><span class="s3">, </span><span class="s1">c = idx_carry</span>
+        <span class="s3">return </span><span class="s1">i &lt; jnp.sum(lax.tie_in(i</span><span class="s3">, </span><span class="s1">cond_const))  </span><span class="s0"># Capture cond_const</span>
+
+      <span class="s3">def </span><span class="s1">body(idx_carry):</span>
+        <span class="s1">i</span><span class="s3">, </span><span class="s1">c = idx_carry</span>
+        <span class="s3">return </span><span class="s1">(i + </span><span class="s5">1</span><span class="s3">, </span><span class="s1">c + body_const1 + body_const2)</span>
+
+      <span class="s3">return </span><span class="s1">lax.while_loop(cond</span><span class="s3">, </span><span class="s1">body</span><span class="s3">, </span><span class="s1">(</span><span class="s5">0</span><span class="s3">, </span><span class="s1">x))</span>
+
+    <span class="s1">self.ConvertAndCompare(func</span><span class="s3">, </span><span class="s1">cond_const)</span>
+
+  <span class="s3">def </span><span class="s1">test_while_batched_cond(self):</span>
+    <span class="s2">&quot;&quot;&quot;A while with a single carry&quot;&quot;&quot;</span>
+    <span class="s3">def </span><span class="s1">product(x</span><span class="s3">, </span><span class="s1">y):</span>
+      <span class="s0"># Equivalent to &quot;x * y&quot; implemented as:</span>
+      <span class="s0">#      res = 0.</span>
+      <span class="s0">#      for(i=0; i &lt; y; i++)</span>
+      <span class="s0">#         res += x</span>
+      <span class="s3">return </span><span class="s1">lax.while_loop(</span><span class="s3">lambda </span><span class="s1">idx_carry: idx_carry[</span><span class="s5">0</span><span class="s1">] &lt; y</span><span class="s3">,</span>
+                            <span class="s3">lambda </span><span class="s1">idx_carry: (idx_carry[</span><span class="s5">0</span><span class="s1">] + </span><span class="s5">1</span><span class="s3">,</span>
+                                               <span class="s1">idx_carry[</span><span class="s5">1</span><span class="s1">] + x)</span><span class="s3">,</span>
+                            <span class="s1">(</span><span class="s5">0</span><span class="s3">, </span><span class="s5">0.</span><span class="s1">))</span>
+
+    <span class="s0"># We use vmap to compute result[i, j] = i * j</span>
+    <span class="s1">xs = np.arange(</span><span class="s5">4</span><span class="s3">, </span><span class="s1">dtype=np.int32)</span>
+    <span class="s1">ys = np.arange(</span><span class="s5">5</span><span class="s3">, </span><span class="s1">dtype=np.int32)</span>
+
+    <span class="s3">def </span><span class="s1">product_xs_y(xs</span><span class="s3">, </span><span class="s1">y):</span>
+      <span class="s3">return </span><span class="s1">jax.vmap(product</span><span class="s3">, </span><span class="s1">in_axes=(</span><span class="s5">0</span><span class="s3">, None</span><span class="s1">))(xs</span><span class="s3">, </span><span class="s1">y)</span>
+    <span class="s3">def </span><span class="s1">product_xs_ys(xs</span><span class="s3">, </span><span class="s1">ys):</span>
+      <span class="s3">return </span><span class="s1">jax.vmap(product_xs_y</span><span class="s3">, </span><span class="s1">in_axes=(</span><span class="s3">None, </span><span class="s5">0</span><span class="s1">))(xs</span><span class="s3">, </span><span class="s1">ys)</span>
+
+    <span class="s1">self.ConvertAndCompare(product_xs_ys</span><span class="s3">, </span><span class="s1">xs</span><span class="s3">, </span><span class="s1">ys)</span>
+
+  <span class="s1">@jtu.ignore_warning(category=UserWarning</span><span class="s3">,</span>
+                      <span class="s1">message=</span><span class="s4">&quot;Explicitly requested dtype .* requested in array is not available&quot;</span><span class="s1">)</span>
+  <span class="s3">def </span><span class="s1">test_while_custom_jvp(self):</span>
+    <span class="s2">&quot;&quot;&quot;Conversion of function with custom JVP, inside while. 
+    This exercises the custom_jvp_call_jaxpr primitives.&quot;&quot;&quot;</span>
+    <span class="s1">@jax.custom_jvp</span>
+    <span class="s3">def </span><span class="s1">f(x):</span>
+      <span class="s3">return </span><span class="s1">x * x</span>
+
+    <span class="s1">@f.defjvp</span>
+    <span class="s3">def </span><span class="s1">f_jvp(primals</span><span class="s3">, </span><span class="s1">tangents):</span>
+      <span class="s1">x</span><span class="s3">, </span><span class="s1">= primals</span>
+      <span class="s1">x_dot</span><span class="s3">, </span><span class="s1">= tangents</span>
+      <span class="s1">primal_out = f(x)</span>
+      <span class="s1">tangent_out = </span><span class="s5">3. </span><span class="s1">* x * x_dot</span>
+      <span class="s3">return </span><span class="s1">primal_out</span><span class="s3">, </span><span class="s1">tangent_out</span>
+
+    <span class="s3">def </span><span class="s1">g(x):</span>
+      <span class="s3">return </span><span class="s1">lax.while_loop(</span><span class="s3">lambda </span><span class="s1">carry: carry[</span><span class="s5">0</span><span class="s1">] &lt; </span><span class="s5">10</span><span class="s3">,</span>
+                            <span class="s3">lambda </span><span class="s1">carry: (carry[</span><span class="s5">0</span><span class="s1">] + </span><span class="s5">1.</span><span class="s3">, </span><span class="s1">f(carry[</span><span class="s5">1</span><span class="s1">]))</span><span class="s3">,</span>
+                            <span class="s1">(</span><span class="s5">0.</span><span class="s3">, </span><span class="s1">x))</span>
+
+    <span class="s1">arg = </span><span class="s5">0.7</span>
+    <span class="s1">self.TransformConvertAndCompare(g</span><span class="s3">, </span><span class="s1">arg</span><span class="s3">, None</span><span class="s1">)</span>
+    <span class="s1">self.TransformConvertAndCompare(g</span><span class="s3">, </span><span class="s1">arg</span><span class="s3">, </span><span class="s4">&quot;jvp&quot;</span><span class="s1">)</span>
+    <span class="s1">self.TransformConvertAndCompare(g</span><span class="s3">, </span><span class="s1">arg</span><span class="s3">, </span><span class="s4">&quot;vmap&quot;</span><span class="s1">)</span>
+    <span class="s1">self.TransformConvertAndCompare(g</span><span class="s3">, </span><span class="s1">arg</span><span class="s3">, </span><span class="s4">&quot;jvp_vmap&quot;</span><span class="s1">)</span>
+
+
+  <span class="s3">def </span><span class="s1">test_scan(self):</span>
+    <span class="s3">def </span><span class="s1">f_jax(xs</span><span class="s3">, </span><span class="s1">ys):</span>
+      <span class="s1">body_const = np.ones((</span><span class="s5">2</span><span class="s3">, </span><span class="s1">)</span><span class="s3">, </span><span class="s1">dtype=np.float32)  </span><span class="s0"># Test constant capture</span>
+      <span class="s3">def </span><span class="s1">body(res0</span><span class="s3">, </span><span class="s1">inputs):</span>
+        <span class="s1">x</span><span class="s3">, </span><span class="s1">y = inputs</span>
+        <span class="s3">return </span><span class="s1">res0 + x * y</span><span class="s3">, </span><span class="s1">body_const</span>
+      <span class="s3">return </span><span class="s1">lax.scan(body</span><span class="s3">, </span><span class="s5">0.</span><span class="s3">, </span><span class="s1">(xs</span><span class="s3">, </span><span class="s1">ys))</span>
+
+    <span class="s1">arg = np.arange(</span><span class="s5">10</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s1">self.ConvertAndCompare(f_jax</span><span class="s3">, </span><span class="s1">arg</span><span class="s3">, </span><span class="s1">arg)</span>
+
+  <span class="s3">def </span><span class="s1">test_scan_partial_eval(self):</span>
+    <span class="s3">def </span><span class="s1">f_jax(xs</span><span class="s3">, </span><span class="s1">ys):</span>
+      <span class="s1">body_const = np.ones((</span><span class="s5">2</span><span class="s3">, </span><span class="s1">)</span><span class="s3">, </span><span class="s1">dtype=np.float32)  </span><span class="s0"># Test constant capture</span>
+      <span class="s3">def </span><span class="s1">body(res0</span><span class="s3">, </span><span class="s1">inputs):</span>
+        <span class="s1">x</span><span class="s3">, </span><span class="s1">y = inputs</span>
+        <span class="s3">return </span><span class="s1">res0 + x * y</span><span class="s3">, </span><span class="s1">body_const</span>
+      <span class="s1">c_out</span><span class="s3">, </span><span class="s1">_ = lax.scan(body</span><span class="s3">, </span><span class="s5">0.</span><span class="s3">, </span><span class="s1">(xs</span><span class="s3">, </span><span class="s1">ys))</span>
+      <span class="s3">return </span><span class="s1">c_out</span>
+
+    <span class="s1">arg = np.arange(</span><span class="s5">10</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s1">self.ConvertAndCompare(jax.grad(f_jax)</span><span class="s3">, </span><span class="s1">arg</span><span class="s3">, </span><span class="s1">arg)</span>
+
+
+  <span class="s3">def </span><span class="s1">test_scan_custom_jvp(self):</span>
+    <span class="s2">&quot;&quot;&quot;Conversion of function with custom JVP, inside scan. 
+    This exercises the custom_jvp_call_jaxpr primitives.&quot;&quot;&quot;</span>
+    <span class="s1">@jax.custom_jvp</span>
+    <span class="s3">def </span><span class="s1">f(x):</span>
+      <span class="s3">return </span><span class="s1">x * x</span>
+
+    <span class="s1">@f.defjvp</span>
+    <span class="s3">def </span><span class="s1">f_jvp(primals</span><span class="s3">, </span><span class="s1">tangents):</span>
+      <span class="s1">x</span><span class="s3">, </span><span class="s1">= primals</span>
+      <span class="s1">x_dot</span><span class="s3">, </span><span class="s1">= tangents</span>
+      <span class="s1">primal_out = f(x)</span>
+      <span class="s1">tangent_out = </span><span class="s5">3. </span><span class="s1">* x * x_dot</span>
+      <span class="s3">return </span><span class="s1">primal_out</span><span class="s3">, </span><span class="s1">tangent_out</span>
+
+    <span class="s3">def </span><span class="s1">g(x):</span>
+      <span class="s3">return </span><span class="s1">lax.scan(</span><span class="s3">lambda </span><span class="s1">carry</span><span class="s3">, </span><span class="s1">inp: (carry + f(inp)</span><span class="s3">, </span><span class="s5">0.</span><span class="s1">)</span><span class="s3">,</span>
+                      <span class="s1">np.full(x.shape[</span><span class="s5">1</span><span class="s1">:]</span><span class="s3">, </span><span class="s5">0.</span><span class="s1">)</span><span class="s3">,  </span><span class="s0"># Like x w/o leading dim</span>
+                      <span class="s1">x)[</span><span class="s5">0</span><span class="s1">]</span>
+
+    <span class="s1">arg = np.full((</span><span class="s5">5</span><span class="s3">,</span><span class="s1">)</span><span class="s3">, </span><span class="s5">0.7</span><span class="s1">)</span>
+    <span class="s1">self.TransformConvertAndCompare(g</span><span class="s3">, </span><span class="s1">arg</span><span class="s3">, None</span><span class="s1">)</span>
+    <span class="s1">self.TransformConvertAndCompare(g</span><span class="s3">, </span><span class="s1">arg</span><span class="s3">, </span><span class="s4">&quot;jvp&quot;</span><span class="s1">)</span>
+    <span class="s1">self.TransformConvertAndCompare(g</span><span class="s3">, </span><span class="s1">arg</span><span class="s3">, </span><span class="s4">&quot;vmap&quot;</span><span class="s1">)</span>
+    <span class="s1">self.TransformConvertAndCompare(g</span><span class="s3">, </span><span class="s1">arg</span><span class="s3">, </span><span class="s4">&quot;jvp_vmap&quot;</span><span class="s1">)</span>
+    <span class="s1">self.TransformConvertAndCompare(g</span><span class="s3">, </span><span class="s1">arg</span><span class="s3">, </span><span class="s4">&quot;grad&quot;</span><span class="s1">)</span>
+    <span class="s1">self.TransformConvertAndCompare(g</span><span class="s3">, </span><span class="s1">arg</span><span class="s3">, </span><span class="s4">&quot;grad_vmap&quot;</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">test_scan_custom_vjp(self):</span>
+    <span class="s2">&quot;&quot;&quot;Conversion of function with custom VJP, inside scan. 
+    This exercises the custom_vjp_call_jaxpr primitives.&quot;&quot;&quot;</span>
+    <span class="s1">@jax.custom_vjp</span>
+    <span class="s3">def </span><span class="s1">f(x):</span>
+      <span class="s3">return </span><span class="s1">x * x</span>
+
+    <span class="s0"># f_fwd: a -&gt; (b, residual)</span>
+    <span class="s3">def </span><span class="s1">f_fwd(x):</span>
+      <span class="s3">return </span><span class="s1">f(x)</span><span class="s3">, </span><span class="s5">3. </span><span class="s1">* x</span>
+    <span class="s0"># f_bwd: (residual, CT b) -&gt; [CT a]</span>
+    <span class="s3">def </span><span class="s1">f_bwd(residual</span><span class="s3">, </span><span class="s1">ct_b):</span>
+      <span class="s3">return </span><span class="s1">residual * ct_b</span><span class="s3">,</span>
+
+    <span class="s1">f.defvjp(f_fwd</span><span class="s3">, </span><span class="s1">f_bwd)</span>
+
+    <span class="s3">def </span><span class="s1">g(x):</span>
+      <span class="s3">return </span><span class="s1">lax.scan(</span><span class="s3">lambda </span><span class="s1">carry</span><span class="s3">, </span><span class="s1">inp: (carry + f(inp)</span><span class="s3">, </span><span class="s5">0.</span><span class="s1">)</span><span class="s3">,</span>
+                      <span class="s1">np.full(x.shape[</span><span class="s5">1</span><span class="s1">:]</span><span class="s3">, </span><span class="s5">0.</span><span class="s1">)</span><span class="s3">,  </span><span class="s0"># Like x w/o leading dim</span>
+                      <span class="s1">x)[</span><span class="s5">0</span><span class="s1">]</span>
+
+    <span class="s1">arg = np.full((</span><span class="s5">5</span><span class="s3">,</span><span class="s1">)</span><span class="s3">, </span><span class="s5">0.7</span><span class="s1">)</span>
+    <span class="s1">self.TransformConvertAndCompare(g</span><span class="s3">, </span><span class="s1">arg</span><span class="s3">, None</span><span class="s1">)</span>
+    <span class="s1">self.TransformConvertAndCompare(g</span><span class="s3">, </span><span class="s1">arg</span><span class="s3">, </span><span class="s4">&quot;vmap&quot;</span><span class="s1">)</span>
+    <span class="s1">self.TransformConvertAndCompare(g</span><span class="s3">, </span><span class="s1">arg</span><span class="s3">, </span><span class="s4">&quot;grad&quot;</span><span class="s1">)</span>
+    <span class="s1">self.TransformConvertAndCompare(g</span><span class="s3">, </span><span class="s1">arg</span><span class="s3">, </span><span class="s4">&quot;grad_vmap&quot;</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">test_scan_remat(self):</span>
+    <span class="s3">def </span><span class="s1">f_jax(xs):</span>
+
+      <span class="s1">@jax.remat</span>
+      <span class="s3">def </span><span class="s1">body_fun(carry</span><span class="s3">, </span><span class="s1">x):</span>
+        <span class="s3">return </span><span class="s1">carry * x</span><span class="s3">, </span><span class="s1">xs   </span><span class="s0"># capture xs from the environment</span>
+      <span class="s1">res1</span><span class="s3">, </span><span class="s1">res2 = lax.scan(body_fun</span><span class="s3">, </span><span class="s5">0.</span><span class="s3">, </span><span class="s1">xs + </span><span class="s5">1.</span><span class="s1">)</span>
+      <span class="s3">return </span><span class="s1">jnp.sum(res1) + jnp.sum(res2)</span>
+
+    <span class="s1">arg = np.arange(</span><span class="s5">10</span><span class="s3">, </span><span class="s1">dtype=np.float32) + </span><span class="s5">1.</span>
+    <span class="s1">self.TransformConvertAndCompare(f_jax</span><span class="s3">, </span><span class="s1">arg</span><span class="s3">, None</span><span class="s1">)</span>
+    <span class="s1">self.TransformConvertAndCompare(f_jax</span><span class="s3">, </span><span class="s1">arg</span><span class="s3">, </span><span class="s4">&quot;grad&quot;</span><span class="s1">)</span>
+
+
+<span class="s3">if </span><span class="s1">__name__ == </span><span class="s4">&quot;__main__&quot;</span><span class="s1">:</span>
+  <span class="s1">absltest.main(testLoader=jtu.JaxTestLoader())</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,388 @@
+<html>
+<head>
+<title>jax_export.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+jax_export.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2023 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+<span class="s2">&quot;&quot;&quot;JAX APIs for exporting code for interoperation. 
+ 
+This module is used with jax2tf, but should have no TensorFlow dependencies. 
+&quot;&quot;&quot;</span>
+<span class="s3">import </span><span class="s1">dataclasses</span>
+<span class="s3">from </span><span class="s1">functools </span><span class="s3">import </span><span class="s1">partial</span>
+<span class="s3">import </span><span class="s1">re</span>
+<span class="s3">from </span><span class="s1">typing </span><span class="s3">import  </span><span class="s1">Callable</span><span class="s3">, </span><span class="s1">Dict</span><span class="s3">, </span><span class="s1">List</span><span class="s3">, </span><span class="s1">Optional</span><span class="s3">, </span><span class="s1">Sequence</span><span class="s3">, </span><span class="s1">Set</span><span class="s3">, </span><span class="s1">Union</span>
+
+<span class="s3">from </span><span class="s1">absl </span><span class="s3">import </span><span class="s1">logging</span>
+
+<span class="s3">import </span><span class="s1">jax</span>
+<span class="s3">from </span><span class="s1">jax </span><span class="s3">import </span><span class="s1">sharding</span>
+
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">core</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">util</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">xla_bridge </span><span class="s3">as </span><span class="s1">xb</span>
+<span class="s3">from </span><span class="s1">jax._src.interpreters </span><span class="s3">import </span><span class="s1">mlir</span>
+<span class="s3">from </span><span class="s1">jax._src.interpreters </span><span class="s3">import </span><span class="s1">pxla</span>
+<span class="s3">from </span><span class="s1">jax._src.lib </span><span class="s3">import </span><span class="s1">xla_client</span>
+<span class="s3">from </span><span class="s1">jax._src.lib.mlir.dialects </span><span class="s3">import </span><span class="s1">stablehlo</span>
+<span class="s3">from </span><span class="s1">jax._src.lib.mlir </span><span class="s3">import </span><span class="s1">ir</span>
+<span class="s3">from </span><span class="s1">jax._src.lib.mlir.dialects </span><span class="s3">import </span><span class="s1">hlo</span>
+<span class="s3">from </span><span class="s1">jax._src.lib.mlir.dialects </span><span class="s3">import </span><span class="s1">func </span><span class="s3">as </span><span class="s1">func_dialect</span>
+
+
+<span class="s1">map = util.safe_map</span>
+<span class="s1">zip = util.safe_zip</span>
+
+<span class="s0"># These are the JAX custom call target names that are guaranteed to be stable.</span>
+<span class="s0"># Their backwards compatibility is tested by back_compat_test.py.</span>
+<span class="s1">_CUSTOM_CALL_TARGETS_GUARANTEED_STABLE = [</span>
+    <span class="s4">&quot;Sharding&quot;</span><span class="s3">, </span><span class="s4">&quot;SPMDFullToShardShape&quot;</span><span class="s3">, </span><span class="s4">&quot;SPMDShardToFullShape&quot;</span><span class="s3">,</span>
+    <span class="s4">&quot;ducc_fft&quot;</span><span class="s3">, </span><span class="s4">&quot;cu_threefry2x32&quot;</span><span class="s3">,</span>
+    <span class="s0"># eigh on CPU</span>
+    <span class="s4">&quot;lapack_ssyevd&quot;</span><span class="s3">, </span><span class="s4">&quot;lapack_dsyevd&quot;</span><span class="s3">, </span><span class="s4">&quot;lapack_cheevd&quot;</span><span class="s3">, </span><span class="s4">&quot;lapack_zheevd&quot;</span><span class="s3">,</span>
+    <span class="s0"># eigh on GPU</span>
+    <span class="s4">&quot;cusolver_syevj&quot;</span><span class="s3">, </span><span class="s4">&quot;cusolver_syevd&quot;</span><span class="s3">,</span>
+    <span class="s0"># eigh on TPU</span>
+    <span class="s4">&quot;Eigh&quot;</span><span class="s3">,</span>
+    <span class="s0"># qr on CPU</span>
+    <span class="s4">&quot;lapack_sgeqrf&quot;</span><span class="s3">, </span><span class="s4">&quot;lapack_dgeqrf&quot;</span><span class="s3">, </span><span class="s4">&quot;lapack_cgeqrf&quot;</span><span class="s3">, </span><span class="s4">&quot;lapack_zgeqrf&quot;</span><span class="s3">,</span>
+    <span class="s4">&quot;lapack_sorgqr&quot;</span><span class="s3">, </span><span class="s4">&quot;lapack_dorgqr&quot;</span><span class="s3">, </span><span class="s4">&quot;lapack_cungqr&quot;</span><span class="s3">, </span><span class="s4">&quot;lapack_zungqr&quot;</span><span class="s3">,</span>
+    <span class="s0"># qr on GPU</span>
+    <span class="s4">&quot;cusolver_geqrf&quot;</span><span class="s3">, </span><span class="s4">&quot;cublas_geqrf_batched&quot;</span><span class="s3">,</span>
+    <span class="s4">&quot;cusolver_geqrf&quot;</span><span class="s3">, </span><span class="s4">&quot;cusolver_orgqr&quot;</span><span class="s3">,</span>
+    <span class="s0"># qr and svd on TPU</span>
+    <span class="s4">&quot;Qr&quot;</span><span class="s3">, </span><span class="s4">&quot;ProductOfElementaryHouseholderReflectors&quot;</span><span class="s3">,</span>
+    <span class="s0"># TODO(atondwal, necula): add back_compat tests for lu on CPU/GPU</span>
+    <span class="s0"># # lu on CPU</span>
+    <span class="s0"># &quot;lapack_sgetrf&quot; , &quot;lapack_dgetrf&quot; , &quot;lapack_cgetrf&quot; , &quot;lapack_zgetrf&quot;,</span>
+    <span class="s0"># # lu on GPU</span>
+    <span class="s0"># &quot;cublas_getrf_batched&quot;, &quot;cusolver_getrf&quot;,</span>
+    <span class="s0"># &quot;hipblas_getrf_batched&quot;, &quot;hipsolver_getrf&quot;,</span>
+    <span class="s0"># lu on TPU</span>
+    <span class="s4">&quot;LuDecomposition&quot;</span><span class="s3">,</span>
+<span class="s1">]</span>
+
+
+<span class="s1">@dataclasses.dataclass</span>
+<span class="s3">class </span><span class="s1">Exported:</span>
+  <span class="s2">&quot;&quot;&quot;Represents a lowered and serialized JAX module.&quot;&quot;&quot;</span>
+  <span class="s1">in_avals: Sequence[core.ShapedArray]</span>
+  <span class="s1">out_avals: Sequence[core.ShapedArray]</span>
+  <span class="s0"># The in_shardings reflect only the module_kept_var_idx</span>
+  <span class="s1">in_shardings: Sequence[Union[sharding.XLACompatibleSharding</span><span class="s3">, </span><span class="s1">pxla.UnspecifiedValue]]</span>
+  <span class="s1">out_shardings: Sequence[Union[sharding.XLACompatibleSharding</span><span class="s3">, </span><span class="s1">pxla.UnspecifiedValue]]</span>
+  <span class="s1">lowering_platform: str  </span><span class="s0"># One of &quot;tpu&quot;, &quot;cpu&quot;, &quot;cuda&quot;, &quot;rocm&quot;</span>
+
+  <span class="s1">mlir_module: mlir.ir.Module</span>
+  <span class="s1">mlir_module_serialized: bytes  </span><span class="s0"># VHLO bytecode format</span>
+  <span class="s1">xla_call_module_version: int  </span><span class="s0"># Follows the versions of XlaCallModule</span>
+  <span class="s1">module_kept_var_idx: Sequence[int]  </span><span class="s0"># Specifies if an argument is kept in the</span>
+                                      <span class="s0"># lowering. Same length as `in_shardings`.</span>
+
+
+<span class="s3">def </span><span class="s1">default_jax_backend() -&gt; str:</span>
+  <span class="s0"># Canonicalize to turn into CUDA or ROCM</span>
+  <span class="s3">return </span><span class="s1">xb.canonicalize_platform(jax.default_backend())</span>
+
+
+<span class="s3">def </span><span class="s1">serialize_native(fun_jax: Callable</span><span class="s3">,</span>
+                     <span class="s1">args_avals: Sequence[core.ShapedArray]</span><span class="s3">, </span><span class="s1">*</span><span class="s3">,</span>
+                     <span class="s1">lowering_platform: Optional[str]</span><span class="s3">,</span>
+                     <span class="s1">strict_checks: bool) -&gt; Exported:</span>
+  <span class="s1">arg_specs_jax = [</span>
+    <span class="s1">jax.ShapeDtypeStruct(aval.shape</span><span class="s3">, </span><span class="s1">aval.dtype</span><span class="s3">, </span><span class="s1">named_shape=aval.named_shape)</span>
+    <span class="s3">for </span><span class="s1">aval </span><span class="s3">in </span><span class="s1">args_avals</span>
+  <span class="s1">]</span>
+
+  <span class="s3">if not </span><span class="s1">hasattr(fun_jax</span><span class="s3">, </span><span class="s4">&quot;lower&quot;</span><span class="s1">):</span>
+    <span class="s0"># We support convert(pjit(f_jax)) and convert(jit(f_jax)) but also</span>
+    <span class="s0"># convert(f_jax), in which case a &quot;jit&quot; is implied. In that case we raise</span>
+    <span class="s0"># an error if the lowered function contains non-replicated sharding annotations.</span>
+    <span class="s1">fun_jax_lower = jax.jit(fun_jax).lower</span>
+    <span class="s1">allow_non_replicated_sharding = </span><span class="s3">False</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s0"># If we have a pjit or pmap already we do not wrap with another, and we</span>
+    <span class="s0"># allow shardings.</span>
+    <span class="s1">fun_jax_lower = fun_jax.lower</span>
+    <span class="s1">allow_non_replicated_sharding = </span><span class="s3">True</span>
+
+  <span class="s1">lowered = fun_jax_lower(</span>
+      <span class="s1">*arg_specs_jax</span><span class="s3">,</span>
+      <span class="s1">_experimental_lowering_platform=lowering_platform)._lowering  </span><span class="s0"># type: ignore</span>
+
+  <span class="s1">mlir_module = lowered.stablehlo()</span>
+  <span class="s3">if </span><span class="s4">&quot;kept_var_idx&quot; </span><span class="s3">in </span><span class="s1">lowered.compile_args:</span>
+    <span class="s1">module_kept_var_idx = tuple(sorted(lowered.compile_args[</span><span class="s4">&quot;kept_var_idx&quot;</span><span class="s1">]))</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s0"># For pmap</span>
+    <span class="s1">module_kept_var_idx = tuple(range(len(args_avals)))</span>
+
+  <span class="s3">if not </span><span class="s1">all(core.is_constant_shape(a.shape) </span><span class="s3">for </span><span class="s1">a </span><span class="s3">in </span><span class="s1">args_avals):</span>
+    <span class="s0"># All arguments are kept if we have dimension variables.</span>
+    <span class="s3">assert </span><span class="s1">len(module_kept_var_idx) == len(args_avals)</span>
+    <span class="s1">mlir_module = compute_dim_vars(mlir_module</span><span class="s3">, </span><span class="s1">args_avals)</span>
+
+  <span class="s1">xla_call_module_version = </span><span class="s5">4</span>
+  <span class="s1">mlir_str = mlir.module_to_bytecode(mlir_module)</span>
+  <span class="s1">target_version = stablehlo.get_earliest_forward_compatible_version()</span>
+  <span class="s1">mlir_module_serialized = xla_client._xla.mlir.serialize_portable_artifact(</span>
+      <span class="s1">mlir_str</span><span class="s3">, </span><span class="s1">target_version)</span>
+
+  <span class="s0"># Figure out the result types and shapes</span>
+  <span class="s3">if </span><span class="s4">&quot;global_out_avals&quot; </span><span class="s3">in </span><span class="s1">lowered.compile_args:</span>
+    <span class="s0"># This is currently the case for pjit</span>
+    <span class="s1">out_avals = lowered.compile_args[</span><span class="s4">&quot;global_out_avals&quot;</span><span class="s1">]</span>
+  <span class="s3">elif </span><span class="s4">&quot;shards&quot; </span><span class="s3">in </span><span class="s1">lowered.compile_args:  </span><span class="s0"># for PmapComputation</span>
+    <span class="s1">out_avals = lowered.compile_args[</span><span class="s4">&quot;shards&quot;</span><span class="s1">].out_sharded_avals</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s1">out_avals = lowered.compile_args[</span><span class="s4">&quot;out_avals&quot;</span><span class="s1">]</span>
+  <span class="s3">if </span><span class="s1">lowered.compile_args[</span><span class="s4">&quot;host_callbacks&quot;</span><span class="s1">]:</span>
+    <span class="s3">raise </span><span class="s1">NotImplementedError(</span><span class="s4">&quot;host_callbacks are not yet implemented for the jax2tf native lowering&quot;</span><span class="s1">)</span>
+
+  <span class="s0"># Log and then check the module.</span>
+  <span class="s3">if </span><span class="s1">logging.vlog_is_on(</span><span class="s5">3</span><span class="s1">):</span>
+    <span class="s1">mlir_module_text = mlir.module_to_string(mlir_module)</span>
+    <span class="s1">logmsg = </span><span class="s4">f&quot;version=</span><span class="s3">{</span><span class="s1">xla_call_module_version</span><span class="s3">} </span><span class="s4">lowering_platform=</span><span class="s3">{</span><span class="s1">lowering_platform</span><span class="s3">}</span><span class="s4">&quot;</span>
+    <span class="s1">logging.vlog(</span><span class="s5">3</span><span class="s3">, </span><span class="s4">&quot;Lowered JAX module: %s</span><span class="s3">\n</span><span class="s4">%s&quot;</span><span class="s3">, </span><span class="s1">logmsg</span><span class="s3">, </span><span class="s1">mlir_module_text)</span>
+
+  <span class="s1">check_module(mlir_module</span><span class="s3">,</span>
+               <span class="s1">allow_non_replicated_sharding=allow_non_replicated_sharding</span><span class="s3">,</span>
+               <span class="s1">allow_all_custom_calls=</span><span class="s3">not </span><span class="s1">strict_checks)</span>
+
+  <span class="s3">return </span><span class="s1">Exported(</span>
+      <span class="s1">in_avals=args_avals</span><span class="s3">,</span>
+      <span class="s1">out_avals=out_avals</span><span class="s3">,</span>
+      <span class="s1">in_shardings=lowered.compile_args[</span><span class="s4">&quot;in_shardings&quot;</span><span class="s1">]</span><span class="s3">,</span>
+      <span class="s1">out_shardings=lowered.compile_args[</span><span class="s4">&quot;out_shardings&quot;</span><span class="s1">]</span><span class="s3">,</span>
+      <span class="s1">lowering_platform=lowering_platform </span><span class="s3">or </span><span class="s1">default_jax_backend()</span><span class="s3">,</span>
+      <span class="s1">mlir_module=mlir_module</span><span class="s3">,</span>
+      <span class="s1">mlir_module_serialized=mlir_module_serialized</span><span class="s3">,</span>
+      <span class="s1">module_kept_var_idx=module_kept_var_idx</span><span class="s3">,</span>
+      <span class="s1">xla_call_module_version=xla_call_module_version)</span>
+
+
+<span class="s3">def </span><span class="s1">compute_dim_vars(module: mlir.ir.Module</span><span class="s3">,</span>
+                     <span class="s1">args_avals: Sequence[core.ShapedArray]) -&gt; mlir.ir.Module:</span>
+  <span class="s2">&quot;&quot;&quot;Wraps the lowered module with a new &quot;main&quot; that computes the dim vars. 
+ 
+  JAX lowering in presence of shape polymorphism produces a `module` that 
+  takes one or more dimension arguments, specified using 0-dimensional tensors 
+  of type i32 or i64, followed by the regular array arguments. 
+  The dimension arguments correspond to the dimension variables appearing in 
+  the `args_avals`, in sorted order. 
+ 
+  Consider the lowering of a function with one array argument of type &quot;f32[w, h]&quot;, 
+  where &quot;w&quot; and &quot;h&quot; are two dimension variables. The `module` will also 
+  contain two dimension arguments, corresponding to &quot;h&quot; and &quot;w&quot; respectively: 
+ 
+      func public main(arg_h: i32, arg_w: i32, arg: f32[?, ?]) { 
+        ... 
+      } 
+ 
+      we rename &quot;main&quot; to &quot;_wrapped_jax_export_main&quot; and add a new &quot;main&quot;: 
+ 
+      func public main(arg: f32[?, ?]) { 
+         arg_h = hlo.get_dimension_size(arg, 1) 
+         arg_w = hlo.get_dimension_size(arg, 0) 
+         res = call _wrapped_jax_export_main(arg_h, arg_w, arg) 
+         return res 
+      } 
+ 
+  Args: 
+    module: the HLO module as obtained from lowering. May have a number of 
+      dimension arguments, followed by the kept array arguments. 
+    args_avals: the avals for all the arguments of the lowered function, which 
+      correspond to the array arguments of the `module`. 
+ 
+  Returns the wrapped module. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">dim_args_builders = get_dim_arg_builders(args_avals)</span>
+
+  <span class="s0"># Make a new module, do not mutate the &quot;module&quot; because it may be cached</span>
+  <span class="s1">context = mlir.make_ir_context()</span>
+  <span class="s3">with </span><span class="s1">context</span><span class="s3">, </span><span class="s1">ir.Location.unknown(context):</span>
+    <span class="s1">new_module = ir.Module.parse(mlir.module_to_bytecode(module))</span>
+    <span class="s1">symbol_table = ir.SymbolTable(new_module.operation)</span>
+    <span class="s1">orig_main = symbol_table[</span><span class="s4">&quot;main&quot;</span><span class="s1">]</span>
+    <span class="s1">orig_main.attributes[</span><span class="s4">&quot;sym_visibility&quot;</span><span class="s1">] = ir.StringAttr.get(</span><span class="s4">&quot;private&quot;</span><span class="s1">)</span>
+    <span class="s1">orig_main_name = </span><span class="s4">&quot;_wrapped_jax_export_main&quot;</span>
+    <span class="s1">symbol_table.set_symbol_name(orig_main</span><span class="s3">, </span><span class="s1">orig_main_name)</span>
+
+    <span class="s1">orig_input_types = orig_main.type.inputs</span>
+    <span class="s1">nr_array_args = len(orig_input_types) - len(dim_args_builders)</span>
+    <span class="s3">assert </span><span class="s1">nr_array_args &gt;= </span><span class="s5">0</span>
+
+    <span class="s1">new_main_input_types = orig_input_types[- nr_array_args:]</span>
+    <span class="s1">orig_output_types = orig_main.type.results</span>
+
+    <span class="s1">ftype = ir.FunctionType.get(new_main_input_types</span><span class="s3">, </span><span class="s1">orig_output_types)</span>
+    <span class="s1">new_main_op = func_dialect.FuncOp(</span>
+        <span class="s4">&quot;main&quot;</span><span class="s3">, </span><span class="s1">ftype</span><span class="s3">, </span><span class="s1">ip=ir.InsertionPoint.at_block_begin(new_module.body))</span>
+    <span class="s1">new_main_op.attributes[</span><span class="s4">&quot;sym_visibility&quot;</span><span class="s1">] = ir.StringAttr.get(</span><span class="s4">&quot;public&quot;</span><span class="s1">)</span>
+    <span class="s3">try</span><span class="s1">:</span>
+      <span class="s1">new_main_op.arg_attrs = list(orig_main.arg_attrs)[- nr_array_args:]</span>
+    <span class="s3">except </span><span class="s1">KeyError:</span>
+      <span class="s3">pass  </span><span class="s0"># TODO: better detection if orig_main.arg_attrs does not exist</span>
+    <span class="s3">try</span><span class="s1">:</span>
+      <span class="s1">new_main_op.result_attrs = orig_main.result_attrs</span>
+    <span class="s3">except </span><span class="s1">KeyError:</span>
+      <span class="s3">pass</span>
+    <span class="s1">symbol_table.insert(new_main_op)</span>
+    <span class="s1">entry_block = new_main_op.add_entry_block()</span>
+    <span class="s3">with </span><span class="s1">ir.InsertionPoint(entry_block):</span>
+      <span class="s1">orig_main_args = []</span>
+      <span class="s0"># The first arguments are the dimension variable</span>
+      <span class="s3">for </span><span class="s1">dim_arg_idx</span><span class="s3">, </span><span class="s1">dim_arg_builder </span><span class="s3">in </span><span class="s1">enumerate(dim_args_builders):</span>
+        <span class="s1">orig_main_args.append(</span>
+            <span class="s1">dim_arg_builder(new_main_op.arguments</span><span class="s3">, </span><span class="s1">orig_input_types[dim_arg_idx]))</span>
+      <span class="s0"># Then the array arguments</span>
+      <span class="s1">orig_main_args.extend(new_main_op.arguments)</span>
+      <span class="s1">call = func_dialect.CallOp(orig_output_types</span><span class="s3">,</span>
+                                 <span class="s1">ir.FlatSymbolRefAttr.get(orig_main_name)</span><span class="s3">,</span>
+                                 <span class="s1">orig_main_args)</span>
+      <span class="s1">func_dialect.ReturnOp(call.results)</span>
+    <span class="s1">symbol_table.set_symbol_name(new_main_op</span><span class="s3">, </span><span class="s4">&quot;main&quot;</span><span class="s1">)</span>
+    <span class="s3">return </span><span class="s1">new_module</span>
+
+
+<span class="s0"># A dimension argument builder computes a dimension argument given</span>
+<span class="s0"># the array arguments and the desired type of the dimension argument.</span>
+<span class="s1">DimArgBuilder = Callable[[Sequence[mlir.ir.Value]</span><span class="s3">, </span><span class="s1">mlir.ir.Type]</span><span class="s3">, </span><span class="s1">mlir.ir.Value]</span>
+
+<span class="s3">def </span><span class="s1">get_dim_arg_builders(</span>
+    <span class="s1">args_avals: Sequence[core.ShapedArray]) -&gt; Sequence[DimArgBuilder]:</span>
+  <span class="s2">&quot;&quot;&quot;For each dimension variable, return a builder. 
+ 
+  Args: 
+    args_avals: the abstract values of the array arguments. 
+ 
+  Returns: 
+    a list of DimArgBuilder, for each dimension variable appearing in `args_avals` 
+    in the sorted order of dimension variable name. 
+  &quot;&quot;&quot;</span>
+  <span class="s3">def </span><span class="s1">get_dim_arg(array_arg_idx: int</span><span class="s3">, </span><span class="s1">dim_idx: int</span><span class="s3">,</span>
+                  <span class="s1">array_args: Sequence[mlir.ir.Value]</span><span class="s3">,</span>
+                  <span class="s1">dim_arg_type: mlir.ir.Type) -&gt; mlir.ir.Value:</span>
+    <span class="s1">dim_arg = hlo.GetDimensionSizeOp(array_args[array_arg_idx]</span><span class="s3">, </span><span class="s1">dim_idx)</span>
+    <span class="s3">if </span><span class="s1">dim_arg.result.type != dim_arg_type:</span>
+      <span class="s3">return </span><span class="s1">hlo.ConvertOp(dim_arg_type</span><span class="s3">, </span><span class="s1">dim_arg).result</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s3">return </span><span class="s1">dim_arg.result</span>
+
+  <span class="s1">dim_args_builder_dict: Dict[str</span><span class="s3">, </span><span class="s1">DimArgBuilder] = {}  </span><span class="s0"># a builder for each dim var by name</span>
+  <span class="s1">all_dim_vars: Set[str] = set()</span>
+  <span class="s3">for </span><span class="s1">arg_idx</span><span class="s3">, </span><span class="s1">aval </span><span class="s3">in </span><span class="s1">enumerate(args_avals):</span>
+    <span class="s3">for </span><span class="s1">axis_idx</span><span class="s3">, </span><span class="s1">d </span><span class="s3">in </span><span class="s1">enumerate(aval.shape):</span>
+      <span class="s3">if not </span><span class="s1">core.is_constant_dim(d):</span>
+        <span class="s1">all_dim_vars = all_dim_vars.union(d.get_vars())</span>
+        <span class="s1">d_var = d.to_var()</span>
+        <span class="s0"># TODO(necula): compute dim vars from non-trivial expressions also</span>
+        <span class="s3">if </span><span class="s1">d_var </span><span class="s3">is None</span><span class="s1">: </span><span class="s3">continue</span>
+        <span class="s3">if not </span><span class="s1">d_var </span><span class="s3">in </span><span class="s1">dim_args_builder_dict:</span>
+          <span class="s1">dim_args_builder_dict[d_var] = partial(get_dim_arg</span><span class="s3">, </span><span class="s1">arg_idx</span><span class="s3">, </span><span class="s1">axis_idx)</span>
+
+  <span class="s3">if </span><span class="s1">all_dim_vars:</span>
+    <span class="s1">dim_vars_with_builders_set = set(dim_args_builder_dict.keys())</span>
+    <span class="s3">if </span><span class="s1">dim_vars_with_builders_set != all_dim_vars:</span>
+      <span class="s1">missing = all_dim_vars.difference(dim_vars_with_builders_set)</span>
+      <span class="s1">args_list = [</span><span class="s4">f&quot;  Arg[</span><span class="s3">{</span><span class="s1">arg_idx</span><span class="s3">}</span><span class="s4">]: </span><span class="s3">{</span><span class="s1">aval</span><span class="s3">}</span><span class="s4">&quot;</span>
+                   <span class="s3">for </span><span class="s1">arg_idx</span><span class="s3">, </span><span class="s1">aval </span><span class="s3">in </span><span class="s1">enumerate(args_avals)]</span>
+      <span class="s3">raise </span><span class="s1">ValueError(</span>
+          <span class="s4">&quot;The following dimension variables cannot be computed from the static &quot;</span>
+          <span class="s4">f&quot;shapes of the array arguments: </span><span class="s3">{</span><span class="s1">missing</span><span class="s3">}</span><span class="s4">. The argument shapes are:</span><span class="s3">\n</span><span class="s4">&quot; </span><span class="s1">+</span>
+          <span class="s4">&quot;</span><span class="s3">\n</span><span class="s4">&quot;</span><span class="s1">.join(args_list) +</span>
+          <span class="s4">&quot;</span><span class="s3">\n</span><span class="s4">&quot;</span>
+          <span class="s4">&quot;Please see https://github.com/google/jax/blob/main/jax/experimental/jax2tf/README.md#dimension-variables-must-be-solvable-from-the-input-shapes for more details.&quot;</span><span class="s1">)</span>
+
+    <span class="s0"># In sorted order by name</span>
+    <span class="s1">builders = [dim_args_builder_dict[d_var] </span><span class="s3">for </span><span class="s1">d_var </span><span class="s3">in </span><span class="s1">sorted(dim_args_builder_dict.keys())]</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s1">builders = []</span>
+  <span class="s3">return </span><span class="s1">builders</span>
+
+
+<span class="s3">def </span><span class="s1">check_module(mod: mlir.ir.Module</span><span class="s3">, </span><span class="s1">*</span><span class="s3">,</span>
+                 <span class="s1">allow_non_replicated_sharding: bool</span><span class="s3">,</span>
+                 <span class="s1">allow_all_custom_calls: bool):</span>
+  <span class="s2">&quot;&quot;&quot;Run a number of checks on the module. 
+ 
+  Args: 
+    allow_non_replicated_sharding: whether the module is allowed to contain 
+      non_replicated sharding annotations. 
+    allow_all_custom_calls: whether we should allow all custom calls, or 
+      only those who we have explicitly marked as stable. 
+  &quot;&quot;&quot;</span>
+  <span class="s1">sharding_attr = mlir.ir.StringAttr.get(</span><span class="s4">&quot;Sharding&quot;</span><span class="s3">, </span><span class="s1">mod.context)</span>
+  <span class="s1">allowed_custom_call_targets_attrs = [</span>
+      <span class="s1">mlir.ir.StringAttr.get(target</span><span class="s3">, </span><span class="s1">mod.context)</span>
+      <span class="s3">for </span><span class="s1">target </span><span class="s3">in </span><span class="s1">_CUSTOM_CALL_TARGETS_GUARANTEED_STABLE]</span>
+  <span class="s1">disallowed_custom_call_ops: List[str] = []</span>
+  <span class="s3">def </span><span class="s1">check_sharding(op_str: str</span><span class="s3">, </span><span class="s1">loc: mlir.ir.Location):</span>
+    <span class="s0"># Check the shardings in an operation or attribute (`op_str`)</span>
+    <span class="s3">if not </span><span class="s1">allow_non_replicated_sharding:</span>
+      <span class="s1">m = re.search(</span><span class="s4">r'mhlo.sharding\s*=\s*&quot;([^&quot;]+)&quot;'</span><span class="s3">, </span><span class="s1">op_str)</span>
+      <span class="s3">if </span><span class="s1">m </span><span class="s3">and </span><span class="s1">m.group(</span><span class="s5">1</span><span class="s1">) </span><span class="s3">not in </span><span class="s1">[</span><span class="s4">&quot;{replicated}&quot;</span><span class="s3">, </span><span class="s4">&quot;&quot;</span><span class="s1">]:</span>
+        <span class="s3">raise </span><span class="s1">ValueError(</span>
+            <span class="s4">&quot;Lowered function does not have a top-level pjit but it has &quot;</span>
+            <span class="s4">f&quot;non-replicated sharding annotations, e.g., </span><span class="s3">{</span><span class="s1">op_str</span><span class="s3">} </span><span class="s4">at </span><span class="s3">{</span><span class="s1">loc</span><span class="s3">}</span><span class="s4">.</span><span class="s3">\n</span><span class="s4">&quot;</span>
+            <span class="s4">&quot;See https://github.com/google/jax/blob/main/jax/experimental/jax2tf/README.md#support-for-partitioning for a discussion.&quot;</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">check_op(op: mlir.ir.Operation):</span>
+    <span class="s1">op_name = op.operation.name</span>
+    <span class="s3">if </span><span class="s1">op_name == </span><span class="s4">&quot;func.func&quot;</span><span class="s1">:</span>
+      <span class="s3">for </span><span class="s1">a </span><span class="s3">in </span><span class="s1">op.operation.attributes:</span>
+        <span class="s0"># TODO: figure out how to parse the attributes properly</span>
+        <span class="s1">check_sharding(str(a)</span><span class="s3">, </span><span class="s1">op.location)</span>
+
+    <span class="s3">elif </span><span class="s1">op_name == </span><span class="s4">&quot;stablehlo.custom_call&quot;</span><span class="s1">:</span>
+      <span class="s1">call_target_name_attr = op.operation.attributes[</span><span class="s4">&quot;call_target_name&quot;</span><span class="s1">]</span>
+      <span class="s3">if </span><span class="s1">(</span><span class="s3">not </span><span class="s1">allow_all_custom_calls </span><span class="s3">and</span>
+          <span class="s1">call_target_name_attr </span><span class="s3">not in </span><span class="s1">allowed_custom_call_targets_attrs):</span>
+        <span class="s1">disallowed_custom_call_ops.append(str(op))</span>
+      <span class="s3">if </span><span class="s1">call_target_name_attr == sharding_attr:</span>
+        <span class="s1">check_sharding(str(op)</span><span class="s3">, </span><span class="s1">op.location)</span>
+
+  <span class="s3">def </span><span class="s1">walk_operations(op):</span>
+    <span class="s1">check_op(op)</span>
+    <span class="s3">for </span><span class="s1">region </span><span class="s3">in </span><span class="s1">op.operation.regions:</span>
+      <span class="s3">for </span><span class="s1">block </span><span class="s3">in </span><span class="s1">region:</span>
+        <span class="s3">for </span><span class="s1">op </span><span class="s3">in </span><span class="s1">block:</span>
+          <span class="s1">walk_operations(op)</span>
+
+  <span class="s1">walk_operations(mod)</span>
+  <span class="s3">if </span><span class="s1">disallowed_custom_call_ops:</span>
+    <span class="s1">disallowed_custom_call_ops_str = </span><span class="s4">&quot;</span><span class="s3">\n</span><span class="s4">&quot;</span><span class="s1">.join(disallowed_custom_call_ops)</span>
+    <span class="s1">msg = (</span><span class="s4">&quot;Cannot serialize code with custom calls whose targets have no &quot;</span>
+           <span class="s4">&quot;compatibility guarantees. Examples are:</span><span class="s3">\n</span><span class="s4">&quot;</span>
+           <span class="s4">f&quot;</span><span class="s3">{</span><span class="s1">disallowed_custom_call_ops_str</span><span class="s3">}</span><span class="s4">.</span><span class="s3">\n</span><span class="s4">&quot;</span>
+           <span class="s4">&quot;See https://github.com/google/jax/blob/main/jax/experimental/jax2tf/README.md#native-lowering-supports-only-select-custom-calls&quot;</span><span class="s1">)</span>
+    <span class="s3">raise </span><span class="s1">ValueError(msg)</span>
+</pre>
+</body>
+</html>

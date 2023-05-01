@@ -1,0 +1,1459 @@
+<html>
+<head>
+<title>call_tf_test.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+call_tf_test.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright 2020 The JAX Authors.</span>
+<span class="s0">#</span>
+<span class="s0"># Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0"># you may not use this file except in compliance with the License.</span>
+<span class="s0"># You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#     https://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0"># distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0"># WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0"># See the License for the specific language governing permissions and</span>
+<span class="s0"># limitations under the License.</span>
+<span class="s2">&quot;&quot;&quot;Tests for call_tf.&quot;&quot;&quot;</span>
+<span class="s3">import </span><span class="s1">base64</span>
+<span class="s3">from </span><span class="s1">functools </span><span class="s3">import </span><span class="s1">partial</span>
+<span class="s3">from </span><span class="s1">typing </span><span class="s3">import </span><span class="s1">Callable</span><span class="s3">, </span><span class="s1">Dict</span><span class="s3">, </span><span class="s1">Tuple</span>
+<span class="s3">import </span><span class="s1">unittest</span>
+
+<span class="s3">from </span><span class="s1">absl </span><span class="s3">import </span><span class="s1">logging</span>
+<span class="s3">from </span><span class="s1">absl.testing </span><span class="s3">import </span><span class="s1">absltest</span>
+<span class="s3">from </span><span class="s1">absl.testing </span><span class="s3">import </span><span class="s1">parameterized</span>
+
+<span class="s3">import </span><span class="s1">jax</span>
+<span class="s3">from </span><span class="s1">jax </span><span class="s3">import </span><span class="s1">dtypes</span>
+<span class="s3">from </span><span class="s1">jax </span><span class="s3">import </span><span class="s1">lax</span>
+<span class="s3">from </span><span class="s1">jax </span><span class="s3">import </span><span class="s1">numpy </span><span class="s3">as </span><span class="s1">jnp</span>
+<span class="s3">from </span><span class="s1">jax._src </span><span class="s3">import </span><span class="s1">test_util </span><span class="s3">as </span><span class="s1">jtu</span>
+<span class="s3">from </span><span class="s1">jax.config </span><span class="s3">import </span><span class="s1">config</span>
+<span class="s3">from </span><span class="s1">jax.experimental </span><span class="s3">import </span><span class="s1">jax2tf</span>
+<span class="s3">from </span><span class="s1">jax.experimental.jax2tf.tests </span><span class="s3">import </span><span class="s1">tf_test_util</span>
+<span class="s3">from </span><span class="s1">jax._src.lib.mlir </span><span class="s3">import </span><span class="s1">ir</span>
+<span class="s3">from </span><span class="s1">tensorflow.core.framework </span><span class="s3">import </span><span class="s1">function_pb2</span>
+
+<span class="s3">import </span><span class="s1">numpy </span><span class="s3">as </span><span class="s1">np</span>
+
+<span class="s3">try</span><span class="s1">:</span>
+  <span class="s3">import </span><span class="s1">tensorflow </span><span class="s3">as </span><span class="s1">tf  </span><span class="s0"># type: ignore[import]</span>
+<span class="s3">except </span><span class="s1">ImportError:</span>
+  <span class="s1">tf = </span><span class="s3">None</span>
+
+<span class="s1">config.parse_flags_with_absl()</span>
+
+
+<span class="s3">def </span><span class="s1">_maybe_jit(with_jit: bool</span><span class="s3">, </span><span class="s1">func: Callable) -&gt; Callable:</span>
+  <span class="s3">if </span><span class="s1">with_jit:</span>
+    <span class="s3">return </span><span class="s1">jax.jit(func)</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s3">return </span><span class="s1">func</span>
+
+<span class="s3">def </span><span class="s1">_maybe_tf_jit(with_jit: bool</span><span class="s3">, </span><span class="s1">func: Callable) -&gt; Callable:</span>
+  <span class="s3">if </span><span class="s1">with_jit:</span>
+    <span class="s3">return </span><span class="s1">tf.function(func</span><span class="s3">, </span><span class="s1">autograph=</span><span class="s3">False, </span><span class="s1">jit_compile=</span><span class="s3">True</span><span class="s1">)</span>
+  <span class="s3">else</span><span class="s1">:</span>
+    <span class="s3">return </span><span class="s1">func</span>
+
+<span class="s3">def </span><span class="s1">_named_test(**kwargs):</span>
+  <span class="s3">return </span><span class="s1">dict(kwargs</span><span class="s3">,</span>
+              <span class="s1">testcase_name = </span><span class="s4">&quot;_&quot;</span><span class="s1">.join([</span><span class="s4">f&quot;</span><span class="s3">{</span><span class="s1">k</span><span class="s3">}</span><span class="s4">=</span><span class="s3">{</span><span class="s1">kwargs[k]</span><span class="s3">}</span><span class="s4">&quot; </span><span class="s3">for </span><span class="s1">k </span><span class="s3">in </span><span class="s1">sorted(kwargs.keys())]))</span>
+
+<span class="s1">_parameterized_jit = parameterized.named_parameters(</span>
+    <span class="s1">_named_test(with_jit=with_jit)</span>
+    <span class="s3">for </span><span class="s1">with_jit </span><span class="s3">in </span><span class="s1">[</span><span class="s3">True, False</span><span class="s1">])</span>
+
+<span class="s1">_call_tf_non_compilable_error = </span><span class="s4">&quot;Error compiling TensorFlow function. call_tf can used in a staged context .* only with compilable functions&quot;</span>
+<span class="s1">_call_tf_dynamic_shape_error = </span><span class="s4">&quot;call_tf cannot call functions whose output has dynamic shape&quot;</span>
+
+<span class="s3">class </span><span class="s1">CallTfTest(tf_test_util.JaxToTfTestCase):</span>
+
+  <span class="s3">def </span><span class="s1">setUp(self):</span>
+    <span class="s3">if </span><span class="s1">tf </span><span class="s3">is None</span><span class="s1">:</span>
+      <span class="s3">raise </span><span class="s1">unittest.SkipTest(</span><span class="s4">&quot;Test requires tensorflow&quot;</span><span class="s1">)</span>
+    <span class="s0"># TODO(b/171320191): this line works around a missing context initialization</span>
+    <span class="s0"># bug in TensorFlow.</span>
+    <span class="s1">_ = tf.add(</span><span class="s5">1</span><span class="s3">, </span><span class="s5">1</span><span class="s1">)</span>
+    <span class="s1">super().setUp()</span>
+
+  <span class="s1">@_parameterized_jit</span>
+  <span class="s3">def </span><span class="s1">test_eval_scalar_arg(self</span><span class="s3">, </span><span class="s1">with_jit=</span><span class="s3">True</span><span class="s1">):</span>
+    <span class="s3">def </span><span class="s1">f_tf(x):</span>
+      <span class="s3">return </span><span class="s1">tf.math.sin(x)</span>
+    <span class="s1">x = </span><span class="s5">3.</span>
+    <span class="s1">res = _maybe_jit(with_jit</span><span class="s3">, </span><span class="s1">jax2tf.call_tf(f_tf))(x)</span>
+    <span class="s1">self.assertAllClose(jnp.sin(x)</span><span class="s3">, </span><span class="s1">res)</span>
+
+  <span class="s1">@_parameterized_jit</span>
+  <span class="s3">def </span><span class="s1">test_eval_scalar_res(self</span><span class="s3">, </span><span class="s1">with_jit=</span><span class="s3">True</span><span class="s1">):</span>
+    <span class="s1">x = </span><span class="s5">3.</span>
+    <span class="s1">res = _maybe_jit(with_jit</span><span class="s3">, </span><span class="s1">jax2tf.call_tf(</span><span class="s3">lambda </span><span class="s1">x: </span><span class="s5">4.</span><span class="s1">))(x)</span>
+    <span class="s1">self.assertAllClose(</span><span class="s5">4.</span><span class="s3">, </span><span class="s1">res</span><span class="s3">, </span><span class="s1">check_dtypes=</span><span class="s3">False</span><span class="s1">)</span>
+
+  <span class="s1">@_parameterized_jit</span>
+  <span class="s3">def </span><span class="s1">test_eval_numpy_arg(self</span><span class="s3">, </span><span class="s1">with_jit=</span><span class="s3">True</span><span class="s1">):</span>
+    <span class="s1">x = np.ones((</span><span class="s5">2</span><span class="s3">, </span><span class="s5">3</span><span class="s1">)</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s1">res = _maybe_jit(with_jit</span><span class="s3">, </span><span class="s1">jax2tf.call_tf(tf.math.sin))(x)</span>
+    <span class="s1">self.assertAllClose(jnp.sin(x)</span><span class="s3">, </span><span class="s1">res)</span>
+
+  <span class="s1">@_parameterized_jit</span>
+  <span class="s3">def </span><span class="s1">test_eval_numpy_res(self</span><span class="s3">, </span><span class="s1">with_jit=</span><span class="s3">False</span><span class="s1">):</span>
+    <span class="s1">x = np.ones((</span><span class="s5">2</span><span class="s3">, </span><span class="s5">3</span><span class="s1">))</span>
+    <span class="s1">res = _maybe_jit(with_jit</span><span class="s3">, </span><span class="s1">jax2tf.call_tf(</span><span class="s3">lambda </span><span class="s1">_: x))(x)</span>
+    <span class="s1">self.assertAllClose(x</span><span class="s3">, </span><span class="s1">res)</span>
+
+  <span class="s3">def </span><span class="s1">test_eval_numpy_no_copy(self):</span>
+    <span class="s3">if </span><span class="s1">jtu.device_under_test() != </span><span class="s4">&quot;cpu&quot;</span><span class="s1">:</span>
+      <span class="s3">raise </span><span class="s1">unittest.SkipTest(</span><span class="s4">&quot;no_copy test works only on CPU&quot;</span><span class="s1">)</span>
+    <span class="s0"># For ndarray, zero-copy only works for sufficiently-aligned arrays.</span>
+    <span class="s1">x = np.ones((</span><span class="s5">16</span><span class="s3">, </span><span class="s5">16</span><span class="s1">)</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s1">res = jax2tf.call_tf(</span><span class="s3">lambda </span><span class="s1">x: x)(x)</span>
+    <span class="s1">self.assertAllClose(x</span><span class="s3">, </span><span class="s1">res)</span>
+    <span class="s1">self.assertTrue(np.shares_memory(x</span><span class="s3">, </span><span class="s1">res))</span>
+
+  <span class="s1">@_parameterized_jit</span>
+  <span class="s3">def </span><span class="s1">test_eval_devicearray_arg(self</span><span class="s3">, </span><span class="s1">with_jit=</span><span class="s3">False</span><span class="s1">):</span>
+    <span class="s1">x = jnp.ones((</span><span class="s5">2</span><span class="s3">, </span><span class="s5">3</span><span class="s1">)</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s1">res = _maybe_jit(with_jit</span><span class="s3">, </span><span class="s1">jax2tf.call_tf(tf.math.sin))(x)</span>
+    <span class="s1">self.assertAllClose(jnp.sin(x)</span><span class="s3">, </span><span class="s1">res)</span>
+
+  <span class="s3">def </span><span class="s1">test_eval_devicearray_no_copy(self):</span>
+    <span class="s3">if </span><span class="s1">jtu.device_under_test() != </span><span class="s4">&quot;cpu&quot;</span><span class="s1">:</span>
+      <span class="s0"># TODO(necula): add tests for GPU and TPU</span>
+      <span class="s3">raise </span><span class="s1">unittest.SkipTest(</span><span class="s4">&quot;no_copy test works only on CPU&quot;</span><span class="s1">)</span>
+    <span class="s0"># For DeviceArray zero-copy works even if not aligned</span>
+    <span class="s1">x = jnp.ones((</span><span class="s5">3</span><span class="s3">, </span><span class="s5">3</span><span class="s1">))</span>
+    <span class="s1">res = jax2tf.call_tf(</span><span class="s3">lambda </span><span class="s1">x: x)(x)</span>
+    <span class="s1">self.assertAllClose(x</span><span class="s3">, </span><span class="s1">res)</span>
+    <span class="s1">self.assertTrue(np.shares_memory(x</span><span class="s3">, </span><span class="s1">res))</span>
+
+    <span class="s1">x = jnp.array(</span><span class="s5">3.0</span><span class="s3">, </span><span class="s1">dtype=jnp.bfloat16)</span>
+    <span class="s1">res = jax2tf.call_tf(</span><span class="s3">lambda </span><span class="s1">x: x)(x)</span>
+    <span class="s1">self.assertAllClose(x</span><span class="s3">, </span><span class="s1">res)</span>
+    <span class="s0"># bfloat16 scalar will create a copy.</span>
+    <span class="s3">with </span><span class="s1">self.assertRaises(AssertionError):</span>
+      <span class="s1">self.assertTrue(np.shares_memory(x</span><span class="s3">, </span><span class="s1">res))</span>
+
+  <span class="s1">@_parameterized_jit</span>
+  <span class="s3">def </span><span class="s1">test_eval_pytree(self</span><span class="s3">, </span><span class="s1">with_jit=</span><span class="s3">True</span><span class="s1">):</span>
+
+    <span class="s3">def </span><span class="s1">fun_tf(x: Dict</span><span class="s3">, </span><span class="s1">y: Tuple) -&gt; Tuple:</span>
+      <span class="s3">return </span><span class="s1">(x[</span><span class="s4">&quot;first&quot;</span><span class="s1">] * x[</span><span class="s4">&quot;second&quot;</span><span class="s1">]</span><span class="s3">, </span><span class="s1">y[</span><span class="s5">0</span><span class="s1">] + y[</span><span class="s5">1</span><span class="s1">])</span>
+
+    <span class="s1">x = dict(first=np.float32(</span><span class="s5">3.</span><span class="s1">)</span><span class="s3">, </span><span class="s1">second=np.float32(</span><span class="s5">4.</span><span class="s1">))</span>
+    <span class="s1">y = (np.float64(</span><span class="s5">5.</span><span class="s1">)</span><span class="s3">, </span><span class="s1">np.float64(</span><span class="s5">6.</span><span class="s1">))</span>
+    <span class="s1">fun_jax = _maybe_jit(with_jit</span><span class="s3">, </span><span class="s1">jax2tf.call_tf(fun_tf))</span>
+    <span class="s1">res = fun_jax(x</span><span class="s3">, </span><span class="s1">y)</span>
+    <span class="s1">self.assertAllClose((np.float32(</span><span class="s5">12.</span><span class="s1">)</span><span class="s3">, </span><span class="s1">np.float64(</span><span class="s5">11.</span><span class="s1">))</span><span class="s3">, </span><span class="s1">res)</span>
+
+  <span class="s3">def </span><span class="s1">test_result_tuple(self):</span>
+    <span class="s1">x1 = np.ones(</span><span class="s5">3</span><span class="s3">, </span><span class="s1">dtype=np.int32)</span>
+    <span class="s1">x2 = np.ones(</span><span class="s5">5</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s3">def </span><span class="s1">fun_tf():</span>
+      <span class="s3">return </span><span class="s1">tf.tuple([x1</span><span class="s3">, </span><span class="s1">x2])</span>
+
+    <span class="s1">fun_jax = jax.jit(jax2tf.call_tf(fun_tf))</span>
+    <span class="s1">res = fun_jax()</span>
+    <span class="s1">self.assertAllClose(res</span><span class="s3">, </span><span class="s1">(x1</span><span class="s3">, </span><span class="s1">x2))</span>
+
+  <span class="s3">def </span><span class="s1">test_error_non_compilable_strings(self):</span>
+    <span class="s0"># Check that in op-by-op we call a function in eager mode.</span>
+    <span class="s3">def </span><span class="s1">f_tf_non_compilable(x):</span>
+      <span class="s3">return </span><span class="s1">tf.strings.length(tf.strings.format(</span><span class="s4">&quot;Hello {}!&quot;</span><span class="s3">, </span><span class="s1">[x]))</span>
+
+    <span class="s1">f_jax = jax2tf.call_tf(f_tf_non_compilable)</span>
+    <span class="s1">x = np.float32(</span><span class="s5">0.7</span><span class="s1">)</span>
+    <span class="s1">self.assertAllClose(f_tf_non_compilable(x).numpy()</span><span class="s3">, </span><span class="s1">f_jax(x))</span>
+    <span class="s3">with </span><span class="s1">self.assertRaisesRegex(ValueError</span><span class="s3">,</span>
+                                <span class="s1">_call_tf_non_compilable_error):</span>
+      <span class="s1">jax.jit(f_jax)(x)</span>
+
+    <span class="s3">with </span><span class="s1">self.assertRaisesRegex(ValueError</span><span class="s3">,</span>
+                                <span class="s1">_call_tf_non_compilable_error):</span>
+      <span class="s1">lax.cond(</span><span class="s3">True, lambda </span><span class="s1">x: f_jax(x)</span><span class="s3">, lambda </span><span class="s1">x: f_jax(x)</span><span class="s3">, </span><span class="s1">x)</span>
+
+  <span class="s3">def </span><span class="s1">test_error_non_compilable_dynamic_shape(self):</span>
+    <span class="s0"># Check that in op-by-op we call a function in eager mode.</span>
+    <span class="s3">def </span><span class="s1">f_tf_non_compilable(x):</span>
+      <span class="s3">return </span><span class="s1">tf.cond(x[</span><span class="s5">0</span><span class="s1">]</span><span class="s3">, lambda</span><span class="s1">: x[</span><span class="s5">1</span><span class="s1">:]</span><span class="s3">, lambda</span><span class="s1">: x)</span>
+
+    <span class="s1">f_jax = jax2tf.call_tf(f_tf_non_compilable)</span>
+    <span class="s1">x = np.array([</span><span class="s3">True, False</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.bool_)</span>
+    <span class="s1">self.assertAllClose(f_tf_non_compilable(x)</span><span class="s3">, </span><span class="s1">f_jax(x))  </span><span class="s0"># Works in eager mode</span>
+
+    <span class="s3">with </span><span class="s1">self.assertRaisesRegex(ValueError</span><span class="s3">, </span><span class="s1">_call_tf_dynamic_shape_error):</span>
+      <span class="s1">jax.jit(f_jax)(x)</span>
+
+  <span class="s3">def </span><span class="s1">test_error_bad_result_tensorarray(self):</span>
+    <span class="s0"># Call a function that returns a tf.TensorArray. This should be detected</span>
+    <span class="s0"># early on. If we don't the function is actually compilable but returns</span>
+    <span class="s0"># a tuple instead of a single result.</span>
+    <span class="s3">def </span><span class="s1">fun_tf():</span>
+      <span class="s1">ta = tf.TensorArray(tf.int32</span><span class="s3">, </span><span class="s1">size=</span><span class="s5">0</span><span class="s3">, </span><span class="s1">dynamic_size=</span><span class="s3">True</span><span class="s1">)</span>
+      <span class="s1">ta = ta.unstack([</span><span class="s5">0</span><span class="s3">, </span><span class="s5">1</span><span class="s3">, </span><span class="s5">2</span><span class="s3">, </span><span class="s5">3</span><span class="s3">, </span><span class="s5">4</span><span class="s1">])</span>
+      <span class="s3">return </span><span class="s1">ta</span>
+
+    <span class="s3">with </span><span class="s1">self.assertRaisesRegex(ValueError</span><span class="s3">,</span>
+                                <span class="s4">&quot;The called TF function returns a result that is not convertible to JAX&quot;</span><span class="s1">):</span>
+      <span class="s1">fun_jax = jax.jit(jax2tf.call_tf(fun_tf))</span>
+      <span class="s1">fun_jax()</span>
+
+  <span class="s3">def </span><span class="s1">test_error_bad_result_string(self):</span>
+    <span class="s3">def </span><span class="s1">fun_tf():</span>
+      <span class="s3">return </span><span class="s1">tf.constant(</span><span class="s4">&quot;foo&quot;</span><span class="s1">)</span>
+
+    <span class="s0"># Now under jit, should fail because the function is not compilable</span>
+    <span class="s3">with </span><span class="s1">self.assertRaisesRegex(ValueError</span><span class="s3">,</span>
+                                <span class="s4">&quot;The called TF function returns a result that is not convertible to JAX&quot;</span><span class="s1">):</span>
+      <span class="s1">fun_jax = jax.jit(jax2tf.call_tf(fun_tf))</span>
+      <span class="s1">fun_jax()</span>
+
+  <span class="s1">@_parameterized_jit</span>
+  <span class="s3">def </span><span class="s1">test_control_flow(self</span><span class="s3">, </span><span class="s1">with_jit=</span><span class="s3">True</span><span class="s1">):</span>
+
+    <span class="s3">def </span><span class="s1">times_5_tf(x):</span>
+      <span class="s0"># Multiply x * 5 using a loop</span>
+      <span class="s1">c = </span><span class="s3">lambda </span><span class="s1">i</span><span class="s3">, </span><span class="s1">acc: tf.less(i</span><span class="s3">, </span><span class="s5">5</span><span class="s1">)</span>
+      <span class="s1">b = </span><span class="s3">lambda </span><span class="s1">i</span><span class="s3">, </span><span class="s1">acc: (tf.add(i</span><span class="s3">, </span><span class="s5">1</span><span class="s1">)</span><span class="s3">, </span><span class="s1">tf.add(acc</span><span class="s3">, </span><span class="s1">x))</span>
+      <span class="s1">_</span><span class="s3">, </span><span class="s1">acc = tf.while_loop(c</span><span class="s3">, </span><span class="s1">b</span><span class="s3">, </span><span class="s1">[tf.constant(</span><span class="s5">0</span><span class="s1">)</span><span class="s3">, </span><span class="s1">tf.constant(</span><span class="s5">0.</span><span class="s1">)])</span>
+      <span class="s3">return </span><span class="s1">acc</span>
+
+    <span class="s3">def </span><span class="s1">fun_jax(x):</span>
+      <span class="s0"># Calls times_5_tf 3 times in a loop</span>
+      <span class="s3">def </span><span class="s1">body(_</span><span class="s3">, </span><span class="s1">acc):</span>
+        <span class="s3">return </span><span class="s1">jax2tf.call_tf(times_5_tf)(acc)</span>
+
+      <span class="s3">return </span><span class="s1">lax.fori_loop(</span><span class="s5">0</span><span class="s3">, </span><span class="s5">3</span><span class="s3">, </span><span class="s1">body</span><span class="s3">, </span><span class="s1">x)</span>
+
+    <span class="s1">x = np.float32(</span><span class="s5">3.</span><span class="s1">)</span>
+    <span class="s1">res = _maybe_jit(with_jit</span><span class="s3">, </span><span class="s1">fun_jax)(x)</span>
+    <span class="s1">self.assertAllClose(np.float32(x * </span><span class="s5">5 </span><span class="s1">* </span><span class="s5">5 </span><span class="s1">* </span><span class="s5">5</span><span class="s1">)</span><span class="s3">, </span><span class="s1">res)</span>
+
+  <span class="s1">@parameterized.named_parameters(</span>
+      <span class="s1">dict(</span>
+          <span class="s1">testcase_name=</span><span class="s4">f&quot;_</span><span class="s3">{</span><span class="s1">dtype.__name__</span><span class="s3">}{</span><span class="s4">'_jit' </span><span class="s3">if </span><span class="s1">with_jit </span><span class="s3">else </span><span class="s4">''</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s3">,</span>
+          <span class="s1">dtype=dtype</span><span class="s3">,</span>
+          <span class="s1">with_jit=with_jit)</span>
+      <span class="s3">for </span><span class="s1">dtype </span><span class="s3">in </span><span class="s1">set(jtu.dtypes.all) - {np.bool_}</span>
+      <span class="s3">for </span><span class="s1">with_jit </span><span class="s3">in </span><span class="s1">[</span><span class="s3">True, False</span><span class="s1">])</span>
+  <span class="s3">def </span><span class="s1">test_dtypes(self</span><span class="s3">, </span><span class="s1">dtype=np.int32</span><span class="s3">, </span><span class="s1">with_jit=</span><span class="s3">True</span><span class="s1">):</span>
+
+    <span class="s3">def </span><span class="s1">fun_tf(x):</span>
+      <span class="s0"># AddV2 supports more types</span>
+      <span class="s3">return </span><span class="s1">tf.raw_ops.AddV2(x=x</span><span class="s3">, </span><span class="s1">y=tf.constant(</span><span class="s5">3</span><span class="s3">, </span><span class="s1">dtype=dtype))</span>
+
+    <span class="s3">def </span><span class="s1">fun_jax(x):</span>
+      <span class="s3">return </span><span class="s1">jax2tf.call_tf(fun_tf)(x) + x</span>
+
+    <span class="s1">x = np.ones((</span><span class="s5">3</span><span class="s3">,</span><span class="s1">)</span><span class="s3">, </span><span class="s1">dtype=dtype)</span>
+    <span class="s1">res = _maybe_jit(with_jit</span><span class="s3">, </span><span class="s1">fun_jax)(x)</span>
+    <span class="s1">self.assertAllClose(dtype(</span><span class="s5">2 </span><span class="s1">* x + </span><span class="s5">3</span><span class="s1">)</span><span class="s3">, </span><span class="s1">res)</span>
+
+  <span class="s1">@_parameterized_jit</span>
+  <span class="s3">def </span><span class="s1">test_bool(self</span><span class="s3">, </span><span class="s1">with_jit=</span><span class="s3">False</span><span class="s1">):</span>
+
+    <span class="s3">def </span><span class="s1">fun_tf(x</span><span class="s3">, </span><span class="s1">y):</span>
+      <span class="s3">return </span><span class="s1">tf.math.logical_and(x</span><span class="s3">, </span><span class="s1">y)</span>
+
+    <span class="s1">x = np.array([</span><span class="s3">True, False, True, False</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.bool_)</span>
+    <span class="s1">y = np.array([</span><span class="s3">True, True, False, False</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.bool_)</span>
+    <span class="s1">res = _maybe_jit(with_jit</span><span class="s3">, </span><span class="s1">jax2tf.call_tf(fun_tf))(x</span><span class="s3">, </span><span class="s1">y)</span>
+    <span class="s1">self.assertAllClose(</span>
+        <span class="s1">np.array([</span><span class="s3">True, False, False, False</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.bool_)</span><span class="s3">, </span><span class="s1">res)</span>
+
+  <span class="s1">@_parameterized_jit</span>
+  <span class="s3">def </span><span class="s1">test_x64_input(self</span><span class="s3">, </span><span class="s1">with_jit=</span><span class="s3">True</span><span class="s1">):</span>
+    <span class="s3">def </span><span class="s1">f_tf(x):</span>
+      <span class="s3">return </span><span class="s1">tf.math.sin(x)</span>
+
+    <span class="s1">x = </span><span class="s5">5.  </span><span class="s0"># TF interprets this as f64</span>
+    <span class="s1">res_call_tf = _maybe_jit(with_jit</span><span class="s3">, </span><span class="s1">jax2tf.call_tf(f_tf))(x)</span>
+    <span class="s1">res_jax = jnp.sin(x)</span>
+    <span class="s1">self.assertAllClose(res_call_tf</span><span class="s3">, </span><span class="s1">res_jax)</span>
+
+  <span class="s1">@_parameterized_jit</span>
+  <span class="s3">def </span><span class="s1">test_x64_output(self</span><span class="s3">, </span><span class="s1">with_jit=</span><span class="s3">True</span><span class="s1">):</span>
+    <span class="s3">def </span><span class="s1">f_tf(x):</span>
+      <span class="s3">return </span><span class="s1">(tf.constant(</span><span class="s5">3.</span><span class="s3">, </span><span class="s1">tf.float64)</span><span class="s3">, </span><span class="s1">x)</span>
+
+    <span class="s1">x = np.float32(</span><span class="s5">5.</span><span class="s1">)</span>
+    <span class="s1">res_call_tf = _maybe_jit(with_jit</span><span class="s3">, </span><span class="s1">jax2tf.call_tf(f_tf))(x)</span>
+    <span class="s1">res_jax = (</span><span class="s5">3.</span><span class="s3">, </span><span class="s1">x)</span>
+    <span class="s1">self.assertAllClose(res_call_tf</span><span class="s3">, </span><span class="s1">res_jax)</span>
+
+    <span class="s1">res_call_tf_jit = jax.jit(jax2tf.call_tf(f_tf))(x)</span>
+    <span class="s1">self.assertAllClose(res_call_tf_jit</span><span class="s3">, </span><span class="s1">res_jax)</span>
+
+  <span class="s1">@_parameterized_jit</span>
+  <span class="s3">def </span><span class="s1">test_with_var_read(self</span><span class="s3">, </span><span class="s1">with_jit=</span><span class="s3">True</span><span class="s1">):</span>
+    <span class="s0"># The variable is placed on the default TF device.</span>
+    <span class="s1">outer_var_array = np.array([</span><span class="s5">3.</span><span class="s3">, </span><span class="s5">4.</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s1">outer_var = tf.Variable(outer_var_array)</span>
+
+    <span class="s3">def </span><span class="s1">fun_tf(x):</span>
+      <span class="s3">return </span><span class="s1">x * outer_var + </span><span class="s5">1.</span>
+
+    <span class="s1">x = np.array([</span><span class="s5">2.</span><span class="s3">, </span><span class="s5">5.</span><span class="s3">,</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s1">res = _maybe_jit(with_jit</span><span class="s3">, </span><span class="s1">jax2tf.call_tf(fun_tf))(x)</span>
+    <span class="s1">self.assertAllClose(x * outer_var_array + </span><span class="s5">1.</span><span class="s3">, </span><span class="s1">res</span><span class="s3">, </span><span class="s1">check_dtypes=</span><span class="s3">False</span><span class="s1">)</span>
+
+  <span class="s1">@_parameterized_jit</span>
+  <span class="s3">def </span><span class="s1">test_with_var_read_x64(self</span><span class="s3">, </span><span class="s1">with_jit=</span><span class="s3">True</span><span class="s1">):</span>
+    <span class="s1">outer_var_array = np.array([</span><span class="s5">3.</span><span class="s3">, </span><span class="s5">4.</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.float64)</span>
+    <span class="s1">outer_var = tf.Variable(outer_var_array)</span>
+
+    <span class="s3">def </span><span class="s1">fun_tf(x):</span>
+      <span class="s3">return </span><span class="s1">x * tf.cast(outer_var</span><span class="s3">, </span><span class="s1">x.dtype) + </span><span class="s5">1.</span>
+
+    <span class="s1">x = np.array([</span><span class="s5">2.</span><span class="s3">, </span><span class="s5">5.</span><span class="s3">,</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s1">res = _maybe_jit(with_jit</span><span class="s3">, </span><span class="s1">jax2tf.call_tf(fun_tf))(x)</span>
+    <span class="s1">self.assertAllClose(x * outer_var_array + </span><span class="s5">1.</span><span class="s3">, </span><span class="s1">res</span><span class="s3">, </span><span class="s1">check_dtypes=</span><span class="s3">False</span><span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">test_with_var_different_shape(self):</span>
+    <span class="s0"># See https://github.com/google/jax/issues/6050</span>
+    <span class="s1">v = tf.Variable((</span><span class="s5">4.</span><span class="s3">, </span><span class="s5">2.</span><span class="s1">)</span><span class="s3">, </span><span class="s1">dtype=tf.float32)</span>
+
+    <span class="s3">def </span><span class="s1">tf_func(x):</span>
+      <span class="s3">return </span><span class="s1">v + x</span>
+    <span class="s1">x = np.float32(</span><span class="s5">123.</span><span class="s1">)</span>
+    <span class="s1">tf_out = tf_func(x)</span>
+
+    <span class="s1">jax_func = jax.jit(jax2tf.call_tf(tf_func))</span>
+    <span class="s1">jax_out = jax_func(x)</span>
+
+    <span class="s1">self.assertAllClose(tf_out</span><span class="s3">, </span><span class="s1">jax_out</span><span class="s3">, </span><span class="s1">check_dtypes=</span><span class="s3">False</span><span class="s1">)</span>
+
+  <span class="s1">@_parameterized_jit</span>
+  <span class="s3">def </span><span class="s1">test_with_var_write_error(self</span><span class="s3">, </span><span class="s1">with_jit=</span><span class="s3">True</span><span class="s1">):</span>
+    <span class="s3">if </span><span class="s1">with_jit:</span>
+      <span class="s3">raise </span><span class="s1">unittest.SkipTest(</span><span class="s4">&quot;variable writes not yet working&quot;</span><span class="s1">)</span>
+    <span class="s1">outer_var = tf.Variable(</span><span class="s5">3.</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+
+    <span class="s3">def </span><span class="s1">fun_tf(x):</span>
+      <span class="s1">outer_var.assign(tf.constant(</span><span class="s5">4.</span><span class="s1">))</span>
+      <span class="s3">return </span><span class="s1">x * outer_var + </span><span class="s5">1.</span>
+
+    <span class="s1">x = np.float32(</span><span class="s5">2.</span><span class="s1">)</span>
+    <span class="s1">res = _maybe_jit(with_jit</span><span class="s3">, </span><span class="s1">jax2tf.call_tf(fun_tf))(x)</span>
+    <span class="s1">self.assertAllClose(x * </span><span class="s5">4. </span><span class="s1">+ </span><span class="s5">1</span><span class="s3">, </span><span class="s1">res</span><span class="s3">, </span><span class="s1">check_dtypes=</span><span class="s3">False</span><span class="s1">)</span>
+
+  <span class="s1">@_parameterized_jit</span>
+  <span class="s3">def </span><span class="s1">test_with_tensor_capture(self</span><span class="s3">, </span><span class="s1">with_jit=</span><span class="s3">True</span><span class="s1">):</span>
+    <span class="s1">outer_tensor = tf.constant(</span><span class="s5">3.</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+
+    <span class="s3">def </span><span class="s1">fun_tf(x):</span>
+      <span class="s3">return </span><span class="s1">x * outer_tensor + </span><span class="s5">1.</span>
+
+    <span class="s1">x = np.float32(</span><span class="s5">2.</span><span class="s1">)</span>
+    <span class="s1">res = _maybe_jit(with_jit</span><span class="s3">, </span><span class="s1">jax2tf.call_tf(fun_tf))(x)</span>
+    <span class="s1">self.assertAllClose(x * </span><span class="s5">3. </span><span class="s1">+ </span><span class="s5">1.</span><span class="s3">, </span><span class="s1">res</span><span class="s3">, </span><span class="s1">check_dtypes=</span><span class="s3">False</span><span class="s1">)</span>
+
+  <span class="s1">@_parameterized_jit</span>
+  <span class="s3">def </span><span class="s1">test_with_tensor_capture_x64(self</span><span class="s3">, </span><span class="s1">with_jit=</span><span class="s3">True</span><span class="s1">):</span>
+    <span class="s1">outer_tensor = tf.constant(</span><span class="s5">3.</span><span class="s3">, </span><span class="s1">dtype=np.float64)</span>
+
+    <span class="s3">def </span><span class="s1">fun_tf(x):</span>
+      <span class="s3">return </span><span class="s1">x * tf.cast(outer_tensor * </span><span class="s5">3.14</span><span class="s3">, </span><span class="s1">tf.float32) + </span><span class="s5">1.</span>
+
+    <span class="s1">x = np.float32(</span><span class="s5">2.</span><span class="s1">)</span>
+    <span class="s1">res = _maybe_jit(with_jit</span><span class="s3">, </span><span class="s1">jax2tf.call_tf(fun_tf))(x)</span>
+    <span class="s1">self.assertAllClose(x * </span><span class="s5">3. </span><span class="s1">* </span><span class="s5">3.14 </span><span class="s1">+ </span><span class="s5">1.</span><span class="s3">, </span><span class="s1">res</span><span class="s3">, </span><span class="s1">check_dtypes=</span><span class="s3">False</span><span class="s1">)</span>
+
+  <span class="s1">@_parameterized_jit</span>
+  <span class="s3">def </span><span class="s1">test_with_value_capture(self</span><span class="s3">, </span><span class="s1">with_jit=</span><span class="s3">True</span><span class="s1">):</span>
+    <span class="s1">outer_val = np.array(</span><span class="s5">3.</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+
+    <span class="s3">def </span><span class="s1">fun_tf(x):</span>
+      <span class="s3">return </span><span class="s1">x * outer_val + </span><span class="s5">1.</span>
+
+    <span class="s1">x = np.float32(</span><span class="s5">2.</span><span class="s1">)</span>
+    <span class="s1">res = _maybe_jit(with_jit</span><span class="s3">, </span><span class="s1">jax2tf.call_tf(fun_tf))(x)</span>
+    <span class="s1">self.assertAllClose(x * </span><span class="s5">3. </span><span class="s1">+ </span><span class="s5">1.</span><span class="s3">, </span><span class="s1">res</span><span class="s3">, </span><span class="s1">check_dtypes=</span><span class="s3">False</span><span class="s1">)</span>
+
+  <span class="s1">@_parameterized_jit</span>
+  <span class="s3">def </span><span class="s1">test_with_multiple_capture(self</span><span class="s3">, </span><span class="s1">with_jit=</span><span class="s3">True</span><span class="s1">):</span>
+    <span class="s3">if </span><span class="s1">jtu.device_under_test() == </span><span class="s4">&quot;gpu&quot;</span><span class="s1">:</span>
+      <span class="s3">raise </span><span class="s1">unittest.SkipTest(</span><span class="s4">&quot;Test fails on GPU&quot;</span><span class="s1">)</span>
+    <span class="s1">v2 = tf.Variable(</span><span class="s5">2.</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s1">v3 = tf.Variable(</span><span class="s5">3.</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s1">t4 = tf.constant(</span><span class="s5">4.</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s1">t5 = tf.constant(</span><span class="s5">5.</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+
+    <span class="s3">def </span><span class="s1">fun_tf(x):</span>
+      <span class="s3">return </span><span class="s1">(x * v3 + t4 + v2) * v3 + t5</span>
+
+    <span class="s1">x = np.float32(</span><span class="s5">2.</span><span class="s1">)</span>
+    <span class="s1">res = _maybe_jit(with_jit</span><span class="s3">, </span><span class="s1">jax2tf.call_tf(fun_tf))(x)</span>
+    <span class="s1">self.assertAllClose((x * </span><span class="s5">3. </span><span class="s1">+ </span><span class="s5">4. </span><span class="s1">+ </span><span class="s5">2.</span><span class="s1">) * </span><span class="s5">3. </span><span class="s1">+ </span><span class="s5">5.</span><span class="s3">, </span><span class="s1">res</span><span class="s3">, </span><span class="s1">check_dtypes=</span><span class="s3">False</span><span class="s1">)</span>
+
+  <span class="s1">@_parameterized_jit</span>
+  <span class="s3">def </span><span class="s1">test_grad(self</span><span class="s3">, </span><span class="s1">with_jit=</span><span class="s3">False</span><span class="s1">):</span>
+    <span class="s1">x = np.float32(</span><span class="s5">3.</span><span class="s1">)</span>
+    <span class="s1">res = _maybe_jit(with_jit</span><span class="s3">, </span><span class="s1">jax.grad(jax2tf.call_tf(tf.math.sin)))(x)</span>
+    <span class="s1">self.assertAllClose(np.cos(x)</span><span class="s3">, </span><span class="s1">res)</span>
+
+  <span class="s1">@_parameterized_jit</span>
+  <span class="s3">def </span><span class="s1">test_grad_pytree(self</span><span class="s3">, </span><span class="s1">with_jit=</span><span class="s3">False</span><span class="s1">):</span>
+
+    <span class="s3">def </span><span class="s1">fun_tf(x: Dict</span><span class="s3">, </span><span class="s1">y: Tuple) -&gt; Tuple:</span>
+      <span class="s3">return </span><span class="s1">x[</span><span class="s4">&quot;first&quot;</span><span class="s1">] * x[</span><span class="s4">&quot;second&quot;</span><span class="s1">] + </span><span class="s5">3. </span><span class="s1">* y[</span><span class="s5">0</span><span class="s1">] + </span><span class="s5">4. </span><span class="s1">* y[</span><span class="s5">1</span><span class="s1">]</span>
+
+    <span class="s1">x = dict(first=np.float32(</span><span class="s5">3.</span><span class="s1">)</span><span class="s3">, </span><span class="s1">second=np.float32(</span><span class="s5">4.</span><span class="s1">))</span>
+    <span class="s1">y = (np.float32(</span><span class="s5">5.</span><span class="s1">)</span><span class="s3">, </span><span class="s1">np.float32(</span><span class="s5">6.</span><span class="s1">))</span>
+    <span class="s1">grad_x = _maybe_jit(with_jit</span><span class="s3">, </span><span class="s1">jax.grad(jax2tf.call_tf(fun_tf)))(x</span><span class="s3">, </span><span class="s1">y)</span>
+    <span class="s1">self.assertAllClose(</span>
+        <span class="s1">dict(first=np.float32(</span><span class="s5">4.</span><span class="s1">)</span><span class="s3">, </span><span class="s1">second=np.float32(</span><span class="s5">3.</span><span class="s1">))</span><span class="s3">, </span><span class="s1">grad_x)</span>
+
+  <span class="s3">def </span><span class="s1">test_grad_nested(self):</span>
+    <span class="s0"># We embed the call_tf function in a larger function whose gradient we take</span>
+    <span class="s0"># It is relevant here that the cotangents flowing through the call_tf</span>
+    <span class="s0"># function are not scalars.</span>
+
+    <span class="s1">b = np.array([[</span><span class="s5">11.</span><span class="s3">, </span><span class="s5">12.</span><span class="s3">, </span><span class="s5">13.</span><span class="s1">]</span><span class="s3">, </span><span class="s1">[</span><span class="s5">21.</span><span class="s3">, </span><span class="s5">22.</span><span class="s3">, </span><span class="s5">23.</span><span class="s1">]]</span><span class="s3">, </span><span class="s1">dtype=np.float32)  </span><span class="s0"># [2, 3]</span>
+    <span class="s1">c = np.array([[</span><span class="s5">31.</span><span class="s3">, </span><span class="s5">32.</span><span class="s1">]</span><span class="s3">, </span><span class="s1">[</span><span class="s5">41.</span><span class="s3">, </span><span class="s5">42.</span><span class="s1">]</span><span class="s3">, </span><span class="s1">[</span><span class="s5">51.</span><span class="s3">, </span><span class="s5">52.</span><span class="s1">]</span><span class="s3">, </span><span class="s1">[</span><span class="s5">61.</span><span class="s3">, </span><span class="s5">62.</span><span class="s1">]]</span><span class="s3">, </span><span class="s1">dtype=np.float32)  </span><span class="s0"># [4, 2]</span>
+    <span class="s1">x_dict = dict(b=b</span><span class="s3">, </span><span class="s1">c=c)  </span><span class="s0"># b:[2, 3], c=[4, 2]</span>
+    <span class="s0"># res: dict(r:[4, 3], s:[4, 2])</span>
+    <span class="s3">def </span><span class="s1">f_tf(x_dict):</span>
+      <span class="s3">return </span><span class="s1">dict(r=tf.matmul(x_dict[</span><span class="s4">&quot;c&quot;</span><span class="s1">]</span><span class="s3">, </span><span class="s1">x_dict[</span><span class="s4">&quot;b&quot;</span><span class="s1">])</span><span class="s3">, </span><span class="s1">s=</span><span class="s5">7. </span><span class="s1">* x_dict[</span><span class="s4">&quot;c&quot;</span><span class="s1">])</span>
+
+    <span class="s1">@jax.jit  </span><span class="s0"># To recognize it in jaxpr</span>
+    <span class="s3">def </span><span class="s1">f_jax(x_dict):</span>
+      <span class="s3">return </span><span class="s1">dict(r=jnp.matmul(x_dict[</span><span class="s4">&quot;c&quot;</span><span class="s1">]</span><span class="s3">, </span><span class="s1">x_dict[</span><span class="s4">&quot;b&quot;</span><span class="s1">])</span><span class="s3">, </span><span class="s1">s=</span><span class="s5">7. </span><span class="s1">* x_dict[</span><span class="s4">&quot;c&quot;</span><span class="s1">])</span>
+
+    <span class="s3">def </span><span class="s1">loss(functional</span><span class="s3">, </span><span class="s1">x_dict):</span>
+      <span class="s1">prediction = functional(x_dict)  </span><span class="s0"># r:[4, 3], s:[4, 2]</span>
+      <span class="s1">weights = np.array([</span><span class="s5">1.</span><span class="s3">, </span><span class="s5">2.</span><span class="s3">, </span><span class="s5">3.</span><span class="s3">, </span><span class="s5">4.</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.float32)  </span><span class="s0"># [4]</span>
+      <span class="s1">weighted_pred = jnp.matmul(weights</span><span class="s3">, </span><span class="s1">prediction[</span><span class="s4">&quot;r&quot;</span><span class="s1">])  </span><span class="s0"># [3]</span>
+      <span class="s3">return </span><span class="s1">jnp.sum(weighted_pred) + </span><span class="s5">4. </span><span class="s1">* jnp.sum(prediction[</span><span class="s4">&quot;s&quot;</span><span class="s1">])</span>
+
+    <span class="s1">g_fun_with_tf = jax.grad(partial(loss</span><span class="s3">, </span><span class="s1">jax2tf.call_tf(f_tf)))</span>
+    <span class="s1">g_fun_with_jax = jax.grad(partial(loss</span><span class="s3">, </span><span class="s1">f_jax))</span>
+
+    <span class="s1">g_tf = g_fun_with_tf(x_dict)</span>
+    <span class="s1">g_jax = g_fun_with_jax(x_dict)</span>
+    <span class="s1">self.assertAllClose(g_jax</span><span class="s3">, </span><span class="s1">g_tf)</span>
+
+  <span class="s3">def </span><span class="s1">test_grad_int_argument(self):</span>
+    <span class="s0"># Similar to https://github.com/google/jax/issues/6975</span>
+    <span class="s0"># state is a pytree that contains an integer and a boolean.</span>
+    <span class="s0"># The function returns an integer and a boolean.</span>
+    <span class="s3">def </span><span class="s1">f(param</span><span class="s3">, </span><span class="s1">state</span><span class="s3">, </span><span class="s1">x):</span>
+      <span class="s3">return </span><span class="s1">param * x</span><span class="s3">, </span><span class="s1">state</span>
+
+    <span class="s1">param = np.array([</span><span class="s5">0.7</span><span class="s3">, </span><span class="s5">0.9</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s1">state = dict(array=np.float32(</span><span class="s5">1.</span><span class="s1">)</span><span class="s3">, </span><span class="s1">counter=</span><span class="s5">7</span><span class="s3">, </span><span class="s1">truth=</span><span class="s3">True</span><span class="s1">)</span>
+    <span class="s1">x = np.float32(</span><span class="s5">3.</span><span class="s1">)</span>
+
+    <span class="s0"># tf.function is important, without it the bug does not appear</span>
+    <span class="s1">f_call_tf = jax2tf.call_tf(f)</span>
+    <span class="s1">g_call_tf = jax.grad(</span><span class="s3">lambda </span><span class="s1">*args: jnp.sum(f_call_tf(*args)[</span><span class="s5">0</span><span class="s1">]))(param</span><span class="s3">, </span><span class="s1">state</span><span class="s3">, </span><span class="s1">x)</span>
+    <span class="s1">g = jax.grad(</span><span class="s3">lambda </span><span class="s1">*args: jnp.sum(f(*args)[</span><span class="s5">0</span><span class="s1">]))(param</span><span class="s3">, </span><span class="s1">state</span><span class="s3">, </span><span class="s1">x)</span>
+    <span class="s1">self.assertAllClose(g_call_tf</span><span class="s3">, </span><span class="s1">g)</span>
+
+  <span class="s3">def </span><span class="s1">test_grad_int_argument_unused(self):</span>
+    <span class="s1">batch_size = </span><span class="s5">5</span>
+    <span class="s1">inputs = np.ones((batch_size</span><span class="s3">, </span><span class="s5">3</span><span class="s1">)</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s1">rng = np.array([</span><span class="s5">1</span><span class="s3">, </span><span class="s5">2</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.uint32)</span>
+    <span class="s1">params = np.float32(</span><span class="s5">.5</span><span class="s1">)</span>
+
+    <span class="s0"># rng is integer, unused</span>
+    <span class="s3">def </span><span class="s1">jax_model(params</span><span class="s3">, </span><span class="s1">rng</span><span class="s3">, </span><span class="s1">inputs):</span>
+      <span class="s3">return </span><span class="s1">jnp.ones([batch_size</span><span class="s3">, </span><span class="s5">2</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=jnp.float32)</span>
+
+    <span class="s1">tf_model = jax2tf.convert(jax_model</span><span class="s3">, </span><span class="s1">with_gradient=</span><span class="s3">True</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">_loss_fn(inference_fn</span><span class="s3">, </span><span class="s1">params</span><span class="s3">, </span><span class="s1">rng</span><span class="s3">, </span><span class="s1">inputs):</span>
+      <span class="s1">prediction = inference_fn(params</span><span class="s3">, </span><span class="s1">rng</span><span class="s3">, </span><span class="s1">inputs)</span>
+      <span class="s3">return </span><span class="s1">jnp.mean(prediction)</span>
+
+    <span class="s1">jax_loss_fn = partial(_loss_fn</span><span class="s3">, </span><span class="s1">jax_model)</span>
+    <span class="s1">jax_grad = jax.grad(jax_loss_fn)(params</span><span class="s3">, </span><span class="s1">rng</span><span class="s3">, </span><span class="s1">inputs)</span>
+
+    <span class="s1">paramsv = tf.Variable(params)</span>
+    <span class="s3">with </span><span class="s1">tf.GradientTape() </span><span class="s3">as </span><span class="s1">tape:</span>
+      <span class="s1">tf_prediction = tf_model(paramsv</span><span class="s3">, </span><span class="s1">rng</span><span class="s3">, </span><span class="s1">inputs)</span>
+      <span class="s1">tf_loss = tf.reduce_mean(tf_prediction)</span>
+
+      <span class="s1">tf_grad = tape.gradient(tf_loss</span><span class="s3">, </span><span class="s1">paramsv)</span>
+    <span class="s1">self.assertAllClose(jax_grad</span><span class="s3">, </span><span class="s1">tf_grad.numpy())</span>
+
+    <span class="s1">call_tf_loss_fn = partial(_loss_fn</span><span class="s3">, </span><span class="s1">jax2tf.call_tf(tf_model))</span>
+    <span class="s1">call_tf_grad = jax.grad(call_tf_loss_fn)(params</span><span class="s3">, </span><span class="s1">rng</span><span class="s3">, </span><span class="s1">inputs)</span>
+    <span class="s1">self.assertAllClose(jax_grad</span><span class="s3">, </span><span class="s1">call_tf_grad)</span>
+
+  <span class="s3">def </span><span class="s1">test_grad_with_float0_result(self):</span>
+    <span class="s0"># Gradient over integer-argument functions, with float0 result</span>
+    <span class="s3">def </span><span class="s1">f_jax(x</span><span class="s3">, </span><span class="s1">y):  </span><span class="s0"># x is an int, y is a float; res is a (int, float)</span>
+      <span class="s3">return </span><span class="s1">(</span><span class="s5">2 </span><span class="s1">* x</span><span class="s3">, </span><span class="s5">2 </span><span class="s1">* x + y * y)</span>
+    <span class="s3">def </span><span class="s1">f_tf(x</span><span class="s3">, </span><span class="s1">y):</span>
+      <span class="s0"># TF needs explicit casts</span>
+      <span class="s3">return </span><span class="s1">(</span><span class="s5">2 </span><span class="s1">* x</span><span class="s3">, </span><span class="s1">tf.cast(</span><span class="s5">2 </span><span class="s1">* x</span><span class="s3">, </span><span class="s1">dtype=y.dtype) + y * y)</span>
+
+    <span class="s3">def </span><span class="s1">wrapper(functional</span><span class="s3">, </span><span class="s1">x</span><span class="s3">, </span><span class="s1">y):  </span><span class="s0"># x: i32</span>
+      <span class="s3">return </span><span class="s1">jnp.sum(</span><span class="s5">2. </span><span class="s1">* functional(</span><span class="s5">3 </span><span class="s1">* x</span><span class="s3">, </span><span class="s5">4. </span><span class="s1">* y)[</span><span class="s5">1</span><span class="s1">])</span>
+
+    <span class="s1">grad_g = jax.grad(partial(wrapper</span><span class="s3">, </span><span class="s1">f_jax)</span><span class="s3">,</span>
+                      <span class="s1">allow_int=</span><span class="s3">True, </span><span class="s1">argnums=(</span><span class="s5">0</span><span class="s3">, </span><span class="s5">1</span><span class="s1">))</span>
+    <span class="s1">grad_g_call_tf = jax.grad(partial(wrapper</span><span class="s3">, </span><span class="s1">jax2tf.call_tf(f_tf))</span><span class="s3">,</span>
+                              <span class="s1">allow_int=</span><span class="s3">True, </span><span class="s1">argnums=(</span><span class="s5">0</span><span class="s3">, </span><span class="s5">1</span><span class="s1">))</span>
+
+    <span class="s1">x = np.int32(</span><span class="s5">2</span><span class="s1">)</span>
+    <span class="s1">y = np.float32(</span><span class="s5">3.</span><span class="s1">)</span>
+    <span class="s1">g_jax = grad_g(x</span><span class="s3">, </span><span class="s1">y)</span>
+    <span class="s1">g_call_tf = grad_g_call_tf(x</span><span class="s3">, </span><span class="s1">y)</span>
+    <span class="s1">self.assertEqual(g_jax[</span><span class="s5">0</span><span class="s1">].dtype</span><span class="s3">, </span><span class="s1">dtypes.float0)</span>
+    <span class="s1">self.assertEqual(g_call_tf[</span><span class="s5">0</span><span class="s1">].dtype</span><span class="s3">, </span><span class="s1">dtypes.float0)</span>
+    <span class="s1">self.assertAllClose(g_jax[</span><span class="s5">1</span><span class="s1">]</span><span class="s3">, </span><span class="s1">g_call_tf[</span><span class="s5">1</span><span class="s1">])</span>
+
+  <span class="s1">@_parameterized_jit</span>
+  <span class="s3">def </span><span class="s1">test_grad_custom(self</span><span class="s3">, </span><span class="s1">with_jit=</span><span class="s3">False</span><span class="s1">):</span>
+
+    <span class="s1">@tf.custom_gradient</span>
+    <span class="s3">def </span><span class="s1">func_square_tf(x):</span>
+      <span class="s0"># Like x ** 2, but with custom grad 3. * x</span>
+      <span class="s3">def </span><span class="s1">grad(dy</span><span class="s3">, </span><span class="s1">variables=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s0"># dy, = dys</span>
+        <span class="s3">return </span><span class="s5">3. </span><span class="s1">* x * dy</span><span class="s3">,</span>
+
+      <span class="s3">return </span><span class="s1">x * x</span><span class="s3">, </span><span class="s1">grad</span>
+
+    <span class="s1">x = np.float32(</span><span class="s5">4.</span><span class="s1">)</span>
+    <span class="s1">grad_x = _maybe_jit(with_jit</span><span class="s3">, </span><span class="s1">jax.grad(jax2tf.call_tf(func_square_tf)))(x)</span>
+    <span class="s1">self.assertAllClose(np.float32(</span><span class="s5">3.</span><span class="s1">) * x</span><span class="s3">, </span><span class="s1">grad_x)</span>
+
+  <span class="s1">@parameterized.named_parameters(</span>
+      <span class="s1">dict(</span>
+          <span class="s1">testcase_name=</span><span class="s4">f&quot;_</span><span class="s3">{</span><span class="s1">degree=</span><span class="s3">}{</span><span class="s4">'_jit' </span><span class="s3">if </span><span class="s1">with_jit </span><span class="s3">else </span><span class="s4">''</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s3">,</span>
+          <span class="s1">degree=degree</span><span class="s3">,</span>
+          <span class="s1">with_jit=with_jit)</span>
+      <span class="s3">for </span><span class="s1">degree </span><span class="s3">in </span><span class="s1">[</span><span class="s5">1</span><span class="s3">, </span><span class="s5">2</span><span class="s3">, </span><span class="s5">3</span><span class="s3">, </span><span class="s5">4</span><span class="s1">]</span>
+      <span class="s3">for </span><span class="s1">with_jit </span><span class="s3">in </span><span class="s1">[</span><span class="s3">True, False</span><span class="s1">])</span>
+  <span class="s3">def </span><span class="s1">test_higher_order_grad(self</span><span class="s3">, </span><span class="s1">degree=</span><span class="s5">2</span><span class="s3">, </span><span class="s1">with_jit=</span><span class="s3">False</span><span class="s1">):</span>
+
+    <span class="s3">def </span><span class="s1">fun_tf(x):</span>
+      <span class="s3">return </span><span class="s5">2. </span><span class="s1">* x * x * x</span>
+
+    <span class="s3">def </span><span class="s1">fun_jax(x):</span>
+      <span class="s3">return </span><span class="s5">3. </span><span class="s1">* _maybe_jit(with_jit</span><span class="s3">, </span><span class="s1">jax2tf.call_tf(fun_tf))(x)</span>
+
+    <span class="s3">def </span><span class="s1">fun_jax_pure(x):</span>
+      <span class="s3">return </span><span class="s5">3. </span><span class="s1">* fun_tf(x)</span>
+
+    <span class="s1">grad_jax = fun_jax</span>
+    <span class="s1">grad_jax_pure = fun_jax_pure</span>
+    <span class="s3">for </span><span class="s1">_ </span><span class="s3">in </span><span class="s1">range(degree):</span>
+      <span class="s1">grad_jax = jax.grad(grad_jax)</span>
+      <span class="s1">grad_jax_pure = jax.grad(grad_jax_pure)</span>
+
+    <span class="s1">res_jax = grad_jax(np.float32(</span><span class="s5">5.</span><span class="s1">))</span>
+    <span class="s1">logging.info(</span><span class="s4">&quot;Grad of %s degree is %s&quot;</span><span class="s3">, </span><span class="s1">degree</span><span class="s3">, </span><span class="s1">res_jax)</span>
+    <span class="s1">self.assertAllClose(res_jax</span><span class="s3">, </span><span class="s1">grad_jax_pure(np.float32(</span><span class="s5">5.</span><span class="s1">)))</span>
+
+  <span class="s3">def </span><span class="s1">test_pmap(self):</span>
+    <span class="s1">logging.info(</span><span class="s4">&quot;Running test_pmap on %s devices&quot;</span><span class="s3">, </span><span class="s1">jax.local_device_count())</span>
+
+    <span class="s3">def </span><span class="s1">plus_2_tf(x):</span>
+      <span class="s3">return </span><span class="s1">tf.math.add(</span><span class="s5">2.</span><span class="s3">, </span><span class="s1">x)</span>
+
+    <span class="s3">def </span><span class="s1">fun_jax(x):</span>
+      <span class="s3">return </span><span class="s1">np.float32(</span><span class="s5">3.</span><span class="s1">) * jax2tf.call_tf(plus_2_tf)(x)</span>
+
+    <span class="s1">x = np.arange(jax.local_device_count()</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s1">res = jax.pmap(fun_jax)(x)</span>
+    <span class="s1">self.assertAllClose(np.float32(</span><span class="s5">3. </span><span class="s1">* (x + </span><span class="s5">2</span><span class="s1">))</span><span class="s3">, </span><span class="s1">res)</span>
+
+  <span class="s3">def </span><span class="s1">test_function_compile_time_constant_inputs(self):</span>
+    <span class="s0"># Call a function for which shape inference does not give an output</span>
+    <span class="s0"># shape.</span>
+    <span class="s1">x = np.array([</span><span class="s5">1</span><span class="s3">, </span><span class="s5">2</span><span class="s3">, </span><span class="s5">3</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.int32)</span>
+    <span class="s3">def </span><span class="s1">fun_tf(x):  </span><span class="s0"># x:i32[3]</span>
+      <span class="s0"># Indexing with a dynamic slice makes the TF shape inference return</span>
+      <span class="s0"># a partially known shape.</span>
+      <span class="s1">end_idx = x[</span><span class="s5">1</span><span class="s1">]</span>
+      <span class="s1">res = x[</span><span class="s5">0</span><span class="s1">:end_idx]</span>
+      <span class="s3">return </span><span class="s1">res</span>
+
+    <span class="s0"># Call in eager mode. Should work!</span>
+    <span class="s1">res1 = jax2tf.call_tf(fun_tf)(x)</span>
+    <span class="s1">self.assertAllClose(x[</span><span class="s5">0</span><span class="s1">:x[</span><span class="s5">1</span><span class="s1">]]</span><span class="s3">, </span><span class="s1">res1)</span>
+
+    <span class="s0"># Now under jit, should fail because the function is not compilable</span>
+    <span class="s3">with </span><span class="s1">self.assertRaisesRegex(ValueError</span><span class="s3">, </span><span class="s1">_call_tf_dynamic_shape_error):</span>
+      <span class="s1">fun_jax = jax.jit(jax2tf.call_tf(fun_tf))</span>
+      <span class="s1">fun_jax(x)</span>
+
+  <span class="s3">def </span><span class="s1">test_experimental_get_compiler_ir_design_doc(self):</span>
+    <span class="s0"># Not a test of call_tf, but more of how experimental_get_compiler_ir works.</span>
+    <span class="s0"># Examples are from the design doc.</span>
+
+    <span class="s0"># Constant slice. This is the common case.</span>
+    <span class="s1">x = np.zeros((</span><span class="s5">10</span><span class="s3">,</span><span class="s1">)</span><span class="s3">, </span><span class="s1">dtype=np.int32)</span>
+
+    <span class="s3">def </span><span class="s1">fun_tf(x):</span>
+      <span class="s1">begin = </span><span class="s5">0</span>
+      <span class="s3">return </span><span class="s1">x[begin:</span><span class="s5">5</span><span class="s1">]</span>
+
+    <span class="s1">hlo = tf.function(fun_tf</span><span class="s3">, </span><span class="s1">jit_compile=</span><span class="s3">True, </span><span class="s1">autograph=</span><span class="s3">False</span><span class="s1">).experimental_get_compiler_ir(x)()</span>
+    <span class="s1">self.assertIn(</span><span class="s4">&quot;(arg0.1: s32[10]) -&gt; s32[5]&quot;</span><span class="s3">, </span><span class="s1">hlo)</span>
+
+    <span class="s0"># Non-constant slice, but compile-time constant depending only on values.</span>
+    <span class="s1">x = np.zeros((</span><span class="s5">10</span><span class="s3">,</span><span class="s1">)</span><span class="s3">, </span><span class="s1">dtype=np.int32)</span>
+
+    <span class="s0"># Non-constant slice, but compile-time constant depending only on shapes.</span>
+    <span class="s1">x = np.zeros((</span><span class="s5">10</span><span class="s3">,</span><span class="s1">)</span><span class="s3">, </span><span class="s1">dtype=np.int32)</span>
+
+    <span class="s3">def </span><span class="s1">fun_tf(x):</span>
+      <span class="s1">begin = tf.shape(x)[</span><span class="s5">0</span><span class="s1">] - </span><span class="s5">2  </span><span class="s0"># begin is a compile-time constant, even if x is not</span>
+      <span class="s3">return </span><span class="s1">x[begin:]</span>
+
+    <span class="s1">hlo = tf.function(fun_tf</span><span class="s3">, </span><span class="s1">jit_compile=</span><span class="s3">True, </span><span class="s1">autograph=</span><span class="s3">False</span><span class="s1">).experimental_get_compiler_ir(x)()</span>
+    <span class="s1">self.assertIn(</span><span class="s4">&quot;(arg0.1: s32[10]) -&gt; s32[2]&quot;</span><span class="s3">, </span><span class="s1">hlo)</span>
+
+    <span class="s0"># Capture a variable</span>
+    <span class="s1">outer_var = tf.Variable(np.array([</span><span class="s5">3.</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.float32))</span>
+    <span class="s1">x = np.array([</span><span class="s5">2.</span><span class="s3">, </span><span class="s5">3.</span><span class="s3">, </span><span class="s5">4.</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+
+    <span class="s3">def </span><span class="s1">fun_tf(x):</span>
+      <span class="s3">return </span><span class="s1">x * tf.broadcast_to(outer_var</span><span class="s3">, </span><span class="s1">x.shape) + </span><span class="s5">1.</span>
+
+    <span class="s1">hlo = tf.function(fun_tf</span><span class="s3">, </span><span class="s1">jit_compile=</span><span class="s3">True, </span><span class="s1">autograph=</span><span class="s3">False</span><span class="s1">).experimental_get_compiler_ir(x)()</span>
+    <span class="s1">self.assertIn(</span><span class="s4">&quot;(arg0.1: f32[3], arg1.2: f32[1]) -&gt; f32[3]&quot;</span><span class="s3">, </span><span class="s1">hlo)</span>
+
+    <span class="s0"># Capture a constant</span>
+    <span class="s1">outer_ct = np.array([</span><span class="s5">3.</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s1">x = np.array([</span><span class="s5">2.</span><span class="s3">, </span><span class="s5">3.</span><span class="s3">, </span><span class="s5">4.</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+
+    <span class="s3">def </span><span class="s1">fun_tf(x):</span>
+      <span class="s3">return </span><span class="s1">x * tf.broadcast_to(outer_ct</span><span class="s3">, </span><span class="s1">x.shape) + </span><span class="s5">1.</span>
+
+    <span class="s1">hlo = tf.function(fun_tf</span><span class="s3">, </span><span class="s1">jit_compile=</span><span class="s3">True, </span><span class="s1">autograph=</span><span class="s3">False</span><span class="s1">).experimental_get_compiler_ir(x)()</span>
+    <span class="s1">self.assertIn(</span><span class="s4">&quot;(arg0.1: f32[3]) -&gt; f32[3]&quot;</span><span class="s3">, </span><span class="s1">hlo)</span>
+
+    <span class="s0"># Call get_compiler_ir in a function context</span>
+    <span class="s1">x = np.array([</span><span class="s5">2.</span><span class="s3">, </span><span class="s5">3.</span><span class="s3">, </span><span class="s5">4.</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+
+    <span class="s3">def </span><span class="s1">fun_tf_outer(x):</span>
+      <span class="s1">x_const = tf.constant(</span><span class="s5">0</span><span class="s3">, </span><span class="s1">shape=x.shape</span><span class="s3">, </span><span class="s1">dtype=x.dtype)</span>
+      <span class="s1">_ = tf.function(tf.math.sin</span><span class="s3">, </span><span class="s1">jit_compile=</span><span class="s3">True, </span><span class="s1">autograph=</span><span class="s3">False</span><span class="s1">).experimental_get_compiler_ir(x_const)()</span>
+
+    <span class="s0"># TODO(b/193754660)</span>
+    <span class="s0"># with self.assertRaisesRegex(</span>
+    <span class="s0">#     TypeError, &quot;An op outside of the function building code is being passed&quot;):</span>
+    <span class="s0">#   tf.function(fun_tf_outer)(x)</span>
+    <span class="s0">#</span>
+    <span class="s0"># with self.assertRaisesRegex(</span>
+    <span class="s0">#     TypeError, &quot;An op outside of the function building code is being passed&quot;):</span>
+    <span class="s0">#   tf.function(fun_tf_outer, jit_compile=True)(x)</span>
+
+    <span class="s0"># Call get_concrete_function in a graph context</span>
+    <span class="s3">def </span><span class="s1">fun_tf_outer_2(x):</span>
+      <span class="s1">_ = tf.function(tf.math.sin</span><span class="s3">, </span><span class="s1">jit_compile=</span><span class="s3">True</span><span class="s1">).get_concrete_function(tf.TensorSpec(x.shape</span><span class="s3">, </span><span class="s1">x.dtype))</span>
+      <span class="s3">return </span><span class="s1">x</span>
+
+    <span class="s0"># Outside of a function context, this works.</span>
+    <span class="s1">_ = tf.function(fun_tf_outer_2)(x)</span>
+    <span class="s1">_ = tf.function(fun_tf_outer_2</span><span class="s3">, </span><span class="s1">jit_compile=</span><span class="s3">True</span><span class="s1">)(x)</span>
+
+  <span class="s3">def </span><span class="s1">test_repro_193754660(self):</span>
+    <span class="s0"># Try to reproduce b/193754660. I can't.</span>
+    <span class="s0"># We have to have tf.function(jax2tf.convert(jax2tf.call_tf(f_tf))).</span>
+    <span class="s0"># The get_compiler_ir will indeed fail for f_tf. Then we try to use</span>
+    <span class="s0"># shape inference for f_tf.</span>
+    <span class="s0"># I thought to use a f_tf that uses an op without shape inference, e.g.,</span>
+    <span class="s0"># tfxla.gather. If we wash it through a saved_model I expect that shape</span>
+    <span class="s0"># inference would not work on it. Instead, shape inference works!!!</span>
+    <span class="s1">x = np.array([</span><span class="s5">0</span><span class="s3">, </span><span class="s5">1</span><span class="s3">, </span><span class="s5">2</span><span class="s3">, </span><span class="s5">3</span><span class="s3">, </span><span class="s5">4</span><span class="s3">, </span><span class="s5">5</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.int32)</span>
+    <span class="s3">def </span><span class="s1">f_jax(x):</span>
+      <span class="s3">return </span><span class="s1">x[</span><span class="s5">1</span><span class="s1">]</span>
+    <span class="s1">f_tf = jax2tf.convert(f_jax)</span>
+    <span class="s1">f_tf_rt</span><span class="s3">, </span><span class="s1">_ = tf_test_util.SaveAndLoadFunction(f_tf</span><span class="s3">, </span><span class="s1">input_args=[x])</span>
+    <span class="s1">f_jax2 = jax2tf.call_tf(f_tf_rt)</span>
+    <span class="s1">f_tf2 = jax2tf.convert(f_jax2)</span>
+    <span class="s1">res = tf.function(f_tf2</span><span class="s3">, </span><span class="s1">autograph=</span><span class="s3">False</span><span class="s1">)(x)</span>
+    <span class="s1">self.assertAllClose(res.numpy()</span><span class="s3">, </span><span class="s1">f_jax(x))</span>
+
+  <span class="s3">def </span><span class="s1">test_effectful(self):</span>
+    <span class="s1">x = np.ones((</span><span class="s5">3</span><span class="s3">,</span><span class="s1">)</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s1">lower_effect = jax.jit(jax2tf.call_tf(tf.math.sin</span><span class="s3">, </span><span class="s1">has_side_effects=</span><span class="s3">True</span><span class="s1">)).lower(x)</span>
+    <span class="s1">self.assertNotEmpty(lower_effect._lowering.compile_args[</span><span class="s4">&quot;unordered_effects&quot;</span><span class="s1">])</span>
+
+    <span class="s1">lower_no_effect = jax.jit(jax2tf.call_tf(tf.math.sin</span><span class="s3">, </span><span class="s1">has_side_effects=</span><span class="s3">False</span><span class="s1">)).lower(x)</span>
+    <span class="s1">self.assertEmpty(lower_no_effect._lowering.compile_args[</span><span class="s4">&quot;unordered_effects&quot;</span><span class="s1">])</span>
+
+  <span class="s3">def </span><span class="s1">test_module_documentation(self):</span>
+    <span class="s3">def </span><span class="s1">cos_tf(x):</span>
+      <span class="s3">return </span><span class="s1">tf.math.cos(x)</span>
+
+    <span class="s0"># Compute cos with TF and sin with JAX</span>
+    <span class="s3">def </span><span class="s1">cos_tf_sin_jax(x):</span>
+      <span class="s3">return </span><span class="s1">jax.numpy.sin(jax2tf.call_tf(cos_tf)(x))</span>
+
+    <span class="s0"># Calls `cos_tf` in TF eager mode</span>
+    <span class="s1">x = np.float32(</span><span class="s5">1.</span><span class="s1">)</span>
+    <span class="s1">cos_tf_sin_jax(x)</span>
+
+    <span class="s0"># Compiles `cos_tf` using TF and embeds the XLA computation into the JAX</span>
+    <span class="s0"># XLA computation (containing `sin`). The XLA compiler may even be able to</span>
+    <span class="s0"># fuse through JAX-TF computations.</span>
+    <span class="s1">jax.jit(cos_tf_sin_jax)(x)</span>
+
+    <span class="s0"># Uses TF gradient for `cos_tf` and JAX gradient for `sin`</span>
+    <span class="s1">jax.grad(cos_tf_sin_jax)(x)</span>
+
+    <span class="s1">logging.info(jax.make_jaxpr(cos_tf_sin_jax)(x))</span>
+    <span class="s1">logging.info(jax.xla_computation(cos_tf_sin_jax)(x).as_hlo_text())</span>
+
+  <span class="s3">def </span><span class="s1">test_tf_gather(self):</span>
+    <span class="s2">&quot;&quot;&quot;tf_gather gradient output is tf.IndexSlices.&quot;&quot;&quot;</span>
+    <span class="s1">operand = jnp.array(np.random.uniform(size=(</span><span class="s5">100</span><span class="s3">, </span><span class="s5">128</span><span class="s1">)))</span>
+    <span class="s1">indices = jnp.array(np.random.randint(low=</span><span class="s5">0</span><span class="s3">, </span><span class="s1">high=</span><span class="s5">100</span><span class="s3">, </span><span class="s1">size=(</span><span class="s5">4000</span><span class="s3">,</span><span class="s1">)))</span>
+
+    <span class="s1">@tf.function(jit_compile=</span><span class="s3">True, </span><span class="s1">autograph=</span><span class="s3">False</span><span class="s1">)</span>
+    <span class="s3">def </span><span class="s1">fun_tf(operand</span><span class="s3">, </span><span class="s1">indices):</span>
+      <span class="s3">return </span><span class="s1">tf.experimental.numpy.std(tf.gather(operand</span><span class="s3">, </span><span class="s1">indices))</span>
+
+    <span class="s1">fun_jax = jax2tf.call_tf(fun_tf)</span>
+    <span class="s1">grad_fun_jax = jax.grad(fun_jax)</span>
+    <span class="s1">grad_res = grad_fun_jax(operand</span><span class="s3">, </span><span class="s1">indices)</span>
+    <span class="s1">self.assertEqual(grad_res.shape</span><span class="s3">, </span><span class="s1">(</span><span class="s5">100</span><span class="s3">, </span><span class="s5">128</span><span class="s1">))</span>
+
+
+<span class="s3">class </span><span class="s1">RoundTripToJaxTest(tf_test_util.JaxToTfTestCase):</span>
+  <span class="s2">&quot;Reloading output of jax2tf into JAX with call_tf&quot;</span>
+  <span class="s3">def </span><span class="s1">setUp(self):</span>
+    <span class="s3">if </span><span class="s1">tf </span><span class="s3">is None</span><span class="s1">:</span>
+      <span class="s3">raise </span><span class="s1">unittest.SkipTest(</span><span class="s4">&quot;Test requires tensorflow&quot;</span><span class="s1">)</span>
+    <span class="s0"># TODO(b/171320191): this line works around a missing context initialization</span>
+    <span class="s0"># bug in TensorFlow.</span>
+    <span class="s1">_ = tf.add(</span><span class="s5">1</span><span class="s3">, </span><span class="s5">1</span><span class="s1">)</span>
+    <span class="s1">super().setUp()</span>
+
+  <span class="s3">def </span><span class="s1">test_simple(self):</span>
+    <span class="s1">f_jax = jnp.sin</span>
+    <span class="s1">f_jax_rt = jax2tf.call_tf(jax2tf.convert(f_jax))</span>
+    <span class="s1">x = np.float32(</span><span class="s5">0.7</span><span class="s1">)</span>
+    <span class="s1">self.assertAllClose(f_jax(x)</span><span class="s3">, </span><span class="s1">f_jax_rt(x))</span>
+
+  <span class="s3">def </span><span class="s1">test_pytree(self):</span>
+    <span class="s3">def </span><span class="s1">f_jax(x):  </span><span class="s0"># x: dict(a=f32, b=f32)</span>
+      <span class="s3">return </span><span class="s1">dict(a=x[</span><span class="s4">&quot;a&quot;</span><span class="s1">]+</span><span class="s5">1.</span><span class="s3">, </span><span class="s1">b=x)</span>
+    <span class="s1">x = dict(a=</span><span class="s5">0.7</span><span class="s3">, </span><span class="s1">b=</span><span class="s5">0.8</span><span class="s1">)</span>
+    <span class="s1">f_jax_rt = jax2tf.call_tf(jax2tf.convert(f_jax))</span>
+    <span class="s1">self.assertAllClose(f_jax(x)</span><span class="s3">, </span><span class="s1">f_jax_rt(x))</span>
+
+  <span class="s3">def </span><span class="s1">test_custom_grad(self):</span>
+    <span class="s1">@jax.custom_vjp</span>
+    <span class="s3">def </span><span class="s1">f(x):</span>
+      <span class="s3">return </span><span class="s1">x * x</span>
+
+    <span class="s0"># f_fwd: a -&gt; (b, residual)</span>
+    <span class="s3">def </span><span class="s1">f_fwd(x):</span>
+      <span class="s3">return </span><span class="s1">f(x)</span><span class="s3">, </span><span class="s1">np.float32(</span><span class="s5">3.</span><span class="s1">) * x</span>
+    <span class="s0"># f_bwd: (residual, CT b) -&gt; [CT a]</span>
+    <span class="s3">def </span><span class="s1">f_bwd(residual</span><span class="s3">, </span><span class="s1">ct_b):</span>
+      <span class="s3">return </span><span class="s1">residual * ct_b</span><span class="s3">,</span>
+
+    <span class="s1">f.defvjp(f_fwd</span><span class="s3">, </span><span class="s1">f_bwd)</span>
+
+    <span class="s1">f_rt = jax2tf.call_tf(jax2tf.convert(f</span><span class="s3">, </span><span class="s1">with_gradient=</span><span class="s3">True</span><span class="s1">))</span>
+    <span class="s1">x = np.float32(</span><span class="s5">0.7</span><span class="s1">)</span>
+    <span class="s1">self.assertAllClose(f(x)</span><span class="s3">, </span><span class="s1">f_rt(x))</span>
+    <span class="s1">self.assertAllClose(jax.grad(f)(x)</span><span class="s3">, </span><span class="s1">jax.grad(f_rt)(x))</span>
+
+  <span class="s3">def </span><span class="s1">test_shape_poly(self):</span>
+    <span class="s1">f_jax = jnp.sin</span>
+    <span class="s1">f_jax_rt = jax2tf.call_tf(jax2tf.convert(f_jax</span><span class="s3">,</span>
+                                             <span class="s1">polymorphic_shapes=[</span><span class="s4">&quot;(b, ...)&quot;</span><span class="s1">]))</span>
+    <span class="s1">x = np.array([</span><span class="s5">0.7</span><span class="s3">, </span><span class="s5">0.8</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s1">self.assertAllClose(f_jax(x)</span><span class="s3">, </span><span class="s1">f_jax_rt(x))</span>
+
+  <span class="s3">def </span><span class="s1">test_saved_model_simple(self):</span>
+    <span class="s1">x = np.array([</span><span class="s5">0.7</span><span class="s3">, </span><span class="s5">0.8</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s3">def </span><span class="s1">f_jax(x):</span>
+      <span class="s3">return </span><span class="s1">jnp.sin(x)</span>
+
+    <span class="s1">f_tf = jax2tf.convert(f_jax)</span>
+    <span class="s1">restored_tf</span><span class="s3">, </span><span class="s1">_ = tf_test_util.SaveAndLoadFunction(f_tf</span><span class="s3">, </span><span class="s1">input_args=[x])</span>
+    <span class="s1">restored_jax = jax2tf.call_tf(restored_tf)</span>
+    <span class="s1">self.assertAllClose(f_jax(x)</span><span class="s3">, </span><span class="s1">restored_jax(x))</span>
+
+  <span class="s3">def </span><span class="s1">test_saved_model_variables(self):</span>
+    <span class="s1">param = np.array([</span><span class="s5">1.</span><span class="s3">, </span><span class="s5">2.</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s1">x = np.array([</span><span class="s5">0.7</span><span class="s3">, </span><span class="s5">0.8</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s3">def </span><span class="s1">f_jax(param</span><span class="s3">, </span><span class="s1">x):</span>
+      <span class="s3">return </span><span class="s1">jnp.sin(x) + jnp.cos(param)</span>
+
+    <span class="s1">param_v = tf.Variable(param)</span>
+    <span class="s1">f_tf = jax2tf.convert(f_jax)</span>
+    <span class="s1">_</span><span class="s3">, </span><span class="s1">restored_model = tf_test_util.SaveAndLoadFunction(</span>
+        <span class="s3">lambda </span><span class="s1">x: f_tf(param_v</span><span class="s3">, </span><span class="s1">x)</span><span class="s3">,</span>
+        <span class="s1">input_args=[x]</span><span class="s3">,</span>
+        <span class="s1">variables=[param_v])</span>
+    <span class="s1">restored_jax = jax2tf.call_tf(restored_model.f)</span>
+    <span class="s1">self.assertAllClose(f_jax(param</span><span class="s3">, </span><span class="s1">x)</span><span class="s3">, </span><span class="s1">restored_jax(x))</span>
+    <span class="s1">self.assertAllClose(f_jax(param</span><span class="s3">, </span><span class="s1">x)</span><span class="s3">, </span><span class="s1">jax.jit(restored_jax)(x))</span>
+
+  <span class="s3">def </span><span class="s1">test_saved_model_shape_poly(self):</span>
+    <span class="s1">tracing_count = </span><span class="s5">0</span>
+    <span class="s1">x = np.array([</span><span class="s5">0.7</span><span class="s3">, </span><span class="s5">0.8</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s3">def </span><span class="s1">f_jax(x):</span>
+      <span class="s3">nonlocal </span><span class="s1">tracing_count</span>
+      <span class="s1">tracing_count += </span><span class="s5">1</span>
+      <span class="s3">return </span><span class="s1">jnp.sin(x)</span>
+
+    <span class="s1">f_tf = jax2tf.convert(f_jax</span><span class="s3">, </span><span class="s1">polymorphic_shapes=[</span><span class="s4">&quot;(b, ...)&quot;</span><span class="s1">])</span>
+    <span class="s1">res_jax = f_jax(x)</span>
+    <span class="s1">self.assertEqual(</span><span class="s5">1</span><span class="s3">, </span><span class="s1">tracing_count)</span>
+    <span class="s0"># Will trace twice, it seems. Once to get the result signature, and once again</span>
+    <span class="s0"># for the actual saving.</span>
+    <span class="s1">restored_f</span><span class="s3">, </span><span class="s1">_ = tf_test_util.SaveAndLoadFunction(</span>
+        <span class="s1">f_tf</span><span class="s3">, </span><span class="s1">input_signature=[tf.TensorSpec([</span><span class="s3">None</span><span class="s1">]</span><span class="s3">, </span><span class="s1">x.dtype)])</span>
+    <span class="s1">self.assertGreaterEqual(tracing_count</span><span class="s3">, </span><span class="s5">2</span><span class="s1">)</span>
+    <span class="s1">tracing_count = </span><span class="s5">0</span>
+    <span class="s1">f_jax_rt = jax2tf.call_tf(restored_f)</span>
+    <span class="s1">self.assertAllClose(res_jax</span><span class="s3">, </span><span class="s1">f_jax_rt(x))</span>
+    <span class="s0"># Ensure that restored_f works at other batch size as well</span>
+    <span class="s1">y = np.concatenate([x</span><span class="s3">, </span><span class="s1">x])</span>
+    <span class="s1">self.assertEqual(</span><span class="s5">0</span><span class="s3">, </span><span class="s1">tracing_count)</span>
+    <span class="s1">res_jax_y = f_jax(y)</span>
+    <span class="s1">self.assertEqual(</span><span class="s5">1</span><span class="s3">, </span><span class="s1">tracing_count)</span>
+    <span class="s0"># No more tracing for f_jax_rt</span>
+    <span class="s1">self.assertAllClose(res_jax_y</span><span class="s3">, </span><span class="s1">f_jax_rt(y))</span>
+    <span class="s1">self.assertEqual(</span><span class="s5">1</span><span class="s3">, </span><span class="s1">tracing_count)</span>
+
+  <span class="s3">def </span><span class="s1">test_custom_grad_saved_model(self):</span>
+
+    <span class="s1">@jax.custom_vjp</span>
+    <span class="s3">def </span><span class="s1">f(x):</span>
+      <span class="s3">return </span><span class="s1">x * x</span>
+
+    <span class="s0"># f_fwd: a -&gt; (b, residual)</span>
+    <span class="s3">def </span><span class="s1">f_fwd(x):</span>
+      <span class="s3">return </span><span class="s1">f(x)</span><span class="s3">, </span><span class="s1">np.float32(</span><span class="s5">3.</span><span class="s1">) * x</span>
+    <span class="s0"># f_bwd: (residual, CT b) -&gt; [CT a]</span>
+    <span class="s3">def </span><span class="s1">f_bwd(residual</span><span class="s3">, </span><span class="s1">ct_b):</span>
+      <span class="s3">return </span><span class="s1">residual * ct_b</span><span class="s3">,</span>
+
+    <span class="s1">f.defvjp(f_fwd</span><span class="s3">, </span><span class="s1">f_bwd)</span>
+    <span class="s3">def </span><span class="s1">g(x):</span>
+      <span class="s3">return </span><span class="s1">jnp.sum(f(x))</span>
+
+    <span class="s1">g_tf</span><span class="s3">, </span><span class="s1">_ = tf_test_util.SaveAndLoadFunction(</span>
+        <span class="s1">jax2tf.convert(g</span><span class="s3">, </span><span class="s1">with_gradient=</span><span class="s3">True</span><span class="s1">)</span><span class="s3">,</span>
+        <span class="s1">input_signature=[tf.TensorSpec(shape=(</span><span class="s5">1</span><span class="s3">,</span><span class="s1">)</span><span class="s3">, </span><span class="s1">dtype=tf.float32)]</span><span class="s3">,</span>
+    <span class="s1">)</span>
+    <span class="s1">g_rt = jax2tf.call_tf(g_tf)</span>
+    <span class="s1">x = np.array([</span><span class="s5">0.7</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s1">self.assertAllClose(g(x)</span><span class="s3">, </span><span class="s1">g_rt(x))</span>
+    <span class="s1">self.assertAllClose(jax.grad(g)(x)</span><span class="s3">, </span><span class="s1">jax.grad(g_rt)(x))</span>
+
+  <span class="s3">def </span><span class="s1">test_without_gradient_saved_model(self):</span>
+    <span class="s0"># Explicitly with_gradient=False</span>
+    <span class="s1">f_jax = jnp.sum</span>
+
+    <span class="s1">x = np.array([</span><span class="s5">0.7</span><span class="s3">, </span><span class="s5">0.8</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s1">f_tf</span><span class="s3">, </span><span class="s1">_ = tf_test_util.SaveAndLoadFunction(</span>
+        <span class="s1">jax2tf.convert(f_jax</span><span class="s3">, </span><span class="s1">with_gradient=</span><span class="s3">False</span><span class="s1">)</span><span class="s3">,</span>
+        <span class="s1">input_args=[x])</span>
+    <span class="s1">f_rt = jax2tf.call_tf(f_tf)</span>
+
+    <span class="s1">self.assertAllClose(f_jax(x)</span><span class="s3">, </span><span class="s1">f_rt(x))</span>
+    <span class="s3">with </span><span class="s1">self.assertRaisesRegex(Exception</span><span class="s3">,</span>
+                                <span class="s4">&quot;Gradient explicitly disabled.*jax2tf-converted function does not support gradients. Use `with_gradient` parameter to enable gradients&quot;</span><span class="s1">):</span>
+      <span class="s1">jax.grad(f_rt)(x)</span>
+
+  <span class="s3">def </span><span class="s1">test_saved_model_no_gradients(self):</span>
+    <span class="s0"># Save without gradients</span>
+    <span class="s1">f_jax = jnp.sum</span>
+
+    <span class="s1">x = np.array([</span><span class="s5">0.7</span><span class="s3">, </span><span class="s5">0.8</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s1">f_tf</span><span class="s3">, </span><span class="s1">_ = tf_test_util.SaveAndLoadFunction(</span>
+        <span class="s1">jax2tf.convert(f_jax</span><span class="s3">, </span><span class="s1">with_gradient=</span><span class="s3">True</span><span class="s1">)</span><span class="s3">, </span><span class="s1">input_args=[x]</span><span class="s3">,</span>
+        <span class="s1">save_gradients=</span><span class="s3">False</span><span class="s1">)</span>
+    <span class="s1">f_rt = jax2tf.call_tf(f_tf)</span>
+
+    <span class="s1">self.assertAllClose(f_jax(x)</span><span class="s3">, </span><span class="s1">f_rt(x))</span>
+    <span class="s0"># TODO: clean this up b/191117111: it should fail with a clear error</span>
+    <span class="s0"># The following results in a confusing error:</span>
+    <span class="s0"># TypeError: tf.Graph captured an external symbolic tensor.</span>
+    <span class="s3">with </span><span class="s1">self.assertRaises(TypeError):</span>
+      <span class="s1">_ = jax.grad(f_rt)(x)</span>
+
+  <span class="s3">def </span><span class="s1">test_call_tf_under_function_context(self):</span>
+    <span class="s3">def </span><span class="s1">fun_jax(x</span><span class="s3">, </span><span class="s1">y):</span>
+      <span class="s1">z = jax2tf.call_tf(tf.math.sin)(x) + jnp.cos(y)</span>
+      <span class="s3">return </span><span class="s1">z</span>
+
+    <span class="s1">x = np.array([-</span><span class="s5">1.0</span><span class="s3">, </span><span class="s5">0.0</span><span class="s3">, </span><span class="s5">1.0</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s1">y = np.array([-</span><span class="s5">0.5</span><span class="s3">, </span><span class="s5">0.0</span><span class="s3">, </span><span class="s5">0.5</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+
+    <span class="s1">converted_fun = tf.function(</span>
+        <span class="s1">jax2tf.convert(fun_jax</span><span class="s3">, </span><span class="s1">native_serialization=</span><span class="s3">True</span><span class="s1">)</span>
+    <span class="s1">)</span>
+    <span class="s1">expected = np.sin(x) + np.cos(y)</span>
+    <span class="s1">res = tf.function(converted_fun</span><span class="s3">, </span><span class="s1">jit_compile=</span><span class="s3">True, </span><span class="s1">autograph=</span><span class="s3">False</span><span class="s1">)(x</span><span class="s3">, </span><span class="s1">y)</span>
+    <span class="s1">self.assertAllClose(expected</span><span class="s3">, </span><span class="s1">res.numpy()</span><span class="s3">, </span><span class="s1">atol=</span><span class="s5">1e-5</span><span class="s3">, </span><span class="s1">rtol=</span><span class="s5">1e-5</span><span class="s1">)</span>
+
+  <span class="s1">@parameterized.named_parameters(</span>
+      <span class="s1">dict(</span>
+          <span class="s1">testcase_name=</span><span class="s4">f&quot;_</span><span class="s3">{</span><span class="s1">dtype.__name__</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s3">,</span>
+          <span class="s1">dtype=dtype</span><span class="s3">,</span>
+      <span class="s1">)</span>
+      <span class="s3">for </span><span class="s1">dtype </span><span class="s3">in </span><span class="s1">set(jtu.dtypes.all_floating)</span>
+  <span class="s1">)</span>
+  <span class="s3">def </span><span class="s1">test_all_floating_input_gradient(self</span><span class="s3">, </span><span class="s1">dtype):</span>
+    <span class="s3">def </span><span class="s1">tf_f(x):</span>
+      <span class="s1">res = tf.math.sin(x)</span>
+      <span class="s3">return </span><span class="s1">tf.reduce_sum(res)</span>
+
+    <span class="s1">jax_f = jax2tf.call_tf(tf_f)</span>
+    <span class="s1">tf_f_rt = jax2tf.convert(jax_f)</span>
+    <span class="s1">x = jnp.array([</span><span class="s5">5.0</span><span class="s3">, </span><span class="s5">6.0</span><span class="s3">, </span><span class="s5">7.0</span><span class="s1">]).astype(dtype)</span>
+
+    <span class="s3">def </span><span class="s1">assert_all_close_support_bfloat16(baseline</span><span class="s3">, </span><span class="s1">candidate):</span>
+      <span class="s3">def </span><span class="s1">conversion(x):</span>
+        <span class="s0"># convert scalar to array and bfloat16 to float32</span>
+        <span class="s0"># to support self.assertAllClose numpy array comparision.</span>
+        <span class="s3">if </span><span class="s1">x.shape == tf.TensorShape([]):</span>
+          <span class="s1">x = tf.convert_to_tensor([x])</span>
+        <span class="s3">if </span><span class="s1">dtype == jnp.float16:</span>
+          <span class="s1">x = tf.cast(x</span><span class="s3">, </span><span class="s1">tf.float32)</span>
+        <span class="s3">return </span><span class="s1">x</span>
+
+      <span class="s1">baseline = jax.tree_util.tree_map(conversion</span><span class="s3">, </span><span class="s1">baseline)</span>
+      <span class="s1">candidate = jax.tree_util.tree_map(conversion</span><span class="s3">, </span><span class="s1">candidate)</span>
+      <span class="s1">self.assertAllClose(baseline</span><span class="s3">, </span><span class="s1">candidate)</span>
+
+    <span class="s0"># Eager mode</span>
+    <span class="s1">assert_all_close_support_bfloat16(tf_f(x)</span><span class="s3">, </span><span class="s1">tf_f_rt(x))</span>
+
+    <span class="s0"># Compiled function mode</span>
+    <span class="s1">assert_all_close_support_bfloat16(</span>
+        <span class="s1">tf.function(tf_f)(x)</span><span class="s3">, </span><span class="s1">tf.function(tf_f_rt)(x)</span>
+    <span class="s1">)</span>
+
+    <span class="s0"># Compiled fucntion mode with jit_compiled=True</span>
+    <span class="s1">assert_all_close_support_bfloat16(</span>
+        <span class="s1">tf.function(tf_f</span><span class="s3">, </span><span class="s1">jit_compile=</span><span class="s3">True</span><span class="s1">)(x)</span><span class="s3">,</span>
+        <span class="s1">tf.function(tf_f_rt</span><span class="s3">, </span><span class="s1">jit_compile=</span><span class="s3">True</span><span class="s1">)(x)</span><span class="s3">,</span>
+    <span class="s1">)</span>
+
+    <span class="s0"># RoundTrip test for the gradient</span>
+    <span class="s1">grad_fun_jax = jax.grad(jax2tf.call_tf(tf_f))</span>
+    <span class="s1">grad_fun_jax_rt = jax2tf.call_tf(jax2tf.convert(grad_fun_jax))</span>
+
+    <span class="s0"># Eager mode</span>
+    <span class="s1">assert_all_close_support_bfloat16(grad_fun_jax(x)</span><span class="s3">, </span><span class="s1">grad_fun_jax_rt(x))</span>
+
+    <span class="s0"># Jit mode</span>
+    <span class="s1">assert_all_close_support_bfloat16(</span>
+        <span class="s1">jax.jit(grad_fun_jax)(x)</span><span class="s3">, </span><span class="s1">jax.jit(grad_fun_jax_rt)(x)</span>
+    <span class="s1">)</span>
+
+  <span class="s1">@parameterized.named_parameters(</span>
+      <span class="s1">dict(</span>
+          <span class="s1">testcase_name=</span><span class="s4">f&quot;_</span><span class="s3">{</span><span class="s1">dtype.__name__</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s3">,</span>
+          <span class="s1">dtype=dtype</span><span class="s3">,</span>
+      <span class="s1">)</span>
+      <span class="s3">for </span><span class="s1">dtype </span><span class="s3">in </span><span class="s1">set(jtu.dtypes.complex)</span>
+  <span class="s1">)</span>
+  <span class="s3">def </span><span class="s1">test_complex_input_gradient(self</span><span class="s3">, </span><span class="s1">dtype):</span>
+    <span class="s3">def </span><span class="s1">tf_f(x):</span>
+      <span class="s1">res = tf.math.sin(x)</span>
+      <span class="s3">return </span><span class="s1">tf.reduce_sum(res)</span>
+
+    <span class="s1">x = jnp.array([(</span><span class="s5">5.0 </span><span class="s1">+ </span><span class="s5">4.0j</span><span class="s1">)</span><span class="s3">, </span><span class="s1">(</span><span class="s5">6.0 </span><span class="s1">+ </span><span class="s5">3.0j</span><span class="s1">)</span><span class="s3">, </span><span class="s1">(</span><span class="s5">7.0 </span><span class="s1">+ </span><span class="s5">8.0j</span><span class="s1">)]).astype(dtype)</span>
+
+    <span class="s1">jax_f = jax2tf.call_tf(tf_f)</span>
+    <span class="s1">tf_f_rt = jax2tf.convert(jax_f)</span>
+
+    <span class="s0"># Eager mode</span>
+    <span class="s1">self.assertAllClose(tf_f(x)</span><span class="s3">, </span><span class="s1">tf_f_rt(x))</span>
+
+    <span class="s0"># tf.function context</span>
+    <span class="s1">self.assertAllClose(tf.function(tf_f)(x)</span><span class="s3">, </span><span class="s1">tf.function(tf_f_rt)(x))</span>
+
+    <span class="s0"># tf.function context with jit_compiled=True</span>
+    <span class="s1">self.assertAllClose(</span>
+        <span class="s1">tf.function(tf_f</span><span class="s3">, </span><span class="s1">jit_compile=</span><span class="s3">True</span><span class="s1">)(x)</span><span class="s3">,</span>
+        <span class="s1">tf.function(tf_f_rt</span><span class="s3">, </span><span class="s1">jit_compile=</span><span class="s3">True</span><span class="s1">)(x)</span><span class="s3">,</span>
+    <span class="s1">)</span>
+
+    <span class="s0"># RoundTrip test for the gradient</span>
+    <span class="s1">grad_fun_jax = jax.grad(jax2tf.call_tf(tf_f)</span><span class="s3">, </span><span class="s1">holomorphic=</span><span class="s3">True</span><span class="s1">)</span>
+    <span class="s1">grad_fun_jax_rt = jax2tf.call_tf(jax2tf.convert(grad_fun_jax))</span>
+
+    <span class="s0"># Eager mode</span>
+    <span class="s1">self.assertAllClose(grad_fun_jax(x)</span><span class="s3">, </span><span class="s1">grad_fun_jax_rt(x))</span>
+
+    <span class="s0"># Jit mode</span>
+    <span class="s1">self.assertAllClose(jax.jit(grad_fun_jax)(x)</span><span class="s3">, </span><span class="s1">jax.jit(grad_fun_jax_rt)(x))</span>
+
+
+<span class="s3">class </span><span class="s1">RoundTripToTfTest(tf_test_util.JaxToTfTestCase):</span>
+  <span class="s2">&quot;Reloading output of call_tf into TF with jax2tf.&quot;</span>
+
+  <span class="s3">def </span><span class="s1">setUp(self):</span>
+    <span class="s3">if </span><span class="s1">tf </span><span class="s3">is None</span><span class="s1">:</span>
+      <span class="s3">raise </span><span class="s1">unittest.SkipTest(</span><span class="s4">&quot;Test requires tensorflow&quot;</span><span class="s1">)</span>
+    <span class="s0"># TODO(b/171320191): this line works around a missing context initialization</span>
+    <span class="s0"># bug in TensorFlow.</span>
+    <span class="s1">_ = tf.add(</span><span class="s5">1</span><span class="s3">, </span><span class="s5">1</span><span class="s1">)</span>
+    <span class="s1">super().setUp()</span>
+
+  <span class="s3">def </span><span class="s1">test_alternate(self):</span>
+    <span class="s0"># Alternate sin/cos with sin in TF and cos in JAX</span>
+    <span class="s1">f_tf_inner = tf.math.sin</span>
+    <span class="s3">def </span><span class="s1">f_jax(x_jax):</span>
+      <span class="s1">y_jax = jnp.cos(x_jax)</span>
+      <span class="s1">z_jax = jax2tf.call_tf(f_tf_inner)(y_jax)</span>
+      <span class="s3">return </span><span class="s1">jnp.cos(z_jax)</span>
+    <span class="s3">def </span><span class="s1">f_tf_outer(x_tf):</span>
+      <span class="s1">y_tf = tf.math.sin(x_tf)</span>
+      <span class="s1">z_tf = jax2tf.convert(f_jax)(y_tf)</span>
+      <span class="s3">return </span><span class="s1">tf.math.sin(z_tf)</span>
+
+    <span class="s1">x = np.float32(</span><span class="s5">0.7</span><span class="s1">)</span>
+
+    <span class="s1">self.assertAllClose(np.sin(np.cos(np.sin(np.cos(np.sin(x)))))</span><span class="s3">,</span>
+                        <span class="s1">f_tf_outer(x).numpy())</span>
+    <span class="s1">xv = tf.Variable(x)</span>
+    <span class="s3">with </span><span class="s1">tf.GradientTape() </span><span class="s3">as </span><span class="s1">tape:</span>
+      <span class="s1">res = f_tf_outer(xv)</span>
+    <span class="s1">g_tf = tape.gradient(res</span><span class="s3">, </span><span class="s1">xv)</span>
+    <span class="s1">_</span><span class="s3">, </span><span class="s1">gf = tf_test_util.ComputeTfValueAndGrad(f_tf_outer</span><span class="s3">, </span><span class="s1">(x</span><span class="s3">,</span><span class="s1">))</span>
+    <span class="s0"># Eager</span>
+    <span class="s1">expected_res = np.sin(np.cos(np.sin(np.cos(np.sin(x)))))</span>
+    <span class="s1">self.assertAllClose(expected_res</span><span class="s3">, </span><span class="s1">f_tf_outer(x).numpy())</span>
+
+    <span class="s0"># Gradient</span>
+    <span class="s1">expected_grad = (np.cos(np.cos(np.sin(np.cos(np.sin(x))))) *</span>
+                     <span class="s1">np.sin(np.sin(np.cos(np.sin(x)))) *</span>
+                     <span class="s1">np.cos(np.cos(np.sin(x))) *</span>
+                     <span class="s1">np.sin(np.sin(x)) *</span>
+                     <span class="s1">np.cos(x))</span>
+    <span class="s1">self.assertAllClose(expected_grad</span><span class="s3">, </span><span class="s1">g_tf.numpy())</span>
+
+    <span class="s0"># Graph</span>
+    <span class="s1">self.assertAllClose(expected_res</span><span class="s3">,</span>
+                        <span class="s1">tf.function(f_tf_outer</span><span class="s3">, </span><span class="s1">autograph=</span><span class="s3">False</span><span class="s1">)(x).numpy())</span>
+
+    <span class="s0"># Compiled</span>
+    <span class="s1">self.assertAllClose(expected_res</span><span class="s3">,</span>
+                        <span class="s1">tf.function(f_tf_outer</span><span class="s3">, </span><span class="s1">autograph=</span><span class="s3">False,</span>
+                                    <span class="s1">jit_compile=</span><span class="s3">True</span><span class="s1">)(x).numpy())</span>
+
+  <span class="s3">def </span><span class="s1">test_saved_model(self):</span>
+    <span class="s1">x = np.array([</span><span class="s5">.7</span><span class="s3">, </span><span class="s5">.8</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s3">def </span><span class="s1">fun_tf(x):</span>
+      <span class="s3">return </span><span class="s1">tf.math.sin(x)</span>
+    <span class="s3">def </span><span class="s1">fun_jax(x):</span>
+      <span class="s3">return </span><span class="s1">jax2tf.call_tf(fun_tf)(x)</span>
+
+    <span class="s0"># Now convert and save to SavedModel</span>
+    <span class="s1">fun_tf_rt = jax2tf.convert(fun_jax)</span>
+    <span class="s1">res = fun_tf_rt(x)</span>
+    <span class="s1">self.assertAllClose(np.sin(x)</span><span class="s3">, </span><span class="s1">res.numpy())</span>
+
+    <span class="s1">res = tf.function(fun_tf_rt</span><span class="s3">, </span><span class="s1">autograph=</span><span class="s3">False</span><span class="s1">)(x)</span>
+    <span class="s1">self.assertAllClose(np.sin(x)</span><span class="s3">, </span><span class="s1">res.numpy())</span>
+
+    <span class="s1">res = tf.function(fun_tf_rt</span><span class="s3">, </span><span class="s1">jit_compile=</span><span class="s3">True, </span><span class="s1">autograph=</span><span class="s3">False</span><span class="s1">)(x)</span>
+    <span class="s1">self.assertAllClose(np.sin(x)</span><span class="s3">, </span><span class="s1">res.numpy())</span>
+
+    <span class="s1">reloaded_f</span><span class="s3">, </span><span class="s1">_ = tf_test_util.SaveAndLoadFunction(</span>
+        <span class="s1">fun_tf_rt</span><span class="s3">, </span><span class="s1">input_args=[x])</span>
+    <span class="s1">res = reloaded_f(x)</span>
+    <span class="s1">self.assertAllClose(np.sin(x)</span><span class="s3">, </span><span class="s1">res.numpy())</span>
+
+  <span class="s3">def </span><span class="s1">test_saved_model_polymorphic_input_static_output(self):</span>
+    <span class="s1">x = np.array([</span><span class="s5">.7</span><span class="s3">, </span><span class="s5">.8</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s3">def </span><span class="s1">fun_tf(x):</span>
+      <span class="s3">return </span><span class="s1">tf.math.reduce_sum(tf.math.sin(x))</span>
+    <span class="s3">def </span><span class="s1">fun_jax(x):</span>
+      <span class="s3">return </span><span class="s1">jax2tf.call_tf(fun_tf)(x)</span>
+
+    <span class="s0"># Now convert and save to SavedModel</span>
+    <span class="s1">fun_tf_rt = jax2tf.convert(fun_jax)</span>
+    <span class="s1">res = fun_tf_rt(x)</span>
+    <span class="s1">self.assertAllClose(fun_tf(x)</span><span class="s3">, </span><span class="s1">res.numpy())</span>
+
+    <span class="s1">res = tf.function(fun_tf_rt</span><span class="s3">, </span><span class="s1">autograph=</span><span class="s3">False</span><span class="s1">)(x)</span>
+    <span class="s1">self.assertAllClose(fun_tf(x)</span><span class="s3">, </span><span class="s1">res.numpy())</span>
+
+    <span class="s1">res = tf.function(fun_tf_rt</span><span class="s3">, </span><span class="s1">jit_compile=</span><span class="s3">True, </span><span class="s1">autograph=</span><span class="s3">False</span><span class="s1">)(x)</span>
+    <span class="s1">self.assertAllClose(fun_tf(x)</span><span class="s3">, </span><span class="s1">res.numpy())</span>
+
+    <span class="s1">reloaded_f</span><span class="s3">, </span><span class="s1">_ = tf_test_util.SaveAndLoadFunction(</span>
+        <span class="s1">fun_tf_rt</span><span class="s3">, </span><span class="s1">input_args=[x])</span>
+    <span class="s1">res = reloaded_f(x)</span>
+    <span class="s1">self.assertAllClose(fun_tf(x)</span><span class="s3">, </span><span class="s1">res.numpy())</span>
+
+  <span class="s3">def </span><span class="s1">test_function_dynamic_shape(self):</span>
+    <span class="s0"># Call a function for which shape inference does not give an output</span>
+    <span class="s0"># shape.</span>
+    <span class="s1">x = np.array([-</span><span class="s5">1</span><span class="s3">, </span><span class="s5">0</span><span class="s3">, </span><span class="s5">1</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.int32)</span>
+    <span class="s3">def </span><span class="s1">fun_tf(x):  </span><span class="s0"># x:i32[3]</span>
+      <span class="s0"># The shape depends on the value of x</span>
+      <span class="s3">return </span><span class="s1">tf.cond(x[</span><span class="s5">0</span><span class="s1">] &gt;= </span><span class="s5">0</span><span class="s3">, lambda</span><span class="s1">: x</span><span class="s3">, lambda</span><span class="s1">: x[</span><span class="s5">1</span><span class="s1">:])</span>
+
+    <span class="s0"># Call in eager mode. Should work!</span>
+    <span class="s1">res1 = jax2tf.call_tf(fun_tf)(x)</span>
+    <span class="s1">expected = x[</span><span class="s5">1</span><span class="s1">:]</span>
+    <span class="s1">self.assertAllClose(expected</span><span class="s3">, </span><span class="s1">res1</span><span class="s3">, </span><span class="s1">check_dtypes=</span><span class="s3">False</span><span class="s1">)</span>
+
+    <span class="s0"># Now under jit, should fail because the function is not compilable</span>
+    <span class="s3">with </span><span class="s1">self.assertRaisesRegex(ValueError</span><span class="s3">, </span><span class="s1">_call_tf_dynamic_shape_error):</span>
+      <span class="s1">fun_jax = jax.jit(jax2tf.call_tf(fun_tf))</span>
+      <span class="s1">fun_jax(x)</span>
+
+    <span class="s0"># TODO(necula): this should work in op-by-op mode, but it fails because</span>
+    <span class="s0"># jax2tf.convert does abstract evaluation.</span>
+    <span class="s3">with </span><span class="s1">self.assertRaisesRegex(ValueError</span><span class="s3">, </span><span class="s1">_call_tf_dynamic_shape_error):</span>
+      <span class="s1">fun_tf_rt = jax2tf.convert(jax2tf.call_tf(fun_tf))</span>
+      <span class="s1">fun_tf_rt(x)</span>
+
+  <span class="s1">@_parameterized_jit</span>
+  <span class="s3">def </span><span class="s1">test_shape_poly_static_output_shape(self</span><span class="s3">, </span><span class="s1">with_jit=</span><span class="s3">True</span><span class="s1">):</span>
+    <span class="s3">if </span><span class="s1">config.jax2tf_default_native_serialization:</span>
+      <span class="s3">raise </span><span class="s1">unittest.SkipTest(</span><span class="s4">&quot;TODO(b/268386622): call_tf with shape polymorphism and native serialization.&quot;</span><span class="s1">)</span>
+    <span class="s1">x = np.array([</span><span class="s5">0.7</span><span class="s3">, </span><span class="s5">0.8</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+
+    <span class="s3">def </span><span class="s1">fun_tf(x):</span>
+      <span class="s3">return </span><span class="s1">tf.math.reduce_sum(tf.math.sin(x))</span>
+
+    <span class="s1">fun_jax = jax2tf.call_tf(fun_tf)</span>
+    <span class="s1">fun_tf_rt = _maybe_tf_jit(with_jit</span><span class="s3">,</span>
+        <span class="s1">jax2tf.convert(fun_jax</span><span class="s3">, </span><span class="s1">polymorphic_shapes=[</span><span class="s4">&quot;b, ...&quot;</span><span class="s1">]))</span>
+    <span class="s1">self.assertAllClose(fun_tf(x)</span><span class="s3">, </span><span class="s1">fun_tf_rt(x))</span>
+
+  <span class="s1">@_parameterized_jit</span>
+  <span class="s3">def </span><span class="s1">test_shape_poly(self</span><span class="s3">, </span><span class="s1">with_jit=</span><span class="s3">False</span><span class="s1">):</span>
+    <span class="s3">if </span><span class="s1">config.jax2tf_default_native_serialization:</span>
+      <span class="s3">raise </span><span class="s1">unittest.SkipTest(</span><span class="s4">&quot;TODO(b/268386622): call_tf with shape polymorphism and native serialization.&quot;</span><span class="s1">)</span>
+    <span class="s1">x = np.array([</span><span class="s5">7</span><span class="s3">, </span><span class="s5">8</span><span class="s3">, </span><span class="s5">9</span><span class="s3">, </span><span class="s5">10</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s3">def </span><span class="s1">fun_jax(x):</span>
+      <span class="s1">y = jax2tf.call_tf(tf.math.sin</span><span class="s3">,</span>
+                         <span class="s1">output_shape_dtype=jax.ShapeDtypeStruct(x.shape</span><span class="s3">, </span><span class="s1">x.dtype))(x)</span>
+      <span class="s1">z = jnp.cos(y)</span>
+      <span class="s1">w = jax2tf.call_tf(</span><span class="s3">lambda </span><span class="s1">z: tf.concat([z</span><span class="s3">, </span><span class="s1">z]</span><span class="s3">, </span><span class="s1">axis=</span><span class="s5">0</span><span class="s1">)</span><span class="s3">,</span>
+                         <span class="s1">output_shape_dtype=jax.ShapeDtypeStruct((</span><span class="s5">2 </span><span class="s1">* z.shape[</span><span class="s5">0</span><span class="s1">]</span><span class="s3">,</span><span class="s1">)</span><span class="s3">, </span><span class="s1">z.dtype))(z)</span>
+      <span class="s3">assert </span><span class="s1">w.shape[</span><span class="s5">0</span><span class="s1">] == </span><span class="s5">2 </span><span class="s1">* x.shape[</span><span class="s5">0</span><span class="s1">]</span>
+      <span class="s3">return </span><span class="s1">w</span>
+
+    <span class="s1">fun_tf_rt = _maybe_tf_jit(with_jit</span><span class="s3">,</span>
+        <span class="s1">jax2tf.convert(fun_jax</span><span class="s3">, </span><span class="s1">polymorphic_shapes=[</span><span class="s4">&quot;b, ...&quot;</span><span class="s1">]))</span>
+    <span class="s1">res_tf = fun_tf_rt(x)</span>
+    <span class="s1">self.assertAllClose(fun_jax(x)</span><span class="s3">, </span><span class="s1">res_tf)</span>
+
+  <span class="s1">@_parameterized_jit</span>
+  <span class="s3">def </span><span class="s1">test_shape_poly_pytree_result(self</span><span class="s3">, </span><span class="s1">with_jit=</span><span class="s3">True</span><span class="s1">):</span>
+    <span class="s3">if </span><span class="s1">config.jax2tf_default_native_serialization:</span>
+      <span class="s3">raise </span><span class="s1">unittest.SkipTest(</span><span class="s4">&quot;TODO(b/268386622): call_tf with shape polymorphism and native serialization.&quot;</span><span class="s1">)</span>
+    <span class="s1">x = np.array([</span><span class="s5">7</span><span class="s3">, </span><span class="s5">8</span><span class="s3">, </span><span class="s5">9</span><span class="s3">, </span><span class="s5">10</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s3">def </span><span class="s1">fun_jax(x):</span>
+      <span class="s0"># Returns a tuple</span>
+      <span class="s1">y = jax2tf.call_tf(</span><span class="s3">lambda </span><span class="s1">x: (x</span><span class="s3">, </span><span class="s1">tf.concat([x</span><span class="s3">, </span><span class="s1">x]</span><span class="s3">, </span><span class="s1">axis=</span><span class="s5">0</span><span class="s1">))</span><span class="s3">,</span>
+          <span class="s1">output_shape_dtype=(jax.ShapeDtypeStruct(x.shape</span><span class="s3">, </span><span class="s1">x.dtype)</span><span class="s3">,</span>
+                              <span class="s1">jax.ShapeDtypeStruct((</span><span class="s5">2 </span><span class="s1">* x.shape[</span><span class="s5">0</span><span class="s1">]</span><span class="s3">,</span><span class="s1">)</span><span class="s3">, </span><span class="s1">x.dtype)))(x)</span>
+      <span class="s3">assert </span><span class="s1">y[</span><span class="s5">0</span><span class="s1">].shape[</span><span class="s5">0</span><span class="s1">] == x.shape[</span><span class="s5">0</span><span class="s1">]</span>
+      <span class="s3">assert </span><span class="s1">y[</span><span class="s5">1</span><span class="s1">].shape[</span><span class="s5">0</span><span class="s1">] == </span><span class="s5">2 </span><span class="s1">* x.shape[</span><span class="s5">0</span><span class="s1">]</span>
+      <span class="s3">return </span><span class="s1">y</span>
+
+    <span class="s1">fun_tf_rt = _maybe_tf_jit(with_jit</span><span class="s3">,</span>
+        <span class="s1">jax2tf.convert(fun_jax</span><span class="s3">, </span><span class="s1">polymorphic_shapes=[</span><span class="s4">&quot;b, ...&quot;</span><span class="s1">]))</span>
+    <span class="s1">res_tf = fun_tf_rt(x)</span>
+    <span class="s1">self.assertAllClose(fun_jax(x)</span><span class="s3">, </span><span class="s1">res_tf)</span>
+
+  <span class="s1">@_parameterized_jit</span>
+  <span class="s3">def </span><span class="s1">test_shape_poly_error_no_output_shape_dtype(self</span><span class="s3">, </span><span class="s1">with_jit=</span><span class="s3">True</span><span class="s1">):</span>
+    <span class="s1">x = np.array([</span><span class="s5">7</span><span class="s3">, </span><span class="s5">8</span><span class="s3">, </span><span class="s5">9</span><span class="s3">, </span><span class="s5">10</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s3">def </span><span class="s1">fun_jax(x):</span>
+      <span class="s3">return </span><span class="s1">jax2tf.call_tf(tf.math.sin)(x)</span>
+
+    <span class="s1">fun_tf_rt = _maybe_tf_jit(with_jit</span><span class="s3">,</span>
+        <span class="s1">jax2tf.convert(fun_jax</span><span class="s3">, </span><span class="s1">polymorphic_shapes=[</span><span class="s4">&quot;b, ...&quot;</span><span class="s1">]))</span>
+    <span class="s3">with </span><span class="s1">self.assertRaisesRegex(ValueError</span><span class="s3">, </span><span class="s1">_call_tf_dynamic_shape_error):</span>
+      <span class="s1">fun_tf_rt(x)</span>
+
+  <span class="s1">@_parameterized_jit</span>
+  <span class="s3">def </span><span class="s1">test_shape_poly_error_mismatch_output_shape_dtype_tree(self</span><span class="s3">, </span><span class="s1">with_jit=</span><span class="s3">False</span><span class="s1">):</span>
+    <span class="s1">x = np.array([</span><span class="s5">7</span><span class="s3">, </span><span class="s5">8</span><span class="s3">, </span><span class="s5">9</span><span class="s3">, </span><span class="s5">10</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s3">def </span><span class="s1">fun_jax(x):</span>
+      <span class="s3">return </span><span class="s1">jax2tf.call_tf(tf.math.sin</span><span class="s3">,</span>
+          <span class="s1">output_shape_dtype=(jax.ShapeDtypeStruct(x.shape</span><span class="s3">, </span><span class="s1">x.dtype)</span><span class="s3">,</span>
+                              <span class="s1">jax.ShapeDtypeStruct(x.shape</span><span class="s3">, </span><span class="s1">x.dtype)))(x)</span>
+
+    <span class="s1">fun_tf_rt = _maybe_tf_jit(with_jit</span><span class="s3">,</span>
+        <span class="s1">jax2tf.convert(fun_jax</span><span class="s3">, </span><span class="s1">polymorphic_shapes=[</span><span class="s4">&quot;b, ...&quot;</span><span class="s1">]))</span>
+
+    <span class="s3">with </span><span class="s1">self.assertRaisesRegex(</span>
+        <span class="s1">ValueError</span><span class="s3">,</span>
+        <span class="s4">&quot;The pytree of the TensorFlow function results does not match the pytree of the declared output_shape_dtype&quot;</span><span class="s1">):</span>
+      <span class="s1">fun_tf_rt(x)</span>
+
+  <span class="s1">@parameterized.named_parameters(</span>
+      <span class="s1">_named_test(with_jit=with_jit</span><span class="s3">, </span><span class="s1">kind=kind)</span>
+      <span class="s3">for </span><span class="s1">with_jit </span><span class="s3">in </span><span class="s1">[</span><span class="s3">True, False</span><span class="s1">]</span>
+      <span class="s3">for </span><span class="s1">kind </span><span class="s3">in </span><span class="s1">[</span><span class="s4">&quot;bad_rank&quot;</span><span class="s3">, </span><span class="s4">&quot;bad_dim&quot;</span><span class="s3">, </span><span class="s4">&quot;bad_dtype&quot;</span><span class="s3">, </span><span class="s4">&quot;bad_dtype_x64&quot;</span><span class="s1">])</span>
+  <span class="s3">def </span><span class="s1">test_shape_poly_error_mismatch_output_shape_dtype(self</span><span class="s3">, </span><span class="s1">with_jit=</span><span class="s3">False, </span><span class="s1">kind=</span><span class="s4">&quot;bad_rank&quot;</span><span class="s1">):</span>
+    <span class="s1">x = np.array([</span><span class="s5">7</span><span class="s3">, </span><span class="s5">8</span><span class="s3">, </span><span class="s5">9</span><span class="s3">, </span><span class="s5">10</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+
+    <span class="s3">if </span><span class="s1">kind == </span><span class="s4">&quot;bad_rank&quot;</span><span class="s1">:</span>
+      <span class="s3">def </span><span class="s1">fun_jax(x):</span>
+        <span class="s3">return </span><span class="s1">jax2tf.call_tf(</span><span class="s3">lambda </span><span class="s1">x: x</span><span class="s3">,</span>
+                              <span class="s0"># Wrong shape rank</span>
+                              <span class="s1">output_shape_dtype=jax.ShapeDtypeStruct(()</span><span class="s3">, </span><span class="s1">x.dtype))(x)</span>
+    <span class="s3">elif </span><span class="s1">kind == </span><span class="s4">&quot;bad_dim&quot;</span><span class="s1">:</span>
+      <span class="s3">def </span><span class="s1">fun_jax(x):</span>
+        <span class="s1">bad_shape = (</span><span class="s5">5 </span><span class="s1">+ x.shape[</span><span class="s5">0</span><span class="s1">]</span><span class="s3">,</span><span class="s1">)</span>
+        <span class="s1">y = jax2tf.call_tf(</span><span class="s3">lambda </span><span class="s1">x: x</span><span class="s3">,</span>
+                           <span class="s0"># Wrong dimension</span>
+                           <span class="s1">output_shape_dtype=jax.ShapeDtypeStruct(bad_shape</span><span class="s3">, </span><span class="s1">x.dtype))(x)</span>
+        <span class="s0"># JAX will believe that the following is Ok, leading to downstream error in TF</span>
+        <span class="s3">return </span><span class="s1">y + jnp.ones(bad_shape</span><span class="s3">, </span><span class="s1">dtype=x.dtype)</span>
+    <span class="s3">elif </span><span class="s1">kind == </span><span class="s4">&quot;bad_dtype&quot;</span><span class="s1">:</span>
+      <span class="s3">def </span><span class="s1">fun_jax(x):</span>
+        <span class="s3">return </span><span class="s1">jax2tf.call_tf(</span><span class="s3">lambda </span><span class="s1">x: x</span><span class="s3">,</span>
+                              <span class="s1">output_shape_dtype=jax.ShapeDtypeStruct(x.shape</span><span class="s3">, </span><span class="s1">np.int32))(x)</span>
+    <span class="s3">elif </span><span class="s1">kind == </span><span class="s4">&quot;bad_dtype_x64&quot;</span><span class="s1">:</span>
+      <span class="s3">def </span><span class="s1">fun_jax(x):</span>
+        <span class="s3">return </span><span class="s1">jax2tf.call_tf(</span><span class="s3">lambda </span><span class="s1">x: x * np.float64(</span><span class="s5">3.</span><span class="s1">)</span><span class="s3">,</span>
+                              <span class="s1">output_shape_dtype=jax.ShapeDtypeStruct(x.shape</span><span class="s3">, </span><span class="s1">np.float64))(x)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+      <span class="s3">assert False</span>
+    <span class="s1">expect_ex = ValueError</span>
+    <span class="s1">expect_error = </span><span class="s4">r&quot;The shapes or dtypes returned by the TensorFlow function do not match the declared output_shape_dtype&quot;</span>
+
+    <span class="s0"># Call without shape polymorphism</span>
+    <span class="s1">fun_tf_rt = _maybe_tf_jit(with_jit</span><span class="s3">, </span><span class="s1">jax2tf.convert(fun_jax))</span>
+    <span class="s3">with </span><span class="s1">self.assertRaisesRegex(expect_ex</span><span class="s3">, </span><span class="s1">expect_error):</span>
+      <span class="s1">fun_tf_rt(x)</span>
+
+    <span class="s0"># Now with shape polymorphism</span>
+    <span class="s3">if </span><span class="s1">kind == </span><span class="s4">&quot;bad_dim&quot; </span><span class="s3">and </span><span class="s1">with_jit:</span>
+      <span class="s0"># TODO: in jit more the error pops up later, at AddV2</span>
+      <span class="s1">expect_error = </span><span class="s4">&quot;Dimensions must be equal, but are 4 and 9 for .* AddV2&quot;</span>
+    <span class="s3">if </span><span class="s1">kind == </span><span class="s4">&quot;bad_dim&quot; </span><span class="s3">and </span><span class="s1">config.jax2tf_default_native_serialization:</span>
+      <span class="s0"># TODO(b/268386622): call_tf with shape polymorphism and native serialization.</span>
+      <span class="s1">expect_error = </span><span class="s4">&quot;Error compiling TensorFlow function. call_tf can used .* only with compilable functions with static output shapes&quot;</span>
+    <span class="s1">fun_tf_rt = _maybe_tf_jit(with_jit</span><span class="s3">,</span>
+        <span class="s1">jax2tf.convert(fun_jax</span><span class="s3">, </span><span class="s1">polymorphic_shapes=[</span><span class="s4">&quot;b, ...&quot;</span><span class="s1">]))</span>
+    <span class="s3">with </span><span class="s1">self.assertRaisesRegex(expect_ex</span><span class="s3">, </span><span class="s1">expect_error):</span>
+      <span class="s1">fun_tf_rt(x)</span>
+
+  <span class="s3">def </span><span class="s1">test_inner_native_serialization(self):</span>
+    <span class="s0"># Two nested jax2tf, the inner one being with native serialization</span>
+    <span class="s1">x = np.ones((</span><span class="s5">3</span><span class="s3">,</span><span class="s1">)</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s3">def </span><span class="s1">f_inner_jax(x):</span>
+      <span class="s3">return </span><span class="s1">jnp.sin(x)</span>
+    <span class="s3">def </span><span class="s1">f_outer_jax(x):</span>
+      <span class="s1">f_inner_tf = jax2tf.convert(f_inner_jax</span><span class="s3">, </span><span class="s1">native_serialization=</span><span class="s3">True</span><span class="s1">)</span>
+      <span class="s3">return </span><span class="s1">jnp.cos(jax2tf.call_tf(f_inner_tf)(x))</span>
+
+    <span class="s1">f_outer_tf = tf.function(</span>
+        <span class="s1">jax2tf.convert(f_outer_jax</span><span class="s3">, </span><span class="s1">native_serialization=</span><span class="s3">False</span><span class="s1">)</span><span class="s3">,</span>
+        <span class="s1">autograph=</span><span class="s3">False</span><span class="s1">)</span>
+    <span class="s1">f_outer_graph = str(f_outer_tf.get_concrete_function(tf.convert_to_tensor(x)).graph.as_graph_def())</span>
+    <span class="s0"># Quick way to check that there is an XlaCallModule op, and a Cos op, but no Sin op</span>
+    <span class="s1">self.assertIn(</span><span class="s4">'op: &quot;Cos&quot;'</span><span class="s3">, </span><span class="s1">f_outer_graph)</span>
+    <span class="s1">self.assertIn(</span><span class="s4">'op: &quot;XlaCallModule&quot;'</span><span class="s3">, </span><span class="s1">f_outer_graph)</span>
+    <span class="s1">self.assertNotIn(</span><span class="s4">'op: &quot;Sin&quot;'</span><span class="s3">, </span><span class="s1">f_outer_graph)</span>
+
+  <span class="s1">@parameterized.named_parameters(</span>
+      <span class="s1">_named_test(f2_function=f2_function</span><span class="s3">, </span><span class="s1">f2_saved_model=f2_saved_model</span><span class="s3">,</span>
+                  <span class="s1">f4_function=f4_function</span><span class="s3">, </span><span class="s1">f4_saved_model=f4_saved_model)</span>
+      <span class="s3">for </span><span class="s1">f2_function </span><span class="s3">in </span><span class="s1">[</span><span class="s3">True, False</span><span class="s1">]</span>
+      <span class="s3">for </span><span class="s1">f2_saved_model </span><span class="s3">in </span><span class="s1">[</span><span class="s3">True, False</span><span class="s1">]</span>
+      <span class="s3">for </span><span class="s1">f4_function </span><span class="s3">in </span><span class="s1">[</span><span class="s3">True, False</span><span class="s1">]</span>
+      <span class="s3">for </span><span class="s1">f4_saved_model </span><span class="s3">in </span><span class="s1">[</span><span class="s3">True, False</span><span class="s1">])</span>
+  <span class="s3">def </span><span class="s1">test_several_round_trips(self</span><span class="s3">,</span>
+                               <span class="s1">f2_function=</span><span class="s3">False, </span><span class="s1">f2_saved_model=</span><span class="s3">False,</span>
+                               <span class="s1">f4_function=</span><span class="s3">False, </span><span class="s1">f4_saved_model=</span><span class="s3">False</span><span class="s1">):</span>
+    <span class="s1">x = np.array(</span><span class="s5">.7</span><span class="s3">, </span><span class="s1">dtype=np.float32)</span>
+    <span class="s0"># f(n)(x) = 2. * x^n</span>
+    <span class="s3">def </span><span class="s1">f(n):</span>
+      <span class="s3">def </span><span class="s1">fn(x):</span>
+        <span class="s1">acc = np.array(</span><span class="s5">2.</span><span class="s3">, </span><span class="s1">dtype=x.dtype)</span>
+        <span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">range(n):</span>
+          <span class="s1">acc *= x</span>
+        <span class="s3">return </span><span class="s1">acc</span>
+      <span class="s3">return </span><span class="s1">fn</span>
+
+    <span class="s1">f2_tf = </span><span class="s3">lambda </span><span class="s1">x: x * jax2tf.convert(f(</span><span class="s5">1</span><span class="s1">))(x)</span>
+    <span class="s3">if </span><span class="s1">f2_function:</span>
+      <span class="s1">f2_tf = tf.function(f2_tf</span><span class="s3">, </span><span class="s1">autograph=</span><span class="s3">False</span><span class="s1">)</span>
+    <span class="s3">if </span><span class="s1">f2_saved_model:</span>
+      <span class="s1">f2_tf</span><span class="s3">, </span><span class="s1">_ = tf_test_util.SaveAndLoadFunction(f2_tf</span><span class="s3">, </span><span class="s1">input_args=[x])</span>
+
+    <span class="s1">self.assertAllClose(f(</span><span class="s5">2</span><span class="s1">)(x)</span><span class="s3">, </span><span class="s1">f2_tf(x).numpy())</span>
+    <span class="s1">_</span><span class="s3">, </span><span class="s1">(g_f2_ft</span><span class="s3">,</span><span class="s1">) = tf_test_util.ComputeTfValueAndGrad(f2_tf</span><span class="s3">, </span><span class="s1">[x])</span>
+    <span class="s1">self.assertAllClose(jax.grad(f(</span><span class="s5">2</span><span class="s1">))(x)</span><span class="s3">, </span><span class="s1">g_f2_ft.numpy())</span>
+
+    <span class="s1">f3_jax = </span><span class="s3">lambda </span><span class="s1">x: x * jax2tf.call_tf(f2_tf)(x)</span>
+    <span class="s1">self.assertAllClose(f(</span><span class="s5">3</span><span class="s1">)(x)</span><span class="s3">, </span><span class="s1">f3_jax(x))</span>
+    <span class="s1">self.assertAllClose(f(</span><span class="s5">3</span><span class="s1">)(x)</span><span class="s3">, </span><span class="s1">jax.jit(f3_jax)(x))</span>
+    <span class="s1">self.assertAllClose(jax.grad(f(</span><span class="s5">3</span><span class="s1">))(x)</span><span class="s3">, </span><span class="s1">jax.grad(f3_jax)(x))</span>
+
+    <span class="s1">f4_tf = </span><span class="s3">lambda </span><span class="s1">x: x * jax2tf.convert(f3_jax)(x)</span>
+    <span class="s1">self.assertAllClose(f(</span><span class="s5">4</span><span class="s1">)(x)</span><span class="s3">, </span><span class="s1">f4_tf(x).numpy())</span>
+    <span class="s1">_</span><span class="s3">, </span><span class="s1">(g_f4_ft</span><span class="s3">,</span><span class="s1">) = tf_test_util.ComputeTfValueAndGrad(f4_tf</span><span class="s3">, </span><span class="s1">[x])</span>
+    <span class="s1">self.assertAllClose(jax.grad(f(</span><span class="s5">4</span><span class="s1">))(x)</span><span class="s3">, </span><span class="s1">g_f4_ft.numpy())</span>
+
+    <span class="s3">if </span><span class="s1">f4_function:</span>
+      <span class="s1">f4_tf = tf.function(f4_tf</span><span class="s3">, </span><span class="s1">autograph=</span><span class="s3">False</span><span class="s1">)</span>
+    <span class="s3">if </span><span class="s1">f4_saved_model:</span>
+      <span class="s1">f4_tf</span><span class="s3">, </span><span class="s1">_ = tf_test_util.SaveAndLoadFunction(f4_tf</span><span class="s3">, </span><span class="s1">input_args=[x])</span>
+    <span class="s1">self.assertAllClose(f(</span><span class="s5">4</span><span class="s1">)(x)</span><span class="s3">, </span><span class="s1">f4_tf(x).numpy())</span>
+    <span class="s1">_</span><span class="s3">, </span><span class="s1">(g_f4_ft</span><span class="s3">,</span><span class="s1">) = tf_test_util.ComputeTfValueAndGrad(f4_tf</span><span class="s3">, </span><span class="s1">[x])</span>
+    <span class="s1">self.assertAllClose(jax.grad(f(</span><span class="s5">4</span><span class="s1">))(x)</span><span class="s3">, </span><span class="s1">g_f4_ft.numpy())</span>
+
+  <span class="s1">@classmethod</span>
+  <span class="s3">def </span><span class="s1">_walk_stablehlo_operations(cls</span><span class="s3">, </span><span class="s1">op</span><span class="s3">, </span><span class="s1">cb):</span>
+    <span class="s2">&quot;&quot;&quot;walk the stablehlo operation recursive with callback function.&quot;&quot;&quot;</span>
+    <span class="s1">cb(op)</span>
+    <span class="s3">for </span><span class="s1">region </span><span class="s3">in </span><span class="s1">op.operation.regions:</span>
+      <span class="s3">for </span><span class="s1">block </span><span class="s3">in </span><span class="s1">region:</span>
+        <span class="s3">for </span><span class="s1">op </span><span class="s3">in </span><span class="s1">block:</span>
+          <span class="s1">cls._walk_stablehlo_operations(op</span><span class="s3">, </span><span class="s1">cb)</span>
+
+  <span class="s3">def </span><span class="s1">test_use_custom_call(self):</span>
+    <span class="s1">const = tf.Variable(</span><span class="s5">0.0</span><span class="s3">, </span><span class="s1">dtype=tf.float32)</span>
+
+    <span class="s1">@tf.function(jit_compile=</span><span class="s3">True</span><span class="s1">)</span>
+    <span class="s3">def </span><span class="s1">tf_func_1(x):</span>
+      <span class="s3">return </span><span class="s1">x * x + const</span>
+
+    <span class="s1">@tf.function</span>
+    <span class="s3">def </span><span class="s1">tf_func_2(x</span><span class="s3">, </span><span class="s1">y):</span>
+      <span class="s3">return </span><span class="s1">tf_func_1(x) + y</span>
+
+    <span class="s1">@tf.function</span>
+    <span class="s3">def </span><span class="s1">tf_func_3(x</span><span class="s3">, </span><span class="s1">y</span><span class="s3">, </span><span class="s1">z):</span>
+      <span class="s3">return </span><span class="s1">tf_func_2(x</span><span class="s3">, </span><span class="s1">y) + z</span><span class="s3">, </span><span class="s1">z</span>
+
+    <span class="s1">x = jnp.array(</span><span class="s5">3.0</span><span class="s3">, </span><span class="s1">dtype=jnp.float32)</span>
+    <span class="s1">y = jnp.array(</span><span class="s5">3.0</span><span class="s3">, </span><span class="s1">dtype=jnp.float32)</span>
+    <span class="s1">z = jnp.array(</span><span class="s5">5.0</span><span class="s3">, </span><span class="s1">dtype=jnp.float32)</span>
+    <span class="s1">output_shape_dtype = (</span>
+        <span class="s1">jax.ShapeDtypeStruct(x.shape</span><span class="s3">, </span><span class="s1">x.dtype)</span><span class="s3">,</span>
+        <span class="s1">jax.ShapeDtypeStruct(z.shape</span><span class="s3">, </span><span class="s1">z.dtype)</span><span class="s3">,</span>
+    <span class="s1">)</span>
+    <span class="s1">f_jax = jax.jit(jax2tf.call_tf(tf_func_3</span><span class="s3">, </span><span class="s1">use_custom_call=</span><span class="s3">False</span><span class="s1">))</span>
+    <span class="s1">stablehlo_module = f_jax.lower(x</span><span class="s3">, </span><span class="s1">y</span><span class="s3">, </span><span class="s1">z).compiler_ir(</span><span class="s4">&quot;stablehlo&quot;</span><span class="s1">)</span>
+    <span class="s1">self.assertNotIn(</span><span class="s4">&quot;stablehlo.custom_call&quot;</span><span class="s3">, </span><span class="s1">str(stablehlo_module))</span>
+
+    <span class="s1">f_jax = jax.jit(</span>
+        <span class="s1">jax2tf.call_tf(</span>
+            <span class="s1">tf_func_3</span><span class="s3">,</span>
+            <span class="s1">use_custom_call=</span><span class="s3">True,</span>
+            <span class="s1">output_shape_dtype=output_shape_dtype</span><span class="s3">,</span>
+        <span class="s1">)</span>
+    <span class="s1">)</span>
+    <span class="s1">stablehlo_module = f_jax.lower(x</span><span class="s3">, </span><span class="s1">y</span><span class="s3">, </span><span class="s1">z).compiler_ir(</span><span class="s4">&quot;stablehlo&quot;</span><span class="s1">)</span>
+    <span class="s1">self.assertIn(</span><span class="s4">&quot;stablehlo.custom_call&quot;</span><span class="s3">, </span><span class="s1">str(stablehlo_module))</span>
+
+    <span class="s1">concrete_function_flat_tf = tf_func_3.get_concrete_function(x</span><span class="s3">, </span><span class="s1">y</span><span class="s3">, </span><span class="s1">z)</span>
+    <span class="s1">expect_function_def_dict = {}</span>
+    <span class="s1">expect_function_def_dict[</span>
+        <span class="s1">concrete_function_flat_tf.function_def.signature.name</span>
+    <span class="s1">] = concrete_function_flat_tf.function_def</span>
+    <span class="s3">for </span><span class="s1">k</span><span class="s3">, </span><span class="s1">v </span><span class="s3">in </span><span class="s1">concrete_function_flat_tf.graph._functions.items():</span>
+      <span class="s1">expect_function_def_dict[k] = v.definition</span>
+
+    <span class="s1">deserialized_function_def_dict = {}</span>
+
+    <span class="s3">def </span><span class="s1">extract_func_def(op):</span>
+      <span class="s3">if </span><span class="s1">op.operation.name != </span><span class="s4">&quot;stablehlo.custom_call&quot;</span><span class="s1">:</span>
+        <span class="s3">return</span>
+      <span class="s1">tf_metadata = ir.DictAttr(op.attributes[</span><span class="s4">&quot;tf_metadata&quot;</span><span class="s1">])</span>
+      <span class="s1">function_def_list = ir.ArrayAttr(tf_metadata[</span><span class="s4">&quot;function_def_list&quot;</span><span class="s1">])</span>
+
+      <span class="s3">for </span><span class="s1">fdef_str </span><span class="s3">in </span><span class="s1">function_def_list:</span>
+        <span class="s1">fdef_str_bytes = base64.b64decode(str(fdef_str)[</span><span class="s5">1</span><span class="s1">:-</span><span class="s5">1</span><span class="s1">])</span>
+        <span class="s1">fdef = function_pb2.FunctionDef()</span>
+        <span class="s1">fdef.ParseFromString(fdef_str_bytes)</span>
+        <span class="s1">deserialized_function_def_dict.update({fdef.signature.name: fdef})</span>
+
+    <span class="s1">self._walk_stablehlo_operations(stablehlo_module</span><span class="s3">, </span><span class="s1">extract_func_def)</span>
+
+    <span class="s3">for </span><span class="s1">k</span><span class="s3">, </span><span class="s1">_ </span><span class="s3">in </span><span class="s1">expect_function_def_dict.items():</span>
+      <span class="s1">self.assertEqual(</span>
+          <span class="s1">expect_function_def_dict[k]</span><span class="s3">, </span><span class="s1">deserialized_function_def_dict[k]</span>
+      <span class="s1">)</span>
+
+  <span class="s3">def </span><span class="s1">test_use_custom_call_non_compilable(self):</span>
+    <span class="s1">deserialized_function_def_dict = {}</span>
+
+    <span class="s3">def </span><span class="s1">extract_func_def(op):</span>
+      <span class="s3">if </span><span class="s1">op.operation.name != </span><span class="s4">&quot;stablehlo.custom_call&quot;</span><span class="s1">:</span>
+        <span class="s3">return</span>
+      <span class="s1">tf_metadata = ir.DictAttr(op.attributes[</span><span class="s4">&quot;tf_metadata&quot;</span><span class="s1">])</span>
+      <span class="s1">function_def_list = ir.ArrayAttr(tf_metadata[</span><span class="s4">&quot;function_def_list&quot;</span><span class="s1">])</span>
+
+      <span class="s3">for </span><span class="s1">fdef_str </span><span class="s3">in </span><span class="s1">function_def_list:</span>
+        <span class="s1">fdef_str_bytes = base64.b64decode(str(fdef_str)[</span><span class="s5">1</span><span class="s1">:-</span><span class="s5">1</span><span class="s1">])</span>
+        <span class="s1">fdef = function_pb2.FunctionDef()</span>
+        <span class="s1">fdef.ParseFromString(fdef_str_bytes)</span>
+        <span class="s1">deserialized_function_def_dict.update({fdef.signature.name: fdef})</span>
+
+    <span class="s1">@tf.function(jit_compile=</span><span class="s3">False</span><span class="s1">)</span>
+    <span class="s3">def </span><span class="s1">my_op(x):</span>
+      <span class="s3">return </span><span class="s1">tf.py_function(np.sin</span><span class="s3">, </span><span class="s1">[x]</span><span class="s3">, </span><span class="s1">tf.float32)</span>
+
+    <span class="s1">x = jnp.ones([</span><span class="s5">10</span><span class="s1">]</span><span class="s3">, </span><span class="s1">dtype=jnp.float32)</span>
+    <span class="s1">output_shape_dtype = jax.ShapeDtypeStruct(x.shape</span><span class="s3">, </span><span class="s1">x.dtype)</span>
+    <span class="s1">f_jax = jax.jit(</span>
+        <span class="s1">jax2tf.call_tf(</span>
+            <span class="s1">my_op</span><span class="s3">,</span>
+            <span class="s1">use_custom_call=</span><span class="s3">False,</span>
+            <span class="s1">output_shape_dtype=output_shape_dtype</span><span class="s3">,</span>
+        <span class="s1">)</span>
+    <span class="s1">)</span>
+
+    <span class="s1">f_jax = jax.jit(</span>
+        <span class="s1">jax2tf.call_tf(</span>
+            <span class="s1">my_op</span><span class="s3">,</span>
+            <span class="s1">use_custom_call=</span><span class="s3">True,</span>
+            <span class="s1">output_shape_dtype=output_shape_dtype</span><span class="s3">,</span>
+        <span class="s1">)</span>
+    <span class="s1">)</span>
+    <span class="s1">stablehlo_module = f_jax.lower(x).compiler_ir(</span><span class="s4">&quot;stablehlo&quot;</span><span class="s1">)</span>
+    <span class="s1">concrete_function_flat_tf = my_op.get_concrete_function(x)</span>
+    <span class="s1">expect_function_def_dict = {}</span>
+    <span class="s1">expect_function_def_dict[</span>
+        <span class="s1">concrete_function_flat_tf.function_def.signature.name</span>
+    <span class="s1">] = concrete_function_flat_tf.function_def</span>
+    <span class="s3">for </span><span class="s1">k</span><span class="s3">, </span><span class="s1">v </span><span class="s3">in </span><span class="s1">concrete_function_flat_tf.graph._functions.items():</span>
+      <span class="s1">expect_function_def_dict[k] = v.definition</span>
+
+    <span class="s1">self._walk_stablehlo_operations(stablehlo_module</span><span class="s3">, </span><span class="s1">extract_func_def)</span>
+    <span class="s3">for </span><span class="s1">k</span><span class="s3">, </span><span class="s1">_ </span><span class="s3">in </span><span class="s1">expect_function_def_dict.items():</span>
+      <span class="s1">self.assertEqual(</span>
+          <span class="s1">expect_function_def_dict[k]</span><span class="s3">, </span><span class="s1">deserialized_function_def_dict[k]</span>
+      <span class="s1">)</span>
+
+
+<span class="s3">if </span><span class="s1">__name__ == </span><span class="s4">&quot;__main__&quot;</span><span class="s1">:</span>
+  <span class="s1">absltest.main(testLoader=jtu.JaxTestLoader())</span>
+</pre>
+</body>
+</html>
