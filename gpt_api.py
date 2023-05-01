@@ -4,8 +4,6 @@ import os
 import requests
 from bs4 import BeautifulSoup
 
-openai.api_key = "YOUR_API_KEY"
-
 
 class GPTAPI:
     def get_embeddings(self, texts, model="text-davinci-002"):
